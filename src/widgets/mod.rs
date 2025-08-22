@@ -1,13 +1,15 @@
 use std::fmt::Debug;
 
 use crossterm::event::Event;
-use ratatui::{layout::Rect, Frame};
+use ratatui::{Frame, layout::Rect};
 
 mod pull_requests;
+mod query;
 
 pub use pull_requests::PullRequestListWidget;
+pub use query::QueryWidget;
 
-pub trait Widget: Debug + Send + Sync
+pub trait Widget: Send + Sync
 // where
 //     for<'a> &'a Self: ratatui::widgets::Widget, // <-- “references to this type implement ratatui::Widget”
 {

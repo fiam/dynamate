@@ -1,0 +1,318 @@
+use std::{
+    cmp::{max, min},
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
+use aws_sdk_dynamodb::{
+    operation::{query::Query, scan::ScanOutput},
+    types::{AttributeValue, TableDescription},
+};
+use crossterm::event::{Event, KeyCode};
+use ratatui::{
+    buffer::Buffer, layout::{Constraint, Rect}, style::Style, text::Line, widgets::{Block, Clear, HighlightSpacing, Row, StatefulWidget, Table, TableState}, Frame
+};
+use tokio::{sync::OnceCell, try_join};
+
+use item_keys::ItemKeys;
+use keys_widget::KeysWidget;
+
+mod item_keys;
+mod keys_widget;
+
+#[derive(Clone)]
+pub struct QueryWidget {
+    client: Arc<aws_sdk_dynamodb::Client>,
+    table_name: String,
+    sync_state: Arc<std::sync::RwLock<QuerySyncState>>,
+    async_state: Arc<tokio::sync::RwLock<QueryAsyncState>>,
+}
+
+#[derive(Default)]
+struct QuerySyncState {
+    loading_state: LoadingState,
+    query_output: Option<QueryOutput>,
+    items: Vec<Item>,
+    item_keys: Arc<item_keys::ItemKeys>,
+    table_state: TableState,
+    keys_popup: Option<KeysWidget>,
+}
+
+#[derive(Debug, Default)]
+struct QueryAsyncState {
+    table_desc: OnceCell<Arc<TableDescription>>,
+}
+
+#[derive(Debug, Clone)]
+enum QueryOutput {
+    Scan(ScanOutput),
+}
+
+#[derive(Debug, Clone)]
+struct Item(HashMap<String, AttributeValue>, Arc<ItemKeys>);
+
+impl Item {
+    fn value(&self, key: &str) -> String {
+        self.0
+            .get(key)
+            .map(|val| {
+                if let Ok(v) = val.as_s() {
+                    v.clone()
+                } else if let Ok(v) = val.as_n() {
+                    v.clone()
+                } else if let Ok(v) = val.as_bool() {
+                    v.to_string()
+                } else {
+                    format!("{val:?}")
+                }
+            })
+            .unwrap_or_else(|| "".to_string())
+    }
+
+    fn value_size(&self, key: &str) -> usize {
+        self.value(key).len()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum LoadingState {
+    #[default]
+    Idle,
+    Loading,
+    Loaded,
+    Error(String),
+}
+
+impl crate::widgets::Widget for QueryWidget {
+    fn start(&self) {
+        let this: QueryWidget = self.clone();
+        tokio::spawn(this.load());
+    }
+
+    fn render(&self, frame: &mut Frame, area: Rect) {
+        frame.render_widget(self, area);
+        if let Some(ref popup) = self.sync_state.read().unwrap().keys_popup {
+            let popup_area = Rect {
+                x: area.x + area.width / 4,
+                y: area.y + area.height / 4,
+                width: area.width / 2,
+                height: area.height / 2,
+            };
+            frame.render_widget(Clear, popup_area);
+            frame.render_widget(popup, popup_area);
+        }
+    }
+
+    fn handle_event(&self, event: &Event) -> bool {
+        if let Some(ref popup) = self.sync_state.read().unwrap().keys_popup {
+            if popup.handle_event(event) {
+                return true;
+            }
+        }
+        if let Some(key) = event.as_key_press_event() {
+            match key.code {
+                KeyCode::Esc => {
+                    let mut state = self.sync_state.write().unwrap();
+                    if state.keys_popup.is_none() {
+                        return false
+                    }
+                    state.keys_popup = None;
+                }
+                KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
+                KeyCode::Up => self.scroll_up(),
+                KeyCode::Char('k') => {
+                    let mut state = self.sync_state.write().unwrap();
+                    match state.keys_popup {
+                        Some(_) => {
+                            state.keys_popup = None;
+                        }
+                        None => {
+                            let keys = state.item_keys.sorted().iter().map(|k| keys_widget::Key {
+                                name: k.clone(),
+                                hidden: state.item_keys.is_hidden(k),
+                            }).collect::<Vec<_>>();
+                            let item_keys = state.item_keys.clone();
+                            state.keys_popup = Some(KeysWidget::new(&keys, move |ev| {
+                                match ev {
+                                    keys_widget::Event::KeyHidden(name) => {
+                                        item_keys.hide(&name);
+                                    }
+                                    keys_widget::Event::KeyUnhidden(name) => {
+                                        item_keys.unhide(&name);
+                                    }
+                                }
+                            }));
+                        }
+                    }
+                }
+                _ => {
+                    return false; // not handled
+                }
+            }
+            return true;
+        }
+        false
+    }
+}
+
+impl ratatui::widgets::Widget for &QueryWidget {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let mut state = self.sync_state.write().unwrap();
+
+        let keys_view = state.item_keys.sorted();
+        let header = Row::new(
+            keys_view
+                .as_slice()
+                .into_iter()
+                .map(|key| Line::from(key.clone())),
+        )
+        .style(Style::new().bold());
+
+        let widths: Vec<Constraint> = keys_view
+            .as_slice()
+            .into_iter()
+            .map(|key| {
+                let max_value = state
+                    .items
+                    .iter()
+                    .map(|item| item.value_size(key))
+                    .max()
+                    .unwrap_or(0);
+                let key_size = key.len() + 2;
+                Constraint::Min(max(max_value, key_size) as u16)
+            })
+            .collect();
+
+        drop(keys_view);
+
+        // maximum rows is the area height, minus 2 for the the top and bottom borders,
+        // minus 1 for the header
+        let max_rows = (area.height - 2 - 1) as usize;
+        let total = state.items.len();
+        let first_item = state.table_state.offset() + 1;
+        let last_item = min(first_item + max_rows, total);
+
+        // a block with a right aligned title with the loading state on the right
+        let loading_state = Line::from(format!("{:?}", state.loading_state)).right_aligned();
+        let block = Block::bordered()
+            .title("Pull Requests")
+            .title(loading_state)
+            .title_bottom(format!(
+                "{} results, showing {}-{}",
+                total, first_item, last_item
+            ));
+
+        if state.table_state.selected().is_none() && !state.items.is_empty() {
+            state.table_state.select(Some(0));
+        }
+
+        let table = Table::new(&state.items, widths)
+            .block(block)
+            .header(header)
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_symbol(">>")
+            .row_highlight_style(Style::new().on_blue());
+
+        StatefulWidget::render(table, area, buf, &mut state.table_state);
+    }
+}
+
+impl QueryWidget {
+    pub fn new(client: Arc<aws_sdk_dynamodb::Client>, table_name: &str) -> Self {
+        Self {
+            client: client,
+            table_name: table_name.to_string(),
+            sync_state: Arc::new(std::sync::RwLock::new(QuerySyncState::default())),
+            async_state: Arc::new(tokio::sync::RwLock::new(QueryAsyncState::default())),
+        }
+    }
+
+    async fn load(self) {
+        self.set_loading_state(LoadingState::Loading).await;
+
+        let this = &self;
+
+        let result = try_join!(
+            this.table_description(), // returns Result<Arc<TableDescription>, String>
+            this.query(),             // returns Result<_, String>
+        );
+
+        match result {
+            Ok((table, query)) => {
+                self.set_loading_state(LoadingState::Loaded).await;
+                let mut item_keys = HashSet::new();
+                let shared_item_keys = self.sync_state.read().unwrap().item_keys.clone();
+                let mut state = self.sync_state.write().unwrap();
+                let items = query.items().into_iter().map(|item| {
+                    item_keys.extend(item.keys().cloned());
+                    Item(item.clone(), shared_item_keys.clone())
+                });
+                state.items.extend(items);
+                state.item_keys.extend(item_keys, &table);
+                state.query_output = Some(QueryOutput::Scan(query));
+            }
+            Err(e) => {
+                self.set_loading_state(LoadingState::Error(e)).await;
+            }
+        }
+    }
+
+    async fn query(&self) -> Result<ScanOutput, String> {
+        self.client
+            .scan()
+            .table_name(self.table_name.clone())
+            .send()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn set_loading_state(&self, state: LoadingState) {
+        self.sync_state.write().unwrap().loading_state = state;
+    }
+
+    async fn table_description(&self) -> Result<Arc<TableDescription>, String> {
+        let state = self.async_state.write().await;
+        let arc_ref = state
+            .table_desc
+            .get_or_try_init(|| async {
+                let out = self
+                    .client
+                    .describe_table()
+                    .table_name(self.table_name.clone())
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let table = out
+                    .table()
+                    .ok_or_else(|| "DescribeTable: missing table".to_string())?;
+                Ok::<Arc<TableDescription>, String>(Arc::new(table.clone()))
+            })
+            .await?;
+
+        Ok(arc_ref.clone())
+    }
+
+    fn scroll_down(&self) {
+        self.sync_state
+            .write()
+            .unwrap()
+            .table_state
+            .scroll_down_by(1);
+    }
+
+    fn scroll_up(&self) {
+        self.sync_state.write().unwrap().table_state.scroll_up_by(1);
+    }
+}
+
+impl<'a> From<&Item> for Row<'a> {
+    fn from(item: &Item) -> Self {
+        let mut parts = Vec::new();
+        let view = item.1.sorted();
+        for key in view.as_slice() {
+            parts.push(item.value(key));
+        }
+        Row::new(parts)
+    }
+}

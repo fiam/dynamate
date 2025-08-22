@@ -27,13 +27,13 @@
 //! [Ratatui]: https://github.com/ratatui/ratatui
 //! [examples]: https://github.com/ratatui/ratatui/blob/main/examples
 //! [examples readme]: https://github.com/ratatui/ratatui/blob/main/examples/README.md
-use std::sync::{Arc};
+use std::sync::Arc;
 use std::time::Duration;
 
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode};
 use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Stylize};
+use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::{DefaultTerminal, Frame};
 use tokio_stream::StreamExt;
@@ -61,6 +61,10 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<String>,
 
+    /// Endpoint URL for the DynamoDB service
+    #[arg(long)]
+    endpoint_url: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -68,10 +72,6 @@ struct Cli {
 #[derive(clap::Subcommand)]
 enum Commands {
     ListTables {
-        /// Endpoint URL for the DynamoDB service
-        #[arg(long)]
-        endpoint_url: Option<String>,
-
         /// Output in JSON format
         #[arg(short, long)]
         json: bool,
@@ -86,18 +86,18 @@ async fn main() -> Result<()> {
 
     color_eyre::install()?;
     let cli = <Cli as clap::Parser>::parse();
+    let client = Arc::new(aws::new_client(cli.endpoint_url.as_deref()).await?);
     match cli.command {
-        Some(Commands::ListTables { endpoint_url, json }) => {
-            let client = aws::new_client(endpoint_url.as_deref()).await?;
+        Some(Commands::ListTables { json }) => {
             let options = subcommands::list_tables::Options { json };
             subcommands::list_tables::command(&client, options).await?;
             Ok(())
         }
-        None => App::default().run_tui().await,
+        None => App::default().run_tui(client.clone()).await,
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct App {
     should_quit: bool,
     widgets: Vec<Arc<dyn crate::widgets::Widget>>,
@@ -106,15 +106,19 @@ struct App {
 impl App {
     const FRAMES_PER_SECOND: f32 = 60.0;
 
-    pub async fn run_tui(self) -> Result<()> {
+    pub async fn run_tui(self, client: Arc<aws_sdk_dynamodb::Client>) -> Result<()> {
         let terminal = ratatui::init();
-        let app_result = self.run(terminal).await;
+        let app_result = self.run(terminal, client).await;
         ratatui::restore();
         app_result
     }
 
-    pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
-        let widget = Arc::new(widgets::PullRequestListWidget::default());
+    pub async fn run(
+        mut self,
+        mut terminal: DefaultTerminal,
+        client: Arc<aws_sdk_dynamodb::Client>,
+    ) -> Result<()> {
+        let widget = Arc::new(widgets::QueryWidget::new(client, "test1"));
         widget.start();
         self.widgets.push(widget);
 

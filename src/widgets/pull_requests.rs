@@ -1,8 +1,18 @@
 use std::sync::{Arc, RwLock};
 
 use crossterm::event::{Event, KeyCode};
-use octocrab::{params::{pulls::Sort, Direction}, Page};
-use ratatui::{buffer::Buffer, layout::{Constraint, Rect}, style::Style, text::Line, widgets::{Block, HighlightSpacing, Row, StatefulWidget, Table, TableState}, Frame};
+use octocrab::{
+    Page,
+    params::{Direction, pulls::Sort},
+};
+use ratatui::{
+    Frame,
+    buffer::Buffer,
+    layout::{Constraint, Rect},
+    style::Style,
+    text::Line,
+    widgets::{Block, HighlightSpacing, Row, StatefulWidget, Table, TableState},
+};
 
 /// A widget that displays a list of pull requests.
 ///
@@ -50,11 +60,11 @@ impl crate::widgets::Widget for PullRequestListWidget {
     fn handle_event(&self, event: &Event) -> bool {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
-            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
-            _ => {
-                return false; // not handled
-            }
+                KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
+                KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
+                _ => {
+                    return false; // not handled
+                }
             }
             return true;
         }
