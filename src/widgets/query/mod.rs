@@ -1,7 +1,5 @@
 use std::{
-    cmp::{max, min},
-    collections::{HashMap, HashSet},
-    sync::Arc,
+    borrow::Cow, cmp::{max, min}, collections::{HashMap, HashSet}, sync::Arc
 };
 
 use aws_sdk_dynamodb::{
@@ -10,12 +8,19 @@ use aws_sdk_dynamodb::{
 };
 use crossterm::event::{Event, KeyCode};
 use ratatui::{
-    buffer::Buffer, layout::{Constraint, Rect}, style::Style, text::Line, widgets::{Block, Clear, HighlightSpacing, Row, StatefulWidget, Table, TableState}, Frame
+    Frame,
+    buffer::Buffer,
+    layout::{Constraint, Rect},
+    style::Style,
+    text::Line,
+    widgets::{Block, Clear, HighlightSpacing, Row, StatefulWidget, Table, TableState},
 };
 use tokio::{sync::OnceCell, try_join};
 
 use item_keys::ItemKeys;
 use keys_widget::KeysWidget;
+
+use crate::{help, widgets::EnvHandle};
 
 mod item_keys;
 mod keys_widget;
@@ -35,7 +40,6 @@ struct QuerySyncState {
     items: Vec<Item>,
     item_keys: Arc<item_keys::ItemKeys>,
     table_state: TableState,
-    keys_popup: Option<KeysWidget>,
 }
 
 #[derive(Debug, Default)]
@@ -84,66 +88,41 @@ enum LoadingState {
 }
 
 impl crate::widgets::Widget for QueryWidget {
-    fn start(&self) {
+     fn start(&self, env: EnvHandle) {
         let this: QueryWidget = self.clone();
-        tokio::spawn(this.load());
+        tokio::spawn(this.load(env));
     }
 
     fn render(&self, frame: &mut Frame, area: Rect) {
         frame.render_widget(self, area);
-        if let Some(ref popup) = self.sync_state.read().unwrap().keys_popup {
-            let popup_area = Rect {
-                x: area.x + area.width / 4,
-                y: area.y + area.height / 4,
-                width: area.width / 2,
-                height: area.height / 2,
-            };
-            frame.render_widget(Clear, popup_area);
-            frame.render_widget(popup, popup_area);
-        }
     }
 
-    fn handle_event(&self, event: &Event) -> bool {
-        if let Some(ref popup) = self.sync_state.read().unwrap().keys_popup {
-            if popup.handle_event(event) {
-                return true;
-            }
-        }
+    fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
-                KeyCode::Esc => {
-                    let mut state = self.sync_state.write().unwrap();
-                    if state.keys_popup.is_none() {
-                        return false
-                    }
-                    state.keys_popup = None;
-                }
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
-                KeyCode::Up => self.scroll_up(),
-                KeyCode::Char('k') => {
-                    let mut state = self.sync_state.write().unwrap();
-                    match state.keys_popup {
-                        Some(_) => {
-                            state.keys_popup = None;
+                KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
+                KeyCode::Char('f') => {
+                    let state = self.sync_state.write().unwrap();
+                    let keys = state
+                        .item_keys
+                        .sorted()
+                        .iter()
+                        .map(|k| keys_widget::Key {
+                            name: k.clone(),
+                            hidden: state.item_keys.is_hidden(k),
+                        })
+                        .collect::<Vec<_>>();
+                    let item_keys = state.item_keys.clone();
+                    let popup = Arc::new(KeysWidget::new(&keys, move |ev| match ev {
+                        keys_widget::Event::KeyHidden(name) => {
+                            item_keys.hide(&name);
                         }
-                        None => {
-                            let keys = state.item_keys.sorted().iter().map(|k| keys_widget::Key {
-                                name: k.clone(),
-                                hidden: state.item_keys.is_hidden(k),
-                            }).collect::<Vec<_>>();
-                            let item_keys = state.item_keys.clone();
-                            state.keys_popup = Some(KeysWidget::new(&keys, move |ev| {
-                                match ev {
-                                    keys_widget::Event::KeyHidden(name) => {
-                                        item_keys.hide(&name);
-                                    }
-                                    keys_widget::Event::KeyUnhidden(name) => {
-                                        item_keys.unhide(&name);
-                                    }
-                                }
-                            }));
+                        keys_widget::Event::KeyUnhidden(name) => {
+                            item_keys.unhide(&name);
                         }
-                    }
+                    }));
+                    env.set_popup(popup);
                 }
                 _ => {
                     return false; // not handled
@@ -152,6 +131,10 @@ impl crate::widgets::Widget for QueryWidget {
             return true;
         }
         false
+    }
+
+        fn help(&self) -> Option<&[help::Entry<'_>]> {
+        Some(Self::HELP)
     }
 }
 
@@ -193,14 +176,21 @@ impl ratatui::widgets::Widget for &QueryWidget {
         let last_item = min(first_item + max_rows, total);
 
         // a block with a right aligned title with the loading state on the right
-        let loading_state = Line::from(format!("{:?}", state.loading_state)).right_aligned();
+       let (title, title_bottom) = match &state.loading_state {
+            LoadingState::Idle | LoadingState::Loaded => {
+                ("Results".to_string(), format!("{} results, showing {}-{}", total, first_item, last_item))
+            },
+            LoadingState::Loading => {
+                ("Loading".to_string(), "".to_string())
+            },
+            LoadingState::Error(err) => {
+                (format!("Error: {err}"), "".to_string())
+            }
+        };
+
         let block = Block::bordered()
-            .title("Pull Requests")
-            .title(loading_state)
-            .title_bottom(format!(
-                "{} results, showing {}-{}",
-                total, first_item, last_item
-            ));
+            .title_top(title)
+            .title_bottom(title_bottom);
 
         if state.table_state.selected().is_none() && !state.items.is_empty() {
             state.table_state.select(Some(0));
@@ -218,6 +208,9 @@ impl ratatui::widgets::Widget for &QueryWidget {
 }
 
 impl QueryWidget {
+        const HELP: &'static [help::Entry<'static>] = &[
+        help::Entry { keys: Cow::Borrowed("f"), short: Cow::Borrowed("fields"), long: Cow::Borrowed("Enable/disable fields") },
+    ];
     pub fn new(client: Arc<aws_sdk_dynamodb::Client>, table_name: &str) -> Self {
         Self {
             client: client,
@@ -227,8 +220,9 @@ impl QueryWidget {
         }
     }
 
-    async fn load(self) {
+    async fn load(self, env: EnvHandle) {
         self.set_loading_state(LoadingState::Loading).await;
+        env.invalidate();
 
         let this = &self;
 
@@ -255,6 +249,7 @@ impl QueryWidget {
                 self.set_loading_state(LoadingState::Error(e)).await;
             }
         }
+        env.invalidate();
     }
 
     async fn query(&self) -> Result<ScanOutput, String> {

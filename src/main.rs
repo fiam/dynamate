@@ -27,14 +27,16 @@
 //! [Ratatui]: https://github.com/ratatui/ratatui
 //! [examples]: https://github.com/ratatui/ratatui/blob/main/examples
 //! [examples readme]: https://github.com/ratatui/ratatui/blob/main/examples/README.md
-use std::sync::Arc;
-use std::time::Duration;
+use std::borrow::Cow;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode};
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::Stylize;
-use ratatui::text::Line;
+use ratatui::layout::{Alignment, Constraint, Layout};
+use ratatui::style::{Color, Style, Stylize};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use tokio_stream::StreamExt;
 
@@ -42,6 +44,9 @@ use dynamate::aws;
 
 mod subcommands;
 mod widgets;
+mod help;
+mod env;
+mod logging;
 
 use widgets::Widget;
 
@@ -93,18 +98,41 @@ async fn main() -> Result<()> {
             subcommands::list_tables::command(&client, options).await?;
             Ok(())
         }
-        None => App::default().run_tui(client.clone()).await,
+        None => {
+            logging::initialize()?;
+            App::default().run_tui(client.clone()).await?;
+            Ok(())
+        }
     }
 }
 
-#[derive(Default)]
 struct App {
+    env: env::Env,
     should_quit: bool,
+    should_redraw: bool,
     widgets: Vec<Arc<dyn crate::widgets::Widget>>,
+    popup: Option<Arc<dyn crate::widgets::Popup>>,
 }
 
 impl App {
     const FRAMES_PER_SECOND: f32 = 60.0;
+    const HELP_WITHOUT_POPUP: &'static [help::Entry<'static>] = &[
+        help::Entry { keys: Cow::Borrowed("q/esc"), short: Cow::Borrowed("quit"), long: Cow::Borrowed("Quit dynamate") },
+    ];
+    const HELP_WITH_POPUP: &'static [help::Entry<'static>] = &[
+        help::Entry { keys: Cow::Borrowed("esc"), short: Cow::Borrowed("close"), long: Cow::Borrowed("Close popup") },
+        help::Entry { keys: Cow::Borrowed("q"), short: Cow::Borrowed("quit"), long: Cow::Borrowed("Quit dynamate") },
+    ];
+
+    pub fn default() -> Self {
+        App {
+            env: env::Env::new(),
+            should_quit: false,
+            should_redraw: true,
+            widgets: Vec::new(),
+            popup: None,
+        }
+    }
 
     pub async fn run_tui(self, client: Arc<aws_sdk_dynamodb::Client>) -> Result<()> {
         let terminal = ratatui::init();
@@ -119,7 +147,8 @@ impl App {
         client: Arc<aws_sdk_dynamodb::Client>,
     ) -> Result<()> {
         let widget = Arc::new(widgets::QueryWidget::new(client, "test1"));
-        widget.start();
+        widget.start(self.env.tx());
+
         self.widgets.push(widget);
 
         let period = Duration::from_secs_f32(1.0 / Self::FRAMES_PER_SECOND);
@@ -128,34 +157,125 @@ impl App {
 
         while !self.should_quit {
             tokio::select! {
-                _ = interval.tick() => { terminal.draw(|frame| self.render(frame))?; },
-                Some(Ok(event)) = events.next() => self.handle_event(&event),
+                _ = interval.tick() => {
+                    terminal.draw(|frame| self.render(frame))?;
+                    // if self.should_redraw {
+                    //     terminal.draw(|frame| self.render(frame))?;
+                    //     self.should_redraw = false;
+                    // }
+                },
+                Some(Ok(event)) = events.next() => {
+                    if self.handle_event(&event) {
+                        terminal.draw(|frame| self.render(frame))?;
+                    }
+                },
+                Some(msg) = self.env.rx().recv() => {
+                    self.handle_msg(msg);
+                    if self.should_redraw {
+                        terminal.draw(|frame| self.render(frame))?;
+                        self.should_redraw = false;
+                    }
+                },
             }
         }
         Ok(())
     }
 
     fn render(&self, frame: &mut Frame) {
-        let layout = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]);
-        let [title_area, body_area] = frame.area().layout(&layout);
+        let start = Instant::now();
+                let help = if let Some(popup) = self.popup.as_ref() {
+            popup.help()
+        } else if let Some(widget) = self.widgets.last() {
+            widget.help()
+        } else {
+            None
+        };
+        let app_help = if self.popup.is_some() { App::HELP_WITH_POPUP } else { App::HELP_WITHOUT_POPUP };
+        let all_help: Vec<_> = [help, Some(app_help)].into_iter().flatten().flatten().collect();
+        let help_height = help::height(&all_help, frame.area());
+        let layout = Layout::vertical([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(help_height)]);
+        let [title_area, body_area, footer_area] = frame.area().layout(&layout);
         let title = Line::from("Ratatui async example").centered().bold();
         frame.render_widget(title, title_area);
         if let Some(widget) = self.widgets.last() {
             widget.render(frame, body_area);
         }
+        if let Some(popup) = self.popup.as_ref() {
+            let popup_area = popup.rect(body_area);
+            frame.render_widget(Clear, popup_area);
+            popup.render(frame, popup_area);
+        }
+        help::render(&all_help, frame, footer_area);
+        let duration = start.elapsed();
+        // Render duration in red at the bottom right corner
+        let duration_str = format!("{:.2?}", duration);
+        let area = frame.area();
+        let len = duration_str.len();
+        let x = area.x + area.width.saturating_sub(len as u16 + 1);
+        let y = area.y + area.height.saturating_sub(1);
+        let duration_line = Line::from(duration_str).right_aligned().red();
+        frame.render_widget(duration_line, ratatui::prelude::Rect::new(x, y, len as u16, 1));
     }
 
-    fn handle_event(&mut self, event: &Event) {
-        if let Some(widget) = self.widgets.last() {
-            if widget.handle_event(event) {
-                return;
-            }
+    fn handle_event(&mut self, event: &Event) -> bool {
+        if let Some(popup) = self.popup.as_ref()
+            && popup.handle_event(self.env.tx(), event)
+        {
+            return true;
         }
+
+        if let Some(widget) = self.widgets.last()
+            && widget.handle_event(self.env.tx(), event)
+        {
+            return true;
+        }
+
         if let Some(key) = event.as_key_press_event() {
             match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
-                _ => {}
+                KeyCode::Esc => {
+                    if self.popup.is_some() {
+                        self.popup = None;
+                        self.should_redraw = true;
+                    } else {
+                        self.should_quit = true;
+                    }
+                }
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                }
+                _ => { return false }
             }
+            return true            
+        }
+        return false
+    }
+
+    fn handle_msg(&mut self, msg: env::Message) {
+        match msg {
+            env::Message::PushWidget(widget) => {
+                self.widgets.push(widget);
+            }
+            env::Message::PopWidget => {
+                self.widgets.pop();
+            }
+            env::Message::SetPopup(popup) => {
+                if self.popup.is_some() {
+                    panic!("popup is already set");
+                }
+                self.popup = Some(popup);
+                self.should_redraw = true;
+            }
+            env::Message::DismissPopup => {
+                if self.popup.is_none() {
+                    panic!("popup is not set");
+                }
+                self.popup = None;
+                self.should_redraw = true;
+            },
+            env::Message::Invalidate => {
+                // Redraw the screen
+                self.should_redraw = true;
+            },
         }
     }
 }

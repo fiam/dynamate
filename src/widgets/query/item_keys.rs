@@ -5,10 +5,10 @@ use aws_sdk_dynamodb::types::{KeySchemaElement, KeyType, TableDescription};
 
 #[derive(Debug, Default)]
 struct Inner {
-    set: HashSet<String>, // canonical keys (unique)
+    set: HashSet<String>,    // canonical keys (unique)
     hidden: HashSet<String>, // hidden keys
-    sorted: Vec<String>,  // cached, sorted snapshot
-    visible: Vec<String>, // visible keys
+    sorted: Vec<String>,     // cached, sorted snapshot
+    visible: Vec<String>,    // visible keys
 }
 
 #[derive(Debug, Default, Clone)]
@@ -86,9 +86,13 @@ impl ItemKeys {
     }
 
     fn update_visible(&self, inner: &mut Inner) {
-        inner.visible = inner.sorted.iter().filter(|k| !inner.hidden.contains(*k)).cloned().collect();
+        inner.visible = inner
+            .sorted
+            .iter()
+            .filter(|k| !inner.hidden.contains(*k))
+            .cloned()
+            .collect();
     }
-
 }
 
 /// Return (HASH_name, RANGE_name) from the table (None if absent).

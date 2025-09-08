@@ -1,7 +1,23 @@
-use std::sync::{Arc, RwLock};
+use std::{borrow::Cow, sync::{Arc, RwLock}};
 
-use crossterm::event::{KeyCode};
-use ratatui::{buffer::Buffer, layout::{Alignment, Constraint, Layout, Rect}, style::{palette::tailwind::{BLUE, GREEN, SLATE}, Color, Modifier, Style, Stylize}, symbols, text::{Line, Span}, widgets::{Block, Borders, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph, StatefulWidget, TableState, Wrap}, Frame};
+use crossterm::event::KeyCode;
+use ratatui::{
+    Frame,
+    buffer::Buffer,
+    layout::{Alignment, Constraint, Layout, Rect},
+    style::{
+        Color, Modifier, Style, Stylize,
+        palette::tailwind::{BLUE, GREEN, SLATE},
+    },
+    symbols,
+    text::{Line, Span},
+    widgets::{
+        Block, Borders, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph,
+        StatefulWidget, TableState, Wrap,
+    },
+};
+
+use crate::{help, widgets::{EnvHandle, Popup}};
 
 const TODO_HEADER_STYLE: Style = Style::new().fg(SLATE.c100).bg(BLUE.c800);
 const NORMAL_ROW_BG: Color = SLATE.c950;
@@ -9,8 +25,6 @@ const ALT_ROW_BG_COLOR: Color = SLATE.c900;
 const SELECTED_STYLE: Style = Style::new().bg(SLATE.c800).add_modifier(Modifier::BOLD);
 const TEXT_FG_COLOR: Color = SLATE.c200;
 const COMPLETED_TEXT_FG_COLOR: Color = GREEN.c500;
-
-
 
 #[derive(Clone)]
 pub struct KeysWidget {
@@ -37,6 +51,12 @@ pub enum Event {
 }
 
 impl KeysWidget {
+    const HELP: &'static [help::Entry<'static>] = &[
+        help::Entry { keys: Cow::Borrowed("↑/↓/i/j"), short: Cow::Borrowed("move"), long: Cow::Borrowed("Move the selected field up/down") },
+        help::Entry { keys: Cow::Borrowed("Space"), short: Cow::Borrowed("toggle"), long: Cow::Borrowed("Select/deselect the current field") },
+        help::Entry { keys: Cow::Borrowed("a"), short: Cow::Borrowed("all"), long: Cow::Borrowed("Select all fields") },
+        help::Entry { keys: Cow::Borrowed("n"), short: Cow::Borrowed("none"), long: Cow::Borrowed("Deselect all fields") },
+    ];
     pub fn new(keys: &[Key], on_event: impl Fn(Event) + Send + Sync + 'static) -> Self {
         let mut state = KeysWidgetState::default();
         state.keys = keys.to_vec();
@@ -64,11 +84,19 @@ impl KeysWidget {
 }
 
 impl crate::widgets::Widget for KeysWidget {
+    fn help(&self) -> Option<&[help::Entry<'_>]> {
+        Some(Self::HELP)
+    }
+
     fn render(&self, frame: &mut Frame, area: Rect) {
         frame.render_widget(self, area);
     }
 
-    fn handle_event(&self, event: &crossterm::event::Event) -> bool {
+    fn handle_event(
+        &self,
+        _env: EnvHandle,
+        event: &crossterm::event::Event,
+    ) -> bool {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Down => {
@@ -91,10 +119,10 @@ impl crate::widgets::Widget for KeysWidget {
                         }
                     }
                 }
-                KeyCode::Char('a') | KeyCode::Char('A') => {
+                KeyCode::Char('a')  => {
                     self.update_all(false);
                 }
-                KeyCode::Char('d') | KeyCode::Char('D') => {
+                KeyCode::Char('n') => {
                     self.update_all(true);
                 }
                 _ => {
@@ -133,21 +161,19 @@ impl ratatui::widgets::Widget for &KeysWidget {
             .highlight_symbol("> ")
             .highlight_spacing(HighlightSpacing::Always);
 
-        let layout = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]);
-        let [list_area, footer_area] = area.layout(&layout);
-
-        let footer = Paragraph::new(Line::from(vec![
-            key("Up/Down"), " navigate   ".into(),
-            key("Space"),   " toggle   ".into(),
-            key("A"),       " all   ".into(),
-            key("D"),       " none   ".into(),
-            key("Esc"),     " close".into(),
-        ]))
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true });
-
+        let list_area = area;
         StatefulWidget::render(list, list_area, buf, &mut state.list_state);
-        footer.render(footer_area, buf);
+    }
+}
+
+impl Popup for KeysWidget {
+    fn rect(&self, area: Rect) -> Rect {
+        Rect {
+            x: area.x + area.width / 4,
+            y: area.y + area.height / 4,
+            width: area.width / 2,
+            height: area.height / 2,
+        }
     }
 }
 
@@ -172,8 +198,5 @@ impl From<&Key> for ListItem<'_> {
 
 fn key(s: &str) -> Span<'_> {
     // render like a small “keycap”
-    Span::styled(
-        format!("[{s}]"),
-        Style::default().bold().fg(Color::White),
-    )
+    Span::styled(format!("[{s}]"), Style::default().bold().fg(Color::White))
 }
