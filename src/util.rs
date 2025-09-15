@@ -1,0 +1,22 @@
+use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+
+pub fn fill_bg(buf: &mut Buffer, area: Rect, color: Color) {
+    for x in area.left()..area.right() {
+        for y in area.top()..area.bottom() {
+            buf[(x, y)].set_bg(color);
+        }
+    }
+}
+
+pub fn pad<S: AsRef<str>>(s: S, pad: usize) -> String {
+    let s = s.as_ref();
+    let mut out = String::with_capacity(s.len() + pad * 2);
+    for _ in 0..pad {
+        out.push(' ');
+    }
+    out.push_str(s);
+    for _ in 0..pad {
+        out.push(' ');
+    }
+    out
+}

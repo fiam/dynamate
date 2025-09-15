@@ -1,9 +1,11 @@
 use std::{fmt::Debug, sync::Arc};
 
 use crossterm::event::Event;
-use ratatui::{Frame, layout::Rect};
+use ratatui::{Frame, buffer::Buffer, layout::Rect};
+use theme::Theme;
 
 mod query;
+pub mod theme;
 
 pub use query::QueryWidget;
 
@@ -29,7 +31,9 @@ pub trait Widget: Send + Sync
     }
 
     /// Render the widget's content.
-    fn render(&self, frame: &mut Frame, area: Rect);
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        //frame.render_widget(self, area);
+    }
 
     /// Handle input events. Returns true if the event was handled.
     fn handle_event(&self, _env: EnvHandle, _event: &Event) -> bool {
@@ -37,9 +41,35 @@ pub trait Widget: Send + Sync
     }
 
     /// Optional help to display at the bottom while this widget is active
-    fn help(&self) -> Option<&[help::Entry<'_>]> { None }
+    fn help(&self) -> Option<&[help::Entry<'_>]> {
+        None
+    }
 }
 
 pub trait Popup: Widget {
     fn rect(&self, area: Rect) -> Rect;
 }
+
+struct RenderWidget<'a> {
+    widget: &'a dyn Widget,
+    frame: &'a mut Frame<'a>,
+    theme: &'a Theme,
+}
+
+impl<'a> ratatui::widgets::Widget for RenderWidget<'a> {
+    fn render(self, area: Rect, _: &mut Buffer) {
+        self.widget.render(self.frame, area, self.theme);
+    }
+}
+
+// impl<T: Widget> ratatui::widgets::Widget for T {
+//     fn render(self, area: Rect, _: &mut Buffer) {
+//         let w = RenderWidget{
+//             widget: self,
+//             frame:
+//         };
+//         frame.render_widget(w, area);
+
+//         self.widget.render(self.frame, area, self.theme);
+//     }
+// }

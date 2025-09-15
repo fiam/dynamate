@@ -1,5 +1,9 @@
 use std::{
-    borrow::Cow, cmp::{max, min}, collections::{HashMap, HashSet}, sync::Arc
+    borrow::Cow,
+    cmp::{max, min},
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
 };
 
 use aws_sdk_dynamodb::{
@@ -7,12 +11,13 @@ use aws_sdk_dynamodb::{
     types::{AttributeValue, TableDescription},
 };
 use crossterm::event::{Event, KeyCode};
+use ratatui::{text::Text, widgets::Widget};
 use ratatui::{
     Frame,
     buffer::Buffer,
-    layout::{Constraint, Rect},
+    layout::{Constraint, Layout, Rect},
     style::Style,
-    text::Line,
+    text::{self, Line},
     widgets::{Block, Clear, HighlightSpacing, Row, StatefulWidget, Table, TableState},
 };
 use tokio::{sync::OnceCell, try_join};
@@ -20,8 +25,13 @@ use tokio::{sync::OnceCell, try_join};
 use item_keys::ItemKeys;
 use keys_widget::KeysWidget;
 
-use crate::{help, widgets::EnvHandle};
+use crate::{
+    help, util::pad, widgets::{
+        theme::Theme, EnvHandle
+    }
+};
 
+mod input;
 mod item_keys;
 mod keys_widget;
 
@@ -35,6 +45,7 @@ pub struct QueryWidget {
 
 #[derive(Default)]
 struct QuerySyncState {
+    input: input::Input,
     loading_state: LoadingState,
     query_output: Option<QueryOutput>,
     items: Vec<Item>,
@@ -87,19 +98,93 @@ enum LoadingState {
     Error(String),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum EditingState {
+    #[default]
+    None,
+    Editing,
+}
+
 impl crate::widgets::Widget for QueryWidget {
-     fn start(&self, env: EnvHandle) {
+    fn start(&self, env: EnvHandle) {
         let this: QueryWidget = self.clone();
         tokio::spawn(this.load(env));
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(self, area);
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let mut state = self.sync_state.write().unwrap();
+
+        let layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]);
+        let [query_area, results_area] = area.layout(&layout);
+
+        state.input.render(frame, query_area, theme);
+
+        let keys_view = state.item_keys.sorted();
+        let header = Row::new(
+            keys_view
+                .as_slice()
+                .into_iter()
+                .map(|key| Line::from(key.clone())),
+        )
+        .style(Style::new().bold());
+
+        let items = &state.items;
+        let widths: Vec<Constraint> = keys_view
+            .as_slice()
+            .into_iter()
+            .map(|key| {
+                let max_value = items
+                    .iter()
+                    .map(|item| item.value_size(key))
+                    .max()
+                    .unwrap_or(0);
+                let key_size = key.len() + 2;
+                Constraint::Min(max(max_value, key_size) as u16)
+            })
+            .collect();
+
+
+        drop(keys_view);
+
+        // maximum rows is the area height, minus 2 for the the top and bottom borders,
+        // minus 1 for the header
+        let max_rows = (results_area.height - 2 - 1) as usize;
+        let total = state.items.len();
+        let first_item = state.table_state.offset() + 1;
+        let last_item = min(first_item + max_rows, total);
+
+        // a block with a right aligned title with the loading state on the right
+        let (title, title_bottom) = match &state.loading_state {
+            LoadingState::Idle | LoadingState::Loaded => (
+                "Results".to_string(),
+                pad(format!("{} results, showing {}-{}", total, first_item, last_item), 2),
+            ),
+            LoadingState::Loading => ("Loading".to_string(), "".to_string()),
+            LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
+        };
+
+        let block = Block::bordered()
+            .title_top(title)
+            .title_bottom(Line::styled(title_bottom, Style::default().fg(theme.neutral_variant())));
+
+        if state.table_state.selected().is_none() && !state.items.is_empty() {
+            state.table_state.select(Some(0));
+        }
+
+        let table = Table::new(&state.items, widths)
+            .block(block)
+            .header(header)
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_symbol(">>")
+            .row_highlight_style(Style::default().bg(theme.secondary()));
+
+        StatefulWidget::render(table, results_area, frame.buffer_mut(), &mut state.table_state);
     }
 
     fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
+                KeyCode::Tab | KeyCode::BackTab => self.sync_state.write().unwrap().input.toggle_active(),
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
                 KeyCode::Char('f') => {
@@ -133,83 +218,33 @@ impl crate::widgets::Widget for QueryWidget {
         false
     }
 
-        fn help(&self) -> Option<&[help::Entry<'_>]> {
+    fn help(&self) -> Option<&[help::Entry<'_>]> {
         Some(Self::HELP)
     }
 }
 
-impl ratatui::widgets::Widget for &QueryWidget {
+impl Widget for &QueryWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let mut state = self.sync_state.write().unwrap();
-
-        let keys_view = state.item_keys.sorted();
-        let header = Row::new(
-            keys_view
-                .as_slice()
-                .into_iter()
-                .map(|key| Line::from(key.clone())),
-        )
-        .style(Style::new().bold());
-
-        let widths: Vec<Constraint> = keys_view
-            .as_slice()
-            .into_iter()
-            .map(|key| {
-                let max_value = state
-                    .items
-                    .iter()
-                    .map(|item| item.value_size(key))
-                    .max()
-                    .unwrap_or(0);
-                let key_size = key.len() + 2;
-                Constraint::Min(max(max_value, key_size) as u16)
-            })
-            .collect();
-
-        drop(keys_view);
-
-        // maximum rows is the area height, minus 2 for the the top and bottom borders,
-        // minus 1 for the header
-        let max_rows = (area.height - 2 - 1) as usize;
-        let total = state.items.len();
-        let first_item = state.table_state.offset() + 1;
-        let last_item = min(first_item + max_rows, total);
-
-        // a block with a right aligned title with the loading state on the right
-       let (title, title_bottom) = match &state.loading_state {
-            LoadingState::Idle | LoadingState::Loaded => {
-                ("Results".to_string(), format!("{} results, showing {}-{}", total, first_item, last_item))
-            },
-            LoadingState::Loading => {
-                ("Loading".to_string(), "".to_string())
-            },
-            LoadingState::Error(err) => {
-                (format!("Error: {err}"), "".to_string())
-            }
-        };
-
-        let block = Block::bordered()
-            .title_top(title)
-            .title_bottom(title_bottom);
-
-        if state.table_state.selected().is_none() && !state.items.is_empty() {
-            state.table_state.select(Some(0));
-        }
-
-        let table = Table::new(&state.items, widths)
-            .block(block)
-            .header(header)
-            .highlight_spacing(HighlightSpacing::Always)
-            .highlight_symbol(">>")
-            .row_highlight_style(Style::new().on_blue());
-
-        StatefulWidget::render(table, area, buf, &mut state.table_state);
     }
 }
 
 impl QueryWidget {
-        const HELP: &'static [help::Entry<'static>] = &[
-        help::Entry { keys: Cow::Borrowed("f"), short: Cow::Borrowed("fields"), long: Cow::Borrowed("Enable/disable fields") },
+    const HELP: &'static [help::Entry<'static>] = &[help::Entry {
+        keys: Cow::Borrowed("f"),
+        short: Cow::Borrowed("fields"),
+        long: Cow::Borrowed("Enable/disable fields"),
+    }];
+    const HELP_EDITING: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("cancel"),
+            long: Cow::Borrowed("Cancel the current operation"),
+        },
+        help::Entry {
+            keys: Cow::Borrowed("enter"),
+            short: Cow::Borrowed("query"),
+            long: Cow::Borrowed("Execute query"),
+        },
     ];
     pub fn new(client: Arc<aws_sdk_dynamodb::Client>, table_name: &str) -> Self {
         Self {

@@ -56,7 +56,10 @@ impl crate::widgets::Env for EnvTx {
 impl Env {
     pub fn new() -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
-        Env { tx: Arc::new(EnvTx::new(tx)), rx }
+        Env {
+            tx: Arc::new(EnvTx::new(tx)),
+            rx,
+        }
     }
 
     pub fn tx(&self) -> Arc<dyn crate::widgets::Env + Send + Sync> {
