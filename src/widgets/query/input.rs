@@ -1,12 +1,14 @@
+use crossterm::event;
 use ratatui::{
-    buffer::Buffer, layout::Rect, style::Style, widgets::{Block, Paragraph, Widget}, Frame
+    buffer::Buffer, layout::{Position, Rect}, style::Style, widgets::{Block, Paragraph, Widget}, Frame
 };
 
-use crate::widgets::theme;
+use crate::widgets::{query::input, theme};
 
 #[derive(Default)]
 pub struct Input {
     input: String,
+    character_index: usize,
     is_active: bool,
 }
 
@@ -14,6 +16,7 @@ impl Input {
     pub fn new() -> Self {
         Self {
             input: String::new(),
+            character_index: 0,
             is_active: false,
         }
     }
@@ -38,27 +41,78 @@ impl Input {
         // keep 2 for borders and 1 for cursor
         let width = area.width.max(3) - 3;
         let scroll = 0;
-        // do this more elegantly
         let style = if self.is_active() {
             Style::default().fg(theme.secondary())
         } else {
             Style::default()
         };
         let block = Block::bordered().title("Query").style(style);
+        let input_area = area;
         let input = Paragraph::new(self.input.as_str())
             .scroll((0, scroll as u16))
             .block(block);
         input.render(area, frame.buffer_mut());
 
-        // if self.input_mode == InputMode::Editing {
-        //     // Ratatui hides the cursor unless it's explicitly set. Position the  cursor past the
-        //     // end of the input text and one line down from the border to the input line
-        //     let x = self.input.visual_cursor().max(scroll) - scroll + 1;
-        //     frame.set_cursor_position((area.x + x as u16, area.y + 1))
-        // }
+        if self.is_active() {
+            frame.set_cursor_position(Position::new(
+                // Draw the cursor at the current position in the input field.
+                // This position can be controlled via the left and right arrow key
+                input_area.x + self.character_index as u16 + 1,
+                // Move one line down, from the border to the input line
+                input_area.y + 1,
+            ));
+        }
     }
 
-    fn handle_event(&mut self, evt: &crossterm::event::Event) -> bool {
+    pub fn handle_event(&mut self, evt: &event::Event) -> bool {
+        if !self.is_active() {
+            return false;
+        }
+        if let Some(key) = evt.as_key_press_event() {
+            match key.code {
+                event::KeyCode::Char('a') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    self.character_index = 0;
+                }
+                event::KeyCode::Char('e') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    self.character_index = self.input.len();
+                }
+                event::KeyCode::Char(c) => {
+                    self.input.insert(self.character_index, c);
+                    self.character_index += 1;
+                }
+                event::KeyCode::Backspace => {
+                    if self.character_index > 0 && !self.input.is_empty() {
+                        self.input.remove(self.character_index - 1);
+                        self.character_index -= 1;
+                    }
+                }
+                event::KeyCode::Delete => {
+                    if self.character_index < self.input.len() && !self.input.is_empty() {
+                        self.input.remove(self.character_index);
+                    }
+                }
+                event::KeyCode::Left => {
+                    if self.character_index > 0 {
+                        self.character_index -= 1;
+                    }
+                }
+                event::KeyCode::Right => {
+                    if self.character_index < self.input.len() {
+                        self.character_index += 1;
+                    }
+                }
+                event::KeyCode::Home => {
+                    self.character_index = 0;
+                }
+                event::KeyCode::End => {
+                    self.character_index = self.input.len();
+                }
+                _ => {
+                    return false;
+                }
+            }
+            return true;
+        }
         false
         //        self.input.handle_event(evt)
     }

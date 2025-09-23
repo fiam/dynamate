@@ -289,9 +289,6 @@ impl App {
             }
             return true;
         }
-        if let Some(mouse) = event.as_mouse_event() {
-            dbg!("mouse event {}", mouse);
-        }
         return false;
     }
 

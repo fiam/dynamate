@@ -182,13 +182,21 @@ impl crate::widgets::Widget for QueryWidget {
     }
 
     fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
+        let mut state = self.sync_state.write().unwrap();
+        if state.input.is_active() && state.input.handle_event(event) {
+            return true;
+        }       
         if let Some(key) = event.as_key_press_event() {
             match key.code {
-                KeyCode::Tab | KeyCode::BackTab => self.sync_state.write().unwrap().input.toggle_active(),
+                KeyCode::Tab | KeyCode::BackTab => state.input.toggle_active(),
+                KeyCode::Esc if state.input.is_active() => state.input.toggle_active(),
+                KeyCode::Enter if state.input.is_active() => {
+                    self.start_query(state.input.value());
+                    state.input.toggle_active();
+                },
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
                 KeyCode::Char('f') => {
-                    let state = self.sync_state.write().unwrap();
                     let keys = state
                         .item_keys
                         .sorted()
@@ -215,16 +223,21 @@ impl crate::widgets::Widget for QueryWidget {
             }
             return true;
         }
+
+        if let Some(mouse) = event.as_mouse_event() {
+            match mouse.kind {
+                crossterm::event::MouseEventKind::ScrollUp => self.scroll_up(),
+                crossterm::event::MouseEventKind::ScrollDown => self.scroll_down(),
+                _ => return false, // not handled
+            }
+        }
+
+
         false
     }
 
     fn help(&self) -> Option<&[help::Entry<'_>]> {
         Some(Self::HELP)
-    }
-}
-
-impl Widget for &QueryWidget {
-    fn render(self, area: Rect, buf: &mut Buffer) {
     }
 }
 
@@ -334,6 +347,10 @@ impl QueryWidget {
     fn scroll_up(&self) {
         self.sync_state.write().unwrap().table_state.scroll_up_by(1);
     }
+
+    fn start_query(&self, query: &str) {
+    }
+
 }
 
 impl<'a> From<&Item> for Row<'a> {
