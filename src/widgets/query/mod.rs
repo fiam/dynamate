@@ -30,6 +30,7 @@ use crate::{
         theme::Theme, EnvHandle
     }
 };
+use dynamate::expr::{parse_dynamo_expression, DynamoExpression, Operand, Comparator, FunctionName};
 
 mod input;
 mod item_keys;
@@ -182,21 +183,25 @@ impl crate::widgets::Widget for QueryWidget {
     }
 
     fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
-        let mut state = self.sync_state.write().unwrap();
-        if state.input.is_active() && state.input.handle_event(event) {
-            return true;
-        }       
+        let input_is_active = self.sync_state.read().unwrap().input.is_active();
+        if input_is_active {
+            if self.sync_state.write().unwrap().input.handle_event(event) {                
+                return true;
+            }
+        }    
         if let Some(key) = event.as_key_press_event() {
             match key.code {
-                KeyCode::Tab | KeyCode::BackTab => state.input.toggle_active(),
-                KeyCode::Esc if state.input.is_active() => state.input.toggle_active(),
-                KeyCode::Enter if state.input.is_active() => {
-                    self.start_query(state.input.value());
+                KeyCode::Tab | KeyCode::BackTab => self.sync_state.write().unwrap().input.toggle_active(),
+                KeyCode::Esc if input_is_active => self.sync_state.write().unwrap().input.toggle_active(),
+                KeyCode::Enter if input_is_active => {
+                    let mut state = self.sync_state.write().unwrap();
+                    self.start_query(state.input.value(), env.clone());
                     state.input.toggle_active();
                 },
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
                 KeyCode::Char('f') => {
+                    let state = self.sync_state.read().unwrap();
                     let keys = state
                         .item_keys
                         .sorted()
@@ -269,7 +274,7 @@ impl QueryWidget {
     }
 
     async fn load(self, env: EnvHandle) {
-        self.set_loading_state(LoadingState::Loading).await;
+        self.set_loading_state(LoadingState::Loading);
         env.invalidate();
 
         let this = &self;
@@ -281,7 +286,7 @@ impl QueryWidget {
 
         match result {
             Ok((table, query)) => {
-                self.set_loading_state(LoadingState::Loaded).await;
+                self.set_loading_state(LoadingState::Loaded);
                 let mut item_keys = HashSet::new();
                 let shared_item_keys = self.sync_state.read().unwrap().item_keys.clone();
                 let mut state = self.sync_state.write().unwrap();
@@ -292,24 +297,20 @@ impl QueryWidget {
                 state.items.extend(items);
                 state.item_keys.extend(item_keys, &table);
                 state.query_output = Some(QueryOutput::Scan(query));
+                drop(state);
             }
             Err(e) => {
-                self.set_loading_state(LoadingState::Error(e)).await;
+                self.set_loading_state(LoadingState::Error(e));
             }
         }
         env.invalidate();
     }
 
     async fn query(&self) -> Result<ScanOutput, String> {
-        self.client
-            .scan()
-            .table_name(self.table_name.clone())
-            .send()
-            .await
-            .map_err(|e| e.to_string())
+        self.scan_table(None).await
     }
 
-    async fn set_loading_state(&self, state: LoadingState) {
+    fn set_loading_state(&self, state: LoadingState) {
         self.sync_state.write().unwrap().loading_state = state;
     }
 
@@ -348,7 +349,236 @@ impl QueryWidget {
         self.sync_state.write().unwrap().table_state.scroll_up_by(1);
     }
 
-    fn start_query(&self, query: &str) {
+    fn start_query(&self, query: &str, env: EnvHandle) {
+        if query.trim().is_empty() {
+            let this: QueryWidget = self.clone();
+            tokio::spawn(async move {
+                this.set_loading_state(LoadingState::Loading);
+                env.invalidate();
+                match this.scan_table(None).await {
+                    Ok(output) => {
+                        this.process_scan_results(output).await;
+                        this.set_loading_state(LoadingState::Loaded);
+                    },
+                    Err(e) => this.set_loading_state(LoadingState::Error(e)),
+                }
+                env.invalidate();
+            });
+        } else {
+            match parse_dynamo_expression(query) {
+                Ok(expr) => {
+                    let this: QueryWidget = self.clone();
+                    tokio::spawn(async move {
+                        this.set_loading_state(LoadingState::Loading);
+                        env.invalidate();
+                        let (filter_expr, attr_names, attr_values) = this.convert_expression_to_filter(&expr);
+                        match this.scan_with_filter(&filter_expr, attr_names, attr_values).await {
+                            Ok(output) => {
+                                this.process_scan_results(output).await;
+                                this.set_loading_state(LoadingState::Loaded);
+                            },
+                            Err(e) => this.set_loading_state(LoadingState::Error(e)),
+                        }
+                        env.invalidate();
+                    });
+                },
+                Err(e) => {
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        this.set_loading_state(LoadingState::Error(format!("Parse error: {}", e)));
+                        env.invalidate();
+                    });
+                }
+            }
+        }
+    }
+
+    fn convert_expression_to_filter(&self, expr: &DynamoExpression) -> (String, HashMap<String, String>, HashMap<String, AttributeValue>) {
+        let mut attr_names = HashMap::new();
+        let mut attr_values = HashMap::new();
+        let mut name_counter = 0;
+        let mut value_counter = 0;
+
+        let filter_expr = self.build_filter_expression(expr, &mut attr_names, &mut attr_values, &mut name_counter, &mut value_counter);
+        (filter_expr, attr_names, attr_values)
+    }
+
+    fn build_filter_expression(
+        &self,
+        expr: &DynamoExpression,
+        attr_names: &mut HashMap<String, String>,
+        attr_values: &mut HashMap<String, AttributeValue>,
+        name_counter: &mut u32,
+        value_counter: &mut u32
+    ) -> String {
+        match expr {
+            DynamoExpression::Comparison { left, operator, right } => {
+                let left_str = self.operand_to_string(left, attr_names, attr_values, name_counter, value_counter);
+                let op_str = match operator {
+                    Comparator::Equal => "=",
+                    Comparator::NotEqual => "<>",
+                    Comparator::Less => "<",
+                    Comparator::LessOrEqual => "<=",
+                    Comparator::Greater => ">",
+                    Comparator::GreaterOrEqual => ">=",
+                };
+                let right_str = self.operand_to_string(right, attr_names, attr_values, name_counter, value_counter);
+                format!("{} {} {}", left_str, op_str, right_str)
+            },
+            DynamoExpression::Between { operand, lower, upper } => {
+                let operand_str = self.operand_to_string(operand, attr_names, attr_values, name_counter, value_counter);
+                let lower_str = self.operand_to_string(lower, attr_names, attr_values, name_counter, value_counter);
+                let upper_str = self.operand_to_string(upper, attr_names, attr_values, name_counter, value_counter);
+                format!("{} BETWEEN {} AND {}", operand_str, lower_str, upper_str)
+            },
+            DynamoExpression::In { operand, values } => {
+                let operand_str = self.operand_to_string(operand, attr_names, attr_values, name_counter, value_counter);
+                let value_strs: Vec<String> = values.iter()
+                    .map(|v| self.operand_to_string(v, attr_names, attr_values, name_counter, value_counter))
+                    .collect();
+                format!("{} IN ({})", operand_str, value_strs.join(", "))
+            },
+            DynamoExpression::Function { name, args } => {
+                let func_name = match name {
+                    FunctionName::AttributeExists => "attribute_exists",
+                    FunctionName::AttributeNotExists => "attribute_not_exists",
+                    FunctionName::AttributeType => "attribute_type",
+                    FunctionName::BeginsWith => "begins_with",
+                    FunctionName::Contains => "contains",
+                    FunctionName::Size => "size",
+                };
+                let arg_strs: Vec<String> = args.iter()
+                    .map(|arg| self.operand_to_string(arg, attr_names, attr_values, name_counter, value_counter))
+                    .collect();
+                format!("{}({})", func_name, arg_strs.join(", "))
+            },
+            DynamoExpression::And(left, right) => {
+                let left_str = self.build_filter_expression(left, attr_names, attr_values, name_counter, value_counter);
+                let right_str = self.build_filter_expression(right, attr_names, attr_values, name_counter, value_counter);
+                format!("({}) AND ({})", left_str, right_str)
+            },
+            DynamoExpression::Or(left, right) => {
+                let left_str = self.build_filter_expression(left, attr_names, attr_values, name_counter, value_counter);
+                let right_str = self.build_filter_expression(right, attr_names, attr_values, name_counter, value_counter);
+                format!("({}) OR ({})", left_str, right_str)
+            },
+            DynamoExpression::Not(inner) => {
+                let inner_str = self.build_filter_expression(inner, attr_names, attr_values, name_counter, value_counter);
+                format!("NOT ({})", inner_str)
+            },
+            DynamoExpression::Parentheses(inner) => {
+                let inner_str = self.build_filter_expression(inner, attr_names, attr_values, name_counter, value_counter);
+                format!("({})", inner_str)
+            },
+        }
+    }
+
+    fn operand_to_string(
+        &self,
+        operand: &Operand,
+        attr_names: &mut HashMap<String, String>,
+        attr_values: &mut HashMap<String, AttributeValue>,
+        name_counter: &mut u32,
+        value_counter: &mut u32
+    ) -> String {
+        match operand {
+            Operand::Path(path) => {
+                let name_placeholder = format!("#name{}", name_counter);
+                *name_counter += 1;
+                attr_names.insert(name_placeholder.clone(), path.clone());
+                name_placeholder
+            },
+            Operand::Value(val) => {
+                let value_placeholder = format!(":val{}", value_counter);
+                *value_counter += 1;
+                attr_values.insert(value_placeholder.clone(), AttributeValue::S(val.clone()));
+                value_placeholder
+            },
+            Operand::Number(num) => {
+                let value_placeholder = format!(":val{}", value_counter);
+                *value_counter += 1;
+                attr_values.insert(value_placeholder.clone(), AttributeValue::N(num.to_string()));
+                value_placeholder
+            },
+            Operand::Boolean(b) => {
+                let value_placeholder = format!(":val{}", value_counter);
+                *value_counter += 1;
+                attr_values.insert(value_placeholder.clone(), AttributeValue::Bool(*b));
+                value_placeholder
+            },
+            Operand::Null => {
+                let value_placeholder = format!(":val{}", value_counter);
+                *value_counter += 1;
+                attr_values.insert(value_placeholder.clone(), AttributeValue::Null(true));
+                value_placeholder
+            },
+        }
+    }
+
+    async fn scan_table(&self, filter_expr: Option<&str>) -> Result<ScanOutput, String> {
+        let mut scan_builder = self.client
+            .scan()
+            .table_name(self.table_name.clone());
+
+        if let Some(filter) = filter_expr {
+            scan_builder = scan_builder.filter_expression(filter);
+        }
+
+        scan_builder
+            .send()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn scan_with_filter(
+        &self,
+        filter_expr: &str,
+        attr_names: HashMap<String, String>,
+        attr_values: HashMap<String, AttributeValue>
+    ) -> Result<ScanOutput, String> {
+        let mut scan_builder = self.client
+            .scan()
+            .table_name(self.table_name.clone())
+            .filter_expression(filter_expr);
+
+        for (key, value) in attr_names {
+            scan_builder = scan_builder.expression_attribute_names(key, value);
+        }
+
+        for (key, value) in attr_values {
+            scan_builder = scan_builder.expression_attribute_values(key, value);
+        }
+
+        scan_builder
+            .send()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn process_scan_results(&self, query_output: ScanOutput) {
+        let mut item_keys = HashSet::new();
+        let shared_item_keys = self.sync_state.read().unwrap().item_keys.clone();
+
+        let items = query_output.items();
+        let new_items: Vec<Item> = items.iter().map(|item| {
+            item_keys.extend(item.keys().cloned());
+            Item(item.clone(), shared_item_keys.clone())
+        }).collect();
+
+        // Get table description before acquiring the write lock
+        let table_desc = self.table_description().await.ok();
+
+        let mut state = self.sync_state.write().unwrap();
+        // Clear previous results
+        state.items.clear();
+        state.items.extend(new_items);
+
+        // Update item keys with table description
+        if let Some(table_desc) = table_desc {
+            state.item_keys.extend(item_keys, &table_desc);
+        }
+
+        state.query_output = Some(QueryOutput::Scan(query_output));
     }
 
 }
