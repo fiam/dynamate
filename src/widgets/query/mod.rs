@@ -30,7 +30,10 @@ use crate::{
         theme::Theme, EnvHandle
     }
 };
-use dynamate::expr::{parse_dynamo_expression, DynamoExpression, Operand, Comparator, FunctionName};
+use dynamate::{
+    expr::parse_dynamo_expression,
+    dynamodb::{DynamoDbRequest, QueryBuilder, ScanBuilder},
+};
 
 mod input;
 mod item_keys;
@@ -62,6 +65,9 @@ struct QueryAsyncState {
 #[derive(Debug, Clone)]
 enum QueryOutput {
     Scan(ScanOutput),
+    Query(ScanOutput),
+    QueryGSI(ScanOutput, String), // output, index_name
+    QueryLSI(ScanOutput, String), // output, index_name
 }
 
 #[derive(Debug, Clone)]
@@ -156,10 +162,19 @@ impl crate::widgets::Widget for QueryWidget {
 
         // a block with a right aligned title with the loading state on the right
         let (title, title_bottom) = match &state.loading_state {
-            LoadingState::Idle | LoadingState::Loaded => (
-                "Results".to_string(),
-                pad(format!("{} results, showing {}-{}", total, first_item, last_item), 2),
-            ),
+            LoadingState::Idle | LoadingState::Loaded => {
+                let operation_info = match &state.query_output {
+                    Some(QueryOutput::Scan(_)) => " (Scan)".to_string(),
+                    Some(QueryOutput::Query(_)) => " (Query)".to_string(),
+                    Some(QueryOutput::QueryGSI(_, index_name)) => format!(" (Query GSI: {})", index_name),
+                    Some(QueryOutput::QueryLSI(_, index_name)) => format!(" (Query LSI: {})", index_name),
+                    None => "".to_string(),
+                };
+                (
+                    format!("Results{}", operation_info),
+                    pad(format!("{} results, showing {}-{}", total, first_item, last_item), 2),
+                )
+            },
             LoadingState::Loading => ("Loading".to_string(), "".to_string()),
             LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
         };
@@ -357,7 +372,7 @@ impl QueryWidget {
                 env.invalidate();
                 match this.scan_table(None).await {
                     Ok(output) => {
-                        this.process_scan_results(output).await;
+                        this.process_query_output(QueryOutput::Scan(output)).await;
                         this.set_loading_state(LoadingState::Loaded);
                     },
                     Err(e) => this.set_loading_state(LoadingState::Error(e)),
@@ -371,10 +386,24 @@ impl QueryWidget {
                     tokio::spawn(async move {
                         this.set_loading_state(LoadingState::Loading);
                         env.invalidate();
-                        let (filter_expr, attr_names, attr_values) = this.convert_expression_to_filter(&expr);
-                        match this.scan_with_filter(&filter_expr, attr_names, attr_values).await {
-                            Ok(output) => {
-                                this.process_scan_results(output).await;
+
+                        let table_desc = match this.table_description().await {
+                            Ok(desc) => desc,
+                            Err(e) => {
+                                this.set_loading_state(LoadingState::Error(e));
+                                env.invalidate();
+                                return;
+                            }
+                        };
+
+                        let db_request = DynamoDbRequest::from_expression_and_table(&expr, &table_desc);
+                        let operation_type = db_request.operation_type();
+
+                        tracing::info!("Using operation: {}", operation_type);
+
+                        match this.execute_db_request(&db_request).await {
+                            Ok(query_output) => {
+                                this.process_query_output(query_output).await;
                                 this.set_loading_state(LoadingState::Loaded);
                             },
                             Err(e) => this.set_loading_state(LoadingState::Error(e)),
@@ -393,126 +422,106 @@ impl QueryWidget {
         }
     }
 
-    fn convert_expression_to_filter(&self, expr: &DynamoExpression) -> (String, HashMap<String, String>, HashMap<String, AttributeValue>) {
-        let mut attr_names = HashMap::new();
-        let mut attr_values = HashMap::new();
-        let mut name_counter = 0;
-        let mut value_counter = 0;
-
-        let filter_expr = self.build_filter_expression(expr, &mut attr_names, &mut attr_values, &mut name_counter, &mut value_counter);
-        (filter_expr, attr_names, attr_values)
-    }
-
-    fn build_filter_expression(
-        &self,
-        expr: &DynamoExpression,
-        attr_names: &mut HashMap<String, String>,
-        attr_values: &mut HashMap<String, AttributeValue>,
-        name_counter: &mut u32,
-        value_counter: &mut u32
-    ) -> String {
-        match expr {
-            DynamoExpression::Comparison { left, operator, right } => {
-                let left_str = self.operand_to_string(left, attr_names, attr_values, name_counter, value_counter);
-                let op_str = match operator {
-                    Comparator::Equal => "=",
-                    Comparator::NotEqual => "<>",
-                    Comparator::Less => "<",
-                    Comparator::LessOrEqual => "<=",
-                    Comparator::Greater => ">",
-                    Comparator::GreaterOrEqual => ">=",
+    async fn execute_db_request(&self, db_request: &DynamoDbRequest) -> Result<QueryOutput, String> {
+        match db_request {
+            DynamoDbRequest::Query(query_builder) => {
+                let output = self.execute_query(query_builder).await?;
+                let query_output = match query_builder.query_type() {
+                    dynamate::dynamodb::QueryType::TableQuery { .. } =>
+                        QueryOutput::Query(output),
+                    dynamate::dynamodb::QueryType::GlobalSecondaryIndexQuery { index_name, .. } =>
+                        QueryOutput::QueryGSI(output, index_name.clone()),
+                    dynamate::dynamodb::QueryType::LocalSecondaryIndexQuery { index_name, .. } =>
+                        QueryOutput::QueryLSI(output, index_name.clone()),
+                    dynamate::dynamodb::QueryType::TableScan =>
+                        QueryOutput::Scan(output), // This shouldn't happen for Query
                 };
-                let right_str = self.operand_to_string(right, attr_names, attr_values, name_counter, value_counter);
-                format!("{} {} {}", left_str, op_str, right_str)
-            },
-            DynamoExpression::Between { operand, lower, upper } => {
-                let operand_str = self.operand_to_string(operand, attr_names, attr_values, name_counter, value_counter);
-                let lower_str = self.operand_to_string(lower, attr_names, attr_values, name_counter, value_counter);
-                let upper_str = self.operand_to_string(upper, attr_names, attr_values, name_counter, value_counter);
-                format!("{} BETWEEN {} AND {}", operand_str, lower_str, upper_str)
-            },
-            DynamoExpression::In { operand, values } => {
-                let operand_str = self.operand_to_string(operand, attr_names, attr_values, name_counter, value_counter);
-                let value_strs: Vec<String> = values.iter()
-                    .map(|v| self.operand_to_string(v, attr_names, attr_values, name_counter, value_counter))
-                    .collect();
-                format!("{} IN ({})", operand_str, value_strs.join(", "))
-            },
-            DynamoExpression::Function { name, args } => {
-                let func_name = match name {
-                    FunctionName::AttributeExists => "attribute_exists",
-                    FunctionName::AttributeNotExists => "attribute_not_exists",
-                    FunctionName::AttributeType => "attribute_type",
-                    FunctionName::BeginsWith => "begins_with",
-                    FunctionName::Contains => "contains",
-                    FunctionName::Size => "size",
-                };
-                let arg_strs: Vec<String> = args.iter()
-                    .map(|arg| self.operand_to_string(arg, attr_names, attr_values, name_counter, value_counter))
-                    .collect();
-                format!("{}({})", func_name, arg_strs.join(", "))
-            },
-            DynamoExpression::And(left, right) => {
-                let left_str = self.build_filter_expression(left, attr_names, attr_values, name_counter, value_counter);
-                let right_str = self.build_filter_expression(right, attr_names, attr_values, name_counter, value_counter);
-                format!("({}) AND ({})", left_str, right_str)
-            },
-            DynamoExpression::Or(left, right) => {
-                let left_str = self.build_filter_expression(left, attr_names, attr_values, name_counter, value_counter);
-                let right_str = self.build_filter_expression(right, attr_names, attr_values, name_counter, value_counter);
-                format!("({}) OR ({})", left_str, right_str)
-            },
-            DynamoExpression::Not(inner) => {
-                let inner_str = self.build_filter_expression(inner, attr_names, attr_values, name_counter, value_counter);
-                format!("NOT ({})", inner_str)
-            },
-            DynamoExpression::Parentheses(inner) => {
-                let inner_str = self.build_filter_expression(inner, attr_names, attr_values, name_counter, value_counter);
-                format!("({})", inner_str)
-            },
+                Ok(query_output)
+            }
+            DynamoDbRequest::Scan(scan_builder) => {
+                let output = self.execute_scan(scan_builder).await?;
+                Ok(QueryOutput::Scan(output))
+            }
         }
     }
 
-    fn operand_to_string(
-        &self,
-        operand: &Operand,
-        attr_names: &mut HashMap<String, String>,
-        attr_values: &mut HashMap<String, AttributeValue>,
-        name_counter: &mut u32,
-        value_counter: &mut u32
-    ) -> String {
-        match operand {
-            Operand::Path(path) => {
-                let name_placeholder = format!("#name{}", name_counter);
-                *name_counter += 1;
-                attr_names.insert(name_placeholder.clone(), path.clone());
-                name_placeholder
-            },
-            Operand::Value(val) => {
-                let value_placeholder = format!(":val{}", value_counter);
-                *value_counter += 1;
-                attr_values.insert(value_placeholder.clone(), AttributeValue::S(val.clone()));
-                value_placeholder
-            },
-            Operand::Number(num) => {
-                let value_placeholder = format!(":val{}", value_counter);
-                *value_counter += 1;
-                attr_values.insert(value_placeholder.clone(), AttributeValue::N(num.to_string()));
-                value_placeholder
-            },
-            Operand::Boolean(b) => {
-                let value_placeholder = format!(":val{}", value_counter);
-                *value_counter += 1;
-                attr_values.insert(value_placeholder.clone(), AttributeValue::Bool(*b));
-                value_placeholder
-            },
-            Operand::Null => {
-                let value_placeholder = format!(":val{}", value_counter);
-                *value_counter += 1;
-                attr_values.insert(value_placeholder.clone(), AttributeValue::Null(true));
-                value_placeholder
-            },
+
+    async fn execute_query(&self, query_builder: &QueryBuilder) -> Result<ScanOutput, String> {
+        use aws_sdk_dynamodb::operation::query::QueryOutput;
+
+        let mut query_request = self.client
+            .query()
+            .table_name(self.table_name.clone());
+
+        // Set index name if this is an index query
+        if let Some(index_name) = query_builder.index_name() {
+            query_request = query_request.index_name(index_name.clone());
         }
+
+        // Set key condition expression
+        if let Some(key_condition) = query_builder.key_condition_expression() {
+            query_request = query_request.key_condition_expression(key_condition);
+        }
+
+        // Set filter expression if present
+        if let Some(filter_expr) = query_builder.filter_expression() {
+            query_request = query_request.filter_expression(filter_expr);
+        }
+
+        // Set expression attribute names and values
+        for (key, value) in query_builder.expression_attribute_names() {
+            query_request = query_request.expression_attribute_names(key.clone(), value.clone());
+        }
+
+        for (key, value) in query_builder.expression_attribute_values() {
+            query_request = query_request.expression_attribute_values(key.clone(), value.clone());
+        }
+
+        tracing::info!("Key condition expression: {:?}", query_builder.key_condition_expression());
+        tracing::info!("Filter expression: {:?}", query_builder.filter_expression());
+        tracing::info!("Attribute names: {:?}", query_builder.expression_attribute_names());
+        tracing::info!("Attribute values: {:?}", query_builder.expression_attribute_values());
+
+        let query_result: QueryOutput = query_request
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Convert QueryOutput to ScanOutput format for compatibility
+        let scan_output = ScanOutput::builder()
+            .set_items(Some(query_result.items().to_vec()))
+            .set_count(Some(query_result.count()))
+            .set_scanned_count(Some(query_result.scanned_count()))
+            .build();
+
+        Ok(scan_output)
+    }
+
+    async fn execute_scan(&self, scan_builder: &ScanBuilder) -> Result<ScanOutput, String> {
+        let mut scan_request = self.client
+            .scan()
+            .table_name(self.table_name.clone());
+
+        if let Some(filter_expr) = scan_builder.filter_expression() {
+            scan_request = scan_request.filter_expression(filter_expr);
+
+            tracing::info!("Filter expression: {}", filter_expr);
+            tracing::info!("Attribute names: {:?}", scan_builder.expression_attribute_names());
+            tracing::info!("Attribute values: {:?}", scan_builder.expression_attribute_values());
+
+            for (key, value) in scan_builder.expression_attribute_names() {
+                scan_request = scan_request.expression_attribute_names(key.clone(), value.clone());
+            }
+
+            for (key, value) in scan_builder.expression_attribute_values() {
+                scan_request = scan_request.expression_attribute_values(key.clone(), value.clone());
+            }
+        }
+
+        scan_request
+            .send()
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn scan_table(&self, filter_expr: Option<&str>) -> Result<ScanOutput, String> {
@@ -530,36 +539,20 @@ impl QueryWidget {
             .map_err(|e| e.to_string())
     }
 
-    async fn scan_with_filter(
-        &self,
-        filter_expr: &str,
-        attr_names: HashMap<String, String>,
-        attr_values: HashMap<String, AttributeValue>
-    ) -> Result<ScanOutput, String> {
-        let mut scan_builder = self.client
-            .scan()
-            .table_name(self.table_name.clone())
-            .filter_expression(filter_expr);
 
-        for (key, value) in attr_names {
-            scan_builder = scan_builder.expression_attribute_names(key, value);
-        }
-
-        for (key, value) in attr_values {
-            scan_builder = scan_builder.expression_attribute_values(key, value);
-        }
-
-        scan_builder
-            .send()
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn process_scan_results(&self, query_output: ScanOutput) {
+    async fn process_query_output(&self, query_output: QueryOutput) {
         let mut item_keys = HashSet::new();
         let shared_item_keys = self.sync_state.read().unwrap().item_keys.clone();
 
-        let items = query_output.items();
+        // Extract the ScanOutput from the QueryOutput enum
+        let scan_output = match &query_output {
+            QueryOutput::Scan(output) |
+            QueryOutput::Query(output) |
+            QueryOutput::QueryGSI(output, _) |
+            QueryOutput::QueryLSI(output, _) => output,
+        };
+
+        let items = scan_output.items();
         let new_items: Vec<Item> = items.iter().map(|item| {
             item_keys.extend(item.keys().cloned());
             Item(item.clone(), shared_item_keys.clone())
@@ -578,7 +571,7 @@ impl QueryWidget {
             state.item_keys.extend(item_keys, &table_desc);
         }
 
-        state.query_output = Some(QueryOutput::Scan(query_output));
+        state.query_output = Some(query_output);
     }
 
 }
