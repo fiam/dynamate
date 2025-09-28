@@ -1,7 +1,7 @@
 use aws_sdk_dynamodb::types::TableDescription;
 
+use super::{QueryBuilder, QueryType, ScanBuilder, TableInfo};
 use crate::expr::DynamoExpression;
-use super::{QueryBuilder, ScanBuilder, TableInfo, QueryType};
 
 pub enum DynamoDbRequest {
     Query(QueryBuilder),
@@ -9,7 +9,10 @@ pub enum DynamoDbRequest {
 }
 
 impl DynamoDbRequest {
-    pub fn from_expression_and_table(expr: &DynamoExpression, table_desc: &TableDescription) -> Self {
+    pub fn from_expression_and_table(
+        expr: &DynamoExpression,
+        table_desc: &TableDescription,
+    ) -> Self {
         let table_info = TableInfo::from_table_description(table_desc);
         let query_builder = QueryBuilder::new(&table_info, expr);
 
@@ -46,10 +49,12 @@ impl DynamoDbRequest {
         match self {
             Self::Query(builder) => match builder.query_type() {
                 QueryType::TableQuery { .. } => "Query (Table)".to_string(),
-                QueryType::GlobalSecondaryIndexQuery { index_name, .. } =>
-                    format!("Query (GSI: {})", index_name),
-                QueryType::LocalSecondaryIndexQuery { index_name, .. } =>
-                    format!("Query (LSI: {})", index_name),
+                QueryType::GlobalSecondaryIndexQuery { index_name, .. } => {
+                    format!("Query (GSI: {})", index_name)
+                }
+                QueryType::LocalSecondaryIndexQuery { index_name, .. } => {
+                    format!("Query (LSI: {})", index_name)
+                }
                 QueryType::TableScan => "Scan".to_string(), // This shouldn't happen
             },
             Self::Scan(_) => "Scan".to_string(),

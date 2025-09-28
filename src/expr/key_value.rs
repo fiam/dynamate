@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use super::ast::{KeyValue, Value};
 use super::error::ParseError;
+use std::collections::HashMap;
 
 pub fn parse_expressions(input: &str) -> Result<Vec<KeyValue>, ParseError> {
     let mut result = Vec::new();
@@ -145,10 +145,7 @@ fn parse_unquoted_token(chars: &[char], start: usize) -> Result<(String, usize),
     let mut result = String::new();
 
     // Parse unquoted token
-    while i < chars.len()
-        && !chars[i].is_whitespace()
-        && chars[i] != '='
-    {
+    while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '=' {
         result.push(chars[i]);
         i += 1;
     }

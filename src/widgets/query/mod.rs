@@ -7,11 +7,13 @@ use std::{
 };
 
 use aws_sdk_dynamodb::{
-    operation::{query::Query, scan::ScanOutput},
+    operation::{
+        query::{Query, QueryOutput},
+        scan::ScanOutput,
+    },
     types::{AttributeValue, TableDescription},
 };
 use crossterm::event::{Event, KeyCode};
-use ratatui::{text::Text, widgets::Widget};
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -20,19 +22,20 @@ use ratatui::{
     text::{self, Line},
     widgets::{Block, Clear, HighlightSpacing, Row, StatefulWidget, Table, TableState},
 };
+use ratatui::{text::Text, widgets::Widget};
 use tokio::{sync::OnceCell, try_join};
 
 use item_keys::ItemKeys;
 use keys_widget::KeysWidget;
 
 use crate::{
-    help, util::pad, widgets::{
-        theme::Theme, EnvHandle
-    }
+    help,
+    util::pad,
+    widgets::{EnvHandle, theme::Theme},
 };
 use dynamate::{
+    dynamodb::{execute, DynamoDbRequest, Kind, Output, QueryBuilder, ScanBuilder},
     expr::parse_dynamo_expression,
-    dynamodb::{DynamoDbRequest, QueryBuilder, ScanBuilder},
 };
 
 mod input;
@@ -51,7 +54,7 @@ pub struct QueryWidget {
 struct QuerySyncState {
     input: input::Input,
     loading_state: LoadingState,
-    query_output: Option<QueryOutput>,
+    query_output: Option<Output>,
     items: Vec<Item>,
     item_keys: Arc<item_keys::ItemKeys>,
     table_state: TableState,
@@ -60,14 +63,6 @@ struct QuerySyncState {
 #[derive(Debug, Default)]
 struct QueryAsyncState {
     table_desc: OnceCell<Arc<TableDescription>>,
-}
-
-#[derive(Debug, Clone)]
-enum QueryOutput {
-    Scan(ScanOutput),
-    Query(ScanOutput),
-    QueryGSI(ScanOutput, String), // output, index_name
-    QueryLSI(ScanOutput, String), // output, index_name
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +145,6 @@ impl crate::widgets::Widget for QueryWidget {
             })
             .collect();
 
-
         drop(keys_view);
 
         // maximum rows is the area height, minus 2 for the the top and bottom borders,
@@ -163,25 +157,24 @@ impl crate::widgets::Widget for QueryWidget {
         // a block with a right aligned title with the loading state on the right
         let (title, title_bottom) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => {
-                let operation_info = match &state.query_output {
-                    Some(QueryOutput::Scan(_)) => " (Scan)".to_string(),
-                    Some(QueryOutput::Query(_)) => " (Query)".to_string(),
-                    Some(QueryOutput::QueryGSI(_, index_name)) => format!(" (Query GSI: {})", index_name),
-                    Some(QueryOutput::QueryLSI(_, index_name)) => format!(" (Query LSI: {})", index_name),
-                    None => "".to_string(),
-                };
                 (
-                    format!("Results{}", operation_info),
-                    pad(format!("{} results, showing {}-{}", total, first_item, last_item), 2),
+                    format!("Results{}", output_info(state.query_output.as_ref())),
+                    pad(
+                        format!("{} results, showing {}-{}", total, first_item, last_item),
+                        2,
+                    ),
                 )
-            },
+            }
             LoadingState::Loading => ("Loading".to_string(), "".to_string()),
             LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
         };
 
         let block = Block::bordered()
             .title_top(title)
-            .title_bottom(Line::styled(title_bottom, Style::default().fg(theme.neutral_variant())));
+            .title_bottom(Line::styled(
+                title_bottom,
+                Style::default().fg(theme.neutral_variant()),
+            ));
 
         if state.table_state.selected().is_none() && !state.items.is_empty() {
             state.table_state.select(Some(0));
@@ -194,25 +187,34 @@ impl crate::widgets::Widget for QueryWidget {
             .highlight_symbol(">>")
             .row_highlight_style(Style::default().bg(theme.secondary()));
 
-        StatefulWidget::render(table, results_area, frame.buffer_mut(), &mut state.table_state);
+        StatefulWidget::render(
+            table,
+            results_area,
+            frame.buffer_mut(),
+            &mut state.table_state,
+        );
     }
 
     fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
         let input_is_active = self.sync_state.read().unwrap().input.is_active();
         if input_is_active {
-            if self.sync_state.write().unwrap().input.handle_event(event) {                
+            if self.sync_state.write().unwrap().input.handle_event(event) {
                 return true;
             }
-        }    
+        }
         if let Some(key) = event.as_key_press_event() {
             match key.code {
-                KeyCode::Tab | KeyCode::BackTab => self.sync_state.write().unwrap().input.toggle_active(),
-                KeyCode::Esc if input_is_active => self.sync_state.write().unwrap().input.toggle_active(),
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.sync_state.write().unwrap().input.toggle_active()
+                }
+                KeyCode::Esc if input_is_active => {
+                    self.sync_state.write().unwrap().input.toggle_active()
+                }
                 KeyCode::Enter if input_is_active => {
                     let mut state = self.sync_state.write().unwrap();
-                    self.start_query(state.input.value(), env.clone());
+                    self.start_query(Some(state.input.value()), env.clone());
                     state.input.toggle_active();
-                },
+                }
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
                 KeyCode::Char('f') => {
@@ -252,7 +254,6 @@ impl crate::widgets::Widget for QueryWidget {
             }
         }
 
-
         false
     }
 
@@ -289,40 +290,7 @@ impl QueryWidget {
     }
 
     async fn load(self, env: EnvHandle) {
-        self.set_loading_state(LoadingState::Loading);
-        env.invalidate();
-
-        let this = &self;
-
-        let result = try_join!(
-            this.table_description(), // returns Result<Arc<TableDescription>, String>
-            this.query(),             // returns Result<_, String>
-        );
-
-        match result {
-            Ok((table, query)) => {
-                self.set_loading_state(LoadingState::Loaded);
-                let mut item_keys = HashSet::new();
-                let shared_item_keys = self.sync_state.read().unwrap().item_keys.clone();
-                let mut state = self.sync_state.write().unwrap();
-                let items = query.items().into_iter().map(|item| {
-                    item_keys.extend(item.keys().cloned());
-                    Item(item.clone(), shared_item_keys.clone())
-                });
-                state.items.extend(items);
-                state.item_keys.extend(item_keys, &table);
-                state.query_output = Some(QueryOutput::Scan(query));
-                drop(state);
-            }
-            Err(e) => {
-                self.set_loading_state(LoadingState::Error(e));
-            }
-        }
-        env.invalidate();
-    }
-
-    async fn query(&self) -> Result<ScanOutput, String> {
-        self.scan_table(None).await
+        self.start_query(None, env);
     }
 
     fn set_loading_state(&self, state: LoadingState) {
@@ -364,199 +332,57 @@ impl QueryWidget {
         self.sync_state.write().unwrap().table_state.scroll_up_by(1);
     }
 
-    fn start_query(&self, query: &str, env: EnvHandle) {
-        if query.trim().is_empty() {
-            let this: QueryWidget = self.clone();
-            tokio::spawn(async move {
-                this.set_loading_state(LoadingState::Loading);
-                env.invalidate();
-                match this.scan_table(None).await {
-                    Ok(output) => {
-                        this.process_query_output(QueryOutput::Scan(output)).await;
-                        this.set_loading_state(LoadingState::Loaded);
-                    },
-                    Err(e) => this.set_loading_state(LoadingState::Error(e)),
-                }
-                env.invalidate();
-            });
-        } else {
-            match parse_dynamo_expression(query) {
-                Ok(expr) => {
-                    let this: QueryWidget = self.clone();
-                    tokio::spawn(async move {
-                        this.set_loading_state(LoadingState::Loading);
-                        env.invalidate();
+    async fn create_request(&self, query: Option<&str>) -> Result<DynamoDbRequest, String> {
+        let query = query.unwrap_or("").trim();
+        if query.is_empty() {
+            return Ok(DynamoDbRequest::Scan(ScanBuilder::new()));
+        }
+        let expr = parse_dynamo_expression(query).map_err(|e| e.to_string())?;
+        let table_desc = self.table_description().await.map_err(|e| e.to_string())?;
+        Ok(DynamoDbRequest::from_expression_and_table(
+            &expr,
+            &table_desc,
+        ))
+    }
 
-                        let table_desc = match this.table_description().await {
-                            Ok(desc) => desc,
-                            Err(e) => {
-                                this.set_loading_state(LoadingState::Error(e));
-                                env.invalidate();
-                                return;
-                            }
-                        };
-
-                        let db_request = DynamoDbRequest::from_expression_and_table(&expr, &table_desc);
-                        let operation_type = db_request.operation_type();
-
-                        tracing::info!("Using operation: {}", operation_type);
-
-                        match this.execute_db_request(&db_request).await {
-                            Ok(query_output) => {
-                                this.process_query_output(query_output).await;
-                                this.set_loading_state(LoadingState::Loaded);
-                            },
-                            Err(e) => this.set_loading_state(LoadingState::Error(e)),
+    fn start_query(&self, query: Option<&str>, env: EnvHandle) {
+        let this: QueryWidget = self.clone();
+        let query = query.map(|q| q.to_string());
+        tokio::spawn(async move {
+            this.set_loading_state(LoadingState::Loading);
+            env.invalidate();
+            match this.create_request(query.as_deref()).await {
+                Ok(request) => {
+                    match execute(this.client.clone(), &this.table_name, &request).await {
+                        Ok(query_output) => {
+                            this.process_query_output(query_output).await;
+                            this.set_loading_state(LoadingState::Loaded);
                         }
-                        env.invalidate();
-                    });
-                },
+                        Err(e) => {
+                            this.set_loading_state(LoadingState::Error(e.to_string()));
+                        }
+                    };
+                }
                 Err(e) => {
-                    let this = self.clone();
-                    tokio::spawn(async move {
-                        this.set_loading_state(LoadingState::Error(format!("Parse error: {}", e)));
-                        env.invalidate();
-                    });
+                    this.set_loading_state(LoadingState::Error(e));
                 }
             }
-        }
+            env.invalidate();
+        });
     }
 
-    async fn execute_db_request(&self, db_request: &DynamoDbRequest) -> Result<QueryOutput, String> {
-        match db_request {
-            DynamoDbRequest::Query(query_builder) => {
-                let output = self.execute_query(query_builder).await?;
-                let query_output = match query_builder.query_type() {
-                    dynamate::dynamodb::QueryType::TableQuery { .. } =>
-                        QueryOutput::Query(output),
-                    dynamate::dynamodb::QueryType::GlobalSecondaryIndexQuery { index_name, .. } =>
-                        QueryOutput::QueryGSI(output, index_name.clone()),
-                    dynamate::dynamodb::QueryType::LocalSecondaryIndexQuery { index_name, .. } =>
-                        QueryOutput::QueryLSI(output, index_name.clone()),
-                    dynamate::dynamodb::QueryType::TableScan =>
-                        QueryOutput::Scan(output), // This shouldn't happen for Query
-                };
-                Ok(query_output)
-            }
-            DynamoDbRequest::Scan(scan_builder) => {
-                let output = self.execute_scan(scan_builder).await?;
-                Ok(QueryOutput::Scan(output))
-            }
-        }
-    }
-
-
-    async fn execute_query(&self, query_builder: &QueryBuilder) -> Result<ScanOutput, String> {
-        use aws_sdk_dynamodb::operation::query::QueryOutput;
-
-        let mut query_request = self.client
-            .query()
-            .table_name(self.table_name.clone());
-
-        // Set index name if this is an index query
-        if let Some(index_name) = query_builder.index_name() {
-            query_request = query_request.index_name(index_name.clone());
-        }
-
-        // Set key condition expression
-        if let Some(key_condition) = query_builder.key_condition_expression() {
-            query_request = query_request.key_condition_expression(key_condition);
-        }
-
-        // Set filter expression if present
-        if let Some(filter_expr) = query_builder.filter_expression() {
-            query_request = query_request.filter_expression(filter_expr);
-        }
-
-        // Set expression attribute names and values
-        for (key, value) in query_builder.expression_attribute_names() {
-            query_request = query_request.expression_attribute_names(key.clone(), value.clone());
-        }
-
-        for (key, value) in query_builder.expression_attribute_values() {
-            query_request = query_request.expression_attribute_values(key.clone(), value.clone());
-        }
-
-        tracing::info!("Key condition expression: {:?}", query_builder.key_condition_expression());
-        tracing::info!("Filter expression: {:?}", query_builder.filter_expression());
-        tracing::info!("Attribute names: {:?}", query_builder.expression_attribute_names());
-        tracing::info!("Attribute values: {:?}", query_builder.expression_attribute_values());
-
-        let query_result: QueryOutput = query_request
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // Convert QueryOutput to ScanOutput format for compatibility
-        let scan_output = ScanOutput::builder()
-            .set_items(Some(query_result.items().to_vec()))
-            .set_count(Some(query_result.count()))
-            .set_scanned_count(Some(query_result.scanned_count()))
-            .build();
-
-        Ok(scan_output)
-    }
-
-    async fn execute_scan(&self, scan_builder: &ScanBuilder) -> Result<ScanOutput, String> {
-        let mut scan_request = self.client
-            .scan()
-            .table_name(self.table_name.clone());
-
-        if let Some(filter_expr) = scan_builder.filter_expression() {
-            scan_request = scan_request.filter_expression(filter_expr);
-
-            tracing::info!("Filter expression: {}", filter_expr);
-            tracing::info!("Attribute names: {:?}", scan_builder.expression_attribute_names());
-            tracing::info!("Attribute values: {:?}", scan_builder.expression_attribute_values());
-
-            for (key, value) in scan_builder.expression_attribute_names() {
-                scan_request = scan_request.expression_attribute_names(key.clone(), value.clone());
-            }
-
-            for (key, value) in scan_builder.expression_attribute_values() {
-                scan_request = scan_request.expression_attribute_values(key.clone(), value.clone());
-            }
-        }
-
-        scan_request
-            .send()
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn scan_table(&self, filter_expr: Option<&str>) -> Result<ScanOutput, String> {
-        let mut scan_builder = self.client
-            .scan()
-            .table_name(self.table_name.clone());
-
-        if let Some(filter) = filter_expr {
-            scan_builder = scan_builder.filter_expression(filter);
-        }
-
-        scan_builder
-            .send()
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-
-    async fn process_query_output(&self, query_output: QueryOutput) {
+    async fn process_query_output(&self, output: Output) {
         let mut item_keys = HashSet::new();
         let shared_item_keys = self.sync_state.read().unwrap().item_keys.clone();
 
-        // Extract the ScanOutput from the QueryOutput enum
-        let scan_output = match &query_output {
-            QueryOutput::Scan(output) |
-            QueryOutput::Query(output) |
-            QueryOutput::QueryGSI(output, _) |
-            QueryOutput::QueryLSI(output, _) => output,
-        };
-
-        let items = scan_output.items();
-        let new_items: Vec<Item> = items.iter().map(|item| {
-            item_keys.extend(item.keys().cloned());
-            Item(item.clone(), shared_item_keys.clone())
-        }).collect();
+        let items = output.items();
+        let new_items: Vec<Item> = items
+            .iter()
+            .map(|item| {
+                item_keys.extend(item.keys().cloned());
+                Item(item.clone(), shared_item_keys.clone())
+            })
+            .collect();
 
         // Get table description before acquiring the write lock
         let table_desc = self.table_description().await.ok();
@@ -571,9 +397,8 @@ impl QueryWidget {
             state.item_keys.extend(item_keys, &table_desc);
         }
 
-        state.query_output = Some(query_output);
+        state.query_output = Some(output);
     }
-
 }
 
 impl<'a> From<&Item> for Row<'a> {
@@ -584,5 +409,19 @@ impl<'a> From<&Item> for Row<'a> {
             parts.push(item.value(key));
         }
         Row::new(parts)
+    }
+}
+
+fn output_info(output: Option<&Output>) -> String {
+    match output.map(|o| o.kind()) {
+        Some(Kind::Scan) => " (Scan)".to_string(),
+        Some(Kind::Query) => " (Query)".to_string(),
+        Some(Kind::QueryGSI(index_name)) => {
+            format!(" (Query GSI: {})", index_name)
+        }
+        Some(Kind::QueryLSI(index_name)) => {
+            format!(" (Query LSI: {})", index_name)
+        }
+        None => "".to_string()
     }
 }

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use aws_sdk_dynamodb::types::AttributeValue;
 
+use super::table_analyzer::{KeyCondition, KeyConditionType, QueryType, TableInfo};
 use crate::expr::DynamoExpression;
-use super::table_analyzer::{TableInfo, QueryType, KeyCondition, KeyConditionType};
 
 pub struct QueryBuilder {
     query_type: QueryType,
@@ -50,8 +50,8 @@ impl QueryBuilder {
 
     pub fn index_name(&self) -> Option<&String> {
         match &self.query_type {
-            QueryType::GlobalSecondaryIndexQuery { index_name, .. } |
-            QueryType::LocalSecondaryIndexQuery { index_name, .. } => Some(index_name),
+            QueryType::GlobalSecondaryIndexQuery { index_name, .. }
+            | QueryType::LocalSecondaryIndexQuery { index_name, .. } => Some(index_name),
             _ => None,
         }
     }
@@ -65,9 +65,20 @@ impl QueryBuilder {
         let mut value_counter = 0;
 
         match &self.query_type {
-            QueryType::TableQuery { hash_key_condition, range_key_condition } |
-            QueryType::GlobalSecondaryIndexQuery { hash_key_condition, range_key_condition, .. } |
-            QueryType::LocalSecondaryIndexQuery { hash_key_condition, range_key_condition, .. } => {
+            QueryType::TableQuery {
+                hash_key_condition,
+                range_key_condition,
+            }
+            | QueryType::GlobalSecondaryIndexQuery {
+                hash_key_condition,
+                range_key_condition,
+                ..
+            }
+            | QueryType::LocalSecondaryIndexQuery {
+                hash_key_condition,
+                range_key_condition,
+                ..
+            } => {
                 // Build key condition expression
                 let mut key_conditions = Vec::new();
 
@@ -97,24 +108,26 @@ impl QueryBuilder {
 
                 // Build filter expression for remaining conditions
                 if let Some(remaining_expr) = self.extract_non_key_conditions(expr) {
-                    self.filter_expression = Some(super::scan::ScanBuilder::build_filter_expression_static(
-                        &remaining_expr,
+                    self.filter_expression =
+                        Some(super::scan::ScanBuilder::build_filter_expression_static(
+                            &remaining_expr,
+                            &mut self.expression_attribute_names,
+                            &mut self.expression_attribute_values,
+                            &mut name_counter,
+                            &mut value_counter,
+                        ));
+                }
+            }
+            QueryType::TableScan => {
+                // For scan, everything goes into filter expression
+                self.filter_expression =
+                    Some(super::scan::ScanBuilder::build_filter_expression_static(
+                        expr,
                         &mut self.expression_attribute_names,
                         &mut self.expression_attribute_values,
                         &mut name_counter,
                         &mut value_counter,
                     ));
-                }
-            }
-            QueryType::TableScan => {
-                // For scan, everything goes into filter expression
-                self.filter_expression = Some(super::scan::ScanBuilder::build_filter_expression_static(
-                    expr,
-                    &mut self.expression_attribute_names,
-                    &mut self.expression_attribute_values,
-                    &mut name_counter,
-                    &mut value_counter,
-                ));
             }
         }
     }
@@ -193,17 +206,34 @@ impl QueryBuilder {
         // when we have exact key matches
 
         match &self.query_type {
-            QueryType::TableQuery { hash_key_condition, range_key_condition } |
-            QueryType::GlobalSecondaryIndexQuery { hash_key_condition, range_key_condition, .. } |
-            QueryType::LocalSecondaryIndexQuery { hash_key_condition, range_key_condition, .. } => {
+            QueryType::TableQuery {
+                hash_key_condition,
+                range_key_condition,
+            }
+            | QueryType::GlobalSecondaryIndexQuery {
+                hash_key_condition,
+                range_key_condition,
+                ..
+            }
+            | QueryType::LocalSecondaryIndexQuery {
+                hash_key_condition,
+                range_key_condition,
+                ..
+            } => {
                 // If we have both hash and range key conditions that are exact matches,
                 // and the expression is a simple AND of those conditions, no filter needed
                 if range_key_condition.is_some() {
-                    if let Some(remaining) = self.extract_remaining_conditions(expr, hash_key_condition, range_key_condition.as_ref()) {
+                    if let Some(remaining) = self.extract_remaining_conditions(
+                        expr,
+                        hash_key_condition,
+                        range_key_condition.as_ref(),
+                    ) {
                         return Some(remaining);
                     }
                 } else {
-                    if let Some(remaining) = self.extract_remaining_conditions(expr, hash_key_condition, None) {
+                    if let Some(remaining) =
+                        self.extract_remaining_conditions(expr, hash_key_condition, None)
+                    {
                         return Some(remaining);
                     }
                 }

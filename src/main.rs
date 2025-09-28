@@ -156,9 +156,9 @@ impl App {
 
     pub async fn run_tui(self, client: Arc<aws_sdk_dynamodb::Client>) -> Result<()> {
         let terminal = ratatui::init();
-//        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
         let app_result = self.run(terminal, client).await;
-//        crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
+        crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
         ratatui::restore();
         app_result
     }

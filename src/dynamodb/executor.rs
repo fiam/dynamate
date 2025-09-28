@@ -1,0 +1,166 @@
+use std::{collections::HashMap, sync::Arc};
+
+use aws_sdk_dynamodb::{
+    Client, Error,
+    operation::{query::QueryOutput, scan::ScanOutput},
+    types::{AttributeValue, ConsumedCapacity},
+};
+
+use super::{DynamoDbRequest, QueryBuilder, QueryType, ScanBuilder};
+
+pub enum Kind {
+    Scan,
+    Query,
+    QueryGSI(String), // index_name
+    QueryLSI(String), // index_name
+}
+
+pub struct Output {
+    items: Option<Vec<HashMap<String, AttributeValue>>>,
+    count: i32,
+    scanned_count: i32,
+    last_evaluated_key: Option<HashMap<String, AttributeValue>>,
+    consumed_capacity: Option<ConsumedCapacity>,
+    kind: Kind,
+}
+
+impl Output {
+    pub fn items(&self) -> &[HashMap<String, AttributeValue>] {
+        self.items.as_deref().unwrap_or(&[])
+    }
+
+    pub fn count(&self) -> i32 {
+        self.count
+    }
+
+    pub fn scanned_count(&self) -> i32 {
+        self.scanned_count
+    }
+
+    pub fn last_evaluated_key(&self) -> Option<&HashMap<String, AttributeValue>> {
+        self.last_evaluated_key.as_ref()
+    }
+
+    pub fn consumed_capacity(&self) -> Option<&ConsumedCapacity> {
+        self.consumed_capacity.as_ref()
+    }
+
+    pub fn kind(&self) -> &Kind {
+        &self.kind
+    }
+}
+
+pub async fn execute(
+    client: Arc<Client>,
+    table_name: &str,
+    db_request: &DynamoDbRequest,
+) -> Result<Output, Error> {
+    match db_request {
+        DynamoDbRequest::Query(builder) => {
+            let output = execute_query(client, table_name, builder).await?;
+            let kind = match builder.query_type() {
+                QueryType::TableQuery { .. } => Kind::Query,
+                QueryType::GlobalSecondaryIndexQuery { index_name, .. } => {
+                    Kind::QueryGSI(index_name.clone())
+                }
+                QueryType::LocalSecondaryIndexQuery { index_name, .. } => {
+                    Kind::QueryLSI(index_name.clone())
+                }
+                QueryType::TableScan => panic!("Unexpected TableScan for Query"),
+            };
+            Ok(Output {
+                items: output.items,
+                count: output.count,
+                scanned_count: output.scanned_count,
+                last_evaluated_key: output.last_evaluated_key,
+                consumed_capacity: output.consumed_capacity,
+                kind,
+            })
+        }
+        DynamoDbRequest::Scan(builder) => {
+            let result = execute_scan(client, table_name, builder).await?;
+            Ok(Output {
+                items: result.items,
+                count: result.count,
+                scanned_count: result.scanned_count,
+                last_evaluated_key: result.last_evaluated_key,
+                consumed_capacity: result.consumed_capacity,
+                kind: Kind::Scan,
+            })
+        }
+    }
+}
+
+async fn execute_scan(
+    client: Arc<Client>,
+    table_name: &str,
+    builder: &ScanBuilder,
+) -> Result<ScanOutput, aws_sdk_dynamodb::Error> {
+    let mut request = client.scan().table_name(table_name);
+
+    if let Some(filter_expr) = builder.filter_expression() {
+        request = request.filter_expression(filter_expr);
+
+        tracing::debug!(
+            "Scan: filter expression: {}, attribute names: {:?}, attribute values {:?}",
+            filter_expr,
+            builder.expression_attribute_names(),
+            builder.expression_attribute_values()
+        );
+
+        for (key, value) in builder.expression_attribute_names() {
+            request = request.expression_attribute_names(key.clone(), value.clone());
+        }
+
+        for (key, value) in builder.expression_attribute_values() {
+            request = request.expression_attribute_values(key.clone(), value.clone());
+        }
+    }
+
+    let output = request.send().await?;
+    Ok(output)
+}
+
+async fn execute_query(
+    client: Arc<Client>,
+    table_name: &str,
+    builder: &QueryBuilder,
+) -> Result<QueryOutput, Error> {
+    let mut request = client.query().table_name(table_name);
+
+    // Set index name if this is an index query
+    if let Some(index_name) = builder.index_name() {
+        request = request.index_name(index_name.clone());
+    }
+
+    // Set key condition expression
+    if let Some(key_condition) = builder.key_condition_expression() {
+        request = request.key_condition_expression(key_condition);
+    }
+
+    // Set filter expression if present
+    if let Some(filter_expr) = builder.filter_expression() {
+        request = request.filter_expression(filter_expr);
+    }
+
+    // Set expression attribute names and values
+    for (key, value) in builder.expression_attribute_names() {
+        request = request.expression_attribute_names(key.clone(), value.clone());
+    }
+
+    for (key, value) in builder.expression_attribute_values() {
+        request = request.expression_attribute_values(key.clone(), value.clone());
+    }
+
+    tracing::debug!(
+        "Query: key condition expression: {:?}, filter expression: {:?}, attribute names: {:?}, attribute values: {:?}",
+        builder.key_condition_expression(),
+        builder.filter_expression(),
+        builder.expression_attribute_names(),
+        builder.expression_attribute_values()
+    );
+
+    let output = request.send().await?;
+
+    Ok(output)
+}

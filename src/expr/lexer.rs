@@ -82,7 +82,9 @@ impl Lexer {
                     }
                     self.advance();
                 } else {
-                    return Err(ParseError::InvalidEscapeSequence { position: self.position });
+                    return Err(ParseError::InvalidEscapeSequence {
+                        position: self.position,
+                    });
                 }
             } else {
                 result.push(ch);

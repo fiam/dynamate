@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use aws_sdk_dynamodb::types::AttributeValue;
 
-use crate::expr::{DynamoExpression, Operand, Comparator, FunctionName};
+use crate::expr::{Comparator, DynamoExpression, FunctionName, Operand};
 
 pub struct ScanBuilder {
     filter_expression: Option<String>,
@@ -34,7 +34,7 @@ impl ScanBuilder {
             &mut self.expression_attribute_names,
             &mut self.expression_attribute_values,
             &mut name_counter,
-            &mut value_counter
+            &mut value_counter,
         );
 
         self.filter_expression = Some(filter_expr);
@@ -57,11 +57,21 @@ impl ScanBuilder {
         attr_names: &mut HashMap<String, String>,
         attr_values: &mut HashMap<String, AttributeValue>,
         name_counter: &mut u32,
-        value_counter: &mut u32
+        value_counter: &mut u32,
     ) -> String {
         match expr {
-            DynamoExpression::Comparison { left, operator, right } => {
-                let left_str = Self::operand_to_string_static(left, attr_names, attr_values, name_counter, value_counter);
+            DynamoExpression::Comparison {
+                left,
+                operator,
+                right,
+            } => {
+                let left_str = Self::operand_to_string_static(
+                    left,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
                 let op_str = match operator {
                     Comparator::Equal => "=",
                     Comparator::NotEqual => "<>",
@@ -70,22 +80,65 @@ impl ScanBuilder {
                     Comparator::Greater => ">",
                     Comparator::GreaterOrEqual => ">=",
                 };
-                let right_str = Self::operand_to_string_static(right, attr_names, attr_values, name_counter, value_counter);
+                let right_str = Self::operand_to_string_static(
+                    right,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
                 format!("{} {} {}", left_str, op_str, right_str)
-            },
-            DynamoExpression::Between { operand, lower, upper } => {
-                let operand_str = Self::operand_to_string_static(operand, attr_names, attr_values, name_counter, value_counter);
-                let lower_str = Self::operand_to_string_static(lower, attr_names, attr_values, name_counter, value_counter);
-                let upper_str = Self::operand_to_string_static(upper, attr_names, attr_values, name_counter, value_counter);
+            }
+            DynamoExpression::Between {
+                operand,
+                lower,
+                upper,
+            } => {
+                let operand_str = Self::operand_to_string_static(
+                    operand,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
+                let lower_str = Self::operand_to_string_static(
+                    lower,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
+                let upper_str = Self::operand_to_string_static(
+                    upper,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
                 format!("{} BETWEEN {} AND {}", operand_str, lower_str, upper_str)
-            },
+            }
             DynamoExpression::In { operand, values } => {
-                let operand_str = Self::operand_to_string_static(operand, attr_names, attr_values, name_counter, value_counter);
-                let value_strs: Vec<String> = values.iter()
-                    .map(|v| Self::operand_to_string_static(v, attr_names, attr_values, name_counter, value_counter))
+                let operand_str = Self::operand_to_string_static(
+                    operand,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
+                let value_strs: Vec<String> = values
+                    .iter()
+                    .map(|v| {
+                        Self::operand_to_string_static(
+                            v,
+                            attr_names,
+                            attr_values,
+                            name_counter,
+                            value_counter,
+                        )
+                    })
                     .collect();
                 format!("{} IN ({})", operand_str, value_strs.join(", "))
-            },
+            }
             DynamoExpression::Function { name, args } => {
                 let func_name = match name {
                     FunctionName::AttributeExists => "attribute_exists",
@@ -95,29 +148,74 @@ impl ScanBuilder {
                     FunctionName::Contains => "contains",
                     FunctionName::Size => "size",
                 };
-                let arg_strs: Vec<String> = args.iter()
-                    .map(|arg| Self::operand_to_string_static(arg, attr_names, attr_values, name_counter, value_counter))
+                let arg_strs: Vec<String> = args
+                    .iter()
+                    .map(|arg| {
+                        Self::operand_to_string_static(
+                            arg,
+                            attr_names,
+                            attr_values,
+                            name_counter,
+                            value_counter,
+                        )
+                    })
                     .collect();
                 format!("{}({})", func_name, arg_strs.join(", "))
-            },
+            }
             DynamoExpression::And(left, right) => {
-                let left_str = Self::build_filter_expression_static(left, attr_names, attr_values, name_counter, value_counter);
-                let right_str = Self::build_filter_expression_static(right, attr_names, attr_values, name_counter, value_counter);
+                let left_str = Self::build_filter_expression_static(
+                    left,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
+                let right_str = Self::build_filter_expression_static(
+                    right,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
                 format!("({}) AND ({})", left_str, right_str)
-            },
+            }
             DynamoExpression::Or(left, right) => {
-                let left_str = Self::build_filter_expression_static(left, attr_names, attr_values, name_counter, value_counter);
-                let right_str = Self::build_filter_expression_static(right, attr_names, attr_values, name_counter, value_counter);
+                let left_str = Self::build_filter_expression_static(
+                    left,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
+                let right_str = Self::build_filter_expression_static(
+                    right,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
                 format!("({}) OR ({})", left_str, right_str)
-            },
+            }
             DynamoExpression::Not(inner) => {
-                let inner_str = Self::build_filter_expression_static(inner, attr_names, attr_values, name_counter, value_counter);
+                let inner_str = Self::build_filter_expression_static(
+                    inner,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
                 format!("NOT ({})", inner_str)
-            },
+            }
             DynamoExpression::Parentheses(inner) => {
-                let inner_str = Self::build_filter_expression_static(inner, attr_names, attr_values, name_counter, value_counter);
+                let inner_str = Self::build_filter_expression_static(
+                    inner,
+                    attr_names,
+                    attr_values,
+                    name_counter,
+                    value_counter,
+                );
                 format!("({})", inner_str)
-            },
+            }
         }
     }
 
@@ -126,7 +224,7 @@ impl ScanBuilder {
         attr_names: &mut HashMap<String, String>,
         attr_values: &mut HashMap<String, AttributeValue>,
         name_counter: &mut u32,
-        value_counter: &mut u32
+        value_counter: &mut u32,
     ) -> String {
         match operand {
             Operand::Path(path) => {
@@ -134,31 +232,34 @@ impl ScanBuilder {
                 *name_counter += 1;
                 attr_names.insert(name_placeholder.clone(), path.clone());
                 name_placeholder
-            },
+            }
             Operand::Value(val) => {
                 let value_placeholder = format!(":val{}", value_counter);
                 *value_counter += 1;
                 attr_values.insert(value_placeholder.clone(), AttributeValue::S(val.clone()));
                 value_placeholder
-            },
+            }
             Operand::Number(num) => {
                 let value_placeholder = format!(":val{}", value_counter);
                 *value_counter += 1;
-                attr_values.insert(value_placeholder.clone(), AttributeValue::N(num.to_string()));
+                attr_values.insert(
+                    value_placeholder.clone(),
+                    AttributeValue::N(num.to_string()),
+                );
                 value_placeholder
-            },
+            }
             Operand::Boolean(b) => {
                 let value_placeholder = format!(":val{}", value_counter);
                 *value_counter += 1;
                 attr_values.insert(value_placeholder.clone(), AttributeValue::Bool(*b));
                 value_placeholder
-            },
+            }
             Operand::Null => {
                 let value_placeholder = format!(":val{}", value_counter);
                 *value_counter += 1;
                 attr_values.insert(value_placeholder.clone(), AttributeValue::Null(true));
                 value_placeholder
-            },
+            }
         }
     }
 }

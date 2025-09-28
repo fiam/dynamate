@@ -1,4 +1,4 @@
-use super::ast::{DynamoExpression, FunctionName, Operand, Comparator};
+use super::ast::{Comparator, DynamoExpression, FunctionName, Operand};
 use super::error::ParseError;
 use super::lexer::{Lexer, Token};
 
@@ -70,7 +70,12 @@ pub fn is_function_start(lexer: &mut Lexer) -> Result<bool, ParseError> {
     if let Ok(Token::Identifier(name)) = lexer.next_token() {
         let is_func = matches!(
             name.to_lowercase().as_str(),
-            "attribute_exists" | "attribute_not_exists" | "attribute_type" | "begins_with" | "contains" | "size"
+            "attribute_exists"
+                | "attribute_not_exists"
+                | "attribute_type"
+                | "begins_with"
+                | "contains"
+                | "size"
         );
         lexer.position = saved_position;
         Ok(is_func)
@@ -90,10 +95,12 @@ pub fn parse_function(lexer: &mut Lexer) -> Result<DynamoExpression, ParseError>
             "begins_with" => FunctionName::BeginsWith,
             "contains" => FunctionName::Contains,
             "size" => FunctionName::Size,
-            _ => return Err(ParseError::InvalidFunction {
-                name,
-                position: lexer.position,
-            }),
+            _ => {
+                return Err(ParseError::InvalidFunction {
+                    name,
+                    position: lexer.position,
+                });
+            }
         }
     } else {
         return Err(ParseError::InvalidSyntax {
@@ -104,10 +111,12 @@ pub fn parse_function(lexer: &mut Lexer) -> Result<DynamoExpression, ParseError>
 
     match lexer.next_token()? {
         Token::LeftParen => {}
-        token => return Err(ParseError::UnexpectedToken {
-            token: format!("{:?}", token),
-            position: lexer.position,
-        }),
+        token => {
+            return Err(ParseError::UnexpectedToken {
+                token: format!("{:?}", token),
+                position: lexer.position,
+            });
+        }
     }
 
     let mut args = Vec::new();
@@ -127,10 +136,12 @@ pub fn parse_function(lexer: &mut Lexer) -> Result<DynamoExpression, ParseError>
                 lexer.next_token()?; // consume )
                 break;
             }
-            token => return Err(ParseError::UnexpectedToken {
-                token: format!("{:?}", token),
-                position: lexer.position,
-            }),
+            token => {
+                return Err(ParseError::UnexpectedToken {
+                    token: format!("{:?}", token),
+                    position: lexer.position,
+                });
+            }
         }
     }
 
@@ -146,10 +157,12 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
             let lower = parse_operand(lexer)?;
             match lexer.next_token()? {
                 Token::And => {}
-                token => return Err(ParseError::UnexpectedToken {
-                    token: format!("{:?}", token),
-                    position: lexer.position,
-                }),
+                token => {
+                    return Err(ParseError::UnexpectedToken {
+                        token: format!("{:?}", token),
+                        position: lexer.position,
+                    });
+                }
             }
             let upper = parse_operand(lexer)?;
             Ok(DynamoExpression::Between {
@@ -162,10 +175,12 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
             lexer.next_token()?; // consume IN
             match lexer.next_token()? {
                 Token::LeftParen => {}
-                token => return Err(ParseError::UnexpectedToken {
-                    token: format!("{:?}", token),
-                    position: lexer.position,
-                }),
+                token => {
+                    return Err(ParseError::UnexpectedToken {
+                        token: format!("{:?}", token),
+                        position: lexer.position,
+                    });
+                }
             }
 
             let mut values = Vec::new();
@@ -185,14 +200,19 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
                         lexer.next_token()?; // consume )
                         break;
                     }
-                    token => return Err(ParseError::UnexpectedToken {
-                        token: format!("{:?}", token),
-                        position: lexer.position,
-                    }),
+                    token => {
+                        return Err(ParseError::UnexpectedToken {
+                            token: format!("{:?}", token),
+                            position: lexer.position,
+                        });
+                    }
                 }
             }
 
-            Ok(DynamoExpression::In { operand: left, values })
+            Ok(DynamoExpression::In {
+                operand: left,
+                values,
+            })
         }
         Token::Equal => {
             lexer.next_token()?;

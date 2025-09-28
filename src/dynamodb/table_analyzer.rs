@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 
-use aws_sdk_dynamodb::types::{
-    AttributeValue, KeySchemaElement, KeyType, TableDescription,
-};
+use aws_sdk_dynamodb::types::{AttributeValue, KeySchemaElement, KeyType, TableDescription};
 
-use crate::expr::{DynamoExpression, Operand, Comparator};
+use crate::expr::{Comparator, DynamoExpression, Operand};
 
 #[derive(Debug, Clone)]
 pub struct TableInfo {
@@ -141,7 +139,11 @@ impl TableInfo {
         None
     }
 
-    fn try_gsi_query(&self, gsi: &SecondaryIndex, conditions: &HashMap<String, ConditionInfo>) -> Option<QueryType> {
+    fn try_gsi_query(
+        &self,
+        gsi: &SecondaryIndex,
+        conditions: &HashMap<String, ConditionInfo>,
+    ) -> Option<QueryType> {
         let hash_condition = conditions.get(&gsi.hash_key)?;
 
         if let Some(hash_key_condition) = hash_condition.to_key_condition() {
@@ -161,7 +163,11 @@ impl TableInfo {
         None
     }
 
-    fn try_lsi_query(&self, lsi: &SecondaryIndex, conditions: &HashMap<String, ConditionInfo>) -> Option<QueryType> {
+    fn try_lsi_query(
+        &self,
+        lsi: &SecondaryIndex,
+        conditions: &HashMap<String, ConditionInfo>,
+    ) -> Option<QueryType> {
         let hash_condition = conditions.get(&lsi.hash_key)?;
 
         if let Some(hash_key_condition) = hash_condition.to_key_condition() {
@@ -193,11 +199,21 @@ struct ConditionInfo {
 impl ConditionInfo {
     fn to_key_condition(&self) -> Option<KeyCondition> {
         let condition = match &self.comparator {
-            Comparator::Equal => KeyConditionType::Equal(operand_to_attribute_value(&self.operand)?),
-            Comparator::Less => KeyConditionType::LessThan(operand_to_attribute_value(&self.operand)?),
-            Comparator::LessOrEqual => KeyConditionType::LessThanOrEqual(operand_to_attribute_value(&self.operand)?),
-            Comparator::Greater => KeyConditionType::GreaterThan(operand_to_attribute_value(&self.operand)?),
-            Comparator::GreaterOrEqual => KeyConditionType::GreaterThanOrEqual(operand_to_attribute_value(&self.operand)?),
+            Comparator::Equal => {
+                KeyConditionType::Equal(operand_to_attribute_value(&self.operand)?)
+            }
+            Comparator::Less => {
+                KeyConditionType::LessThan(operand_to_attribute_value(&self.operand)?)
+            }
+            Comparator::LessOrEqual => {
+                KeyConditionType::LessThanOrEqual(operand_to_attribute_value(&self.operand)?)
+            }
+            Comparator::Greater => {
+                KeyConditionType::GreaterThan(operand_to_attribute_value(&self.operand)?)
+            }
+            Comparator::GreaterOrEqual => {
+                KeyConditionType::GreaterThanOrEqual(operand_to_attribute_value(&self.operand)?)
+            }
             Comparator::NotEqual => return None, // Not supported for key conditions
         };
 
@@ -291,7 +307,11 @@ fn extract_conditions_recursive(
     conditions: &mut HashMap<String, ConditionInfo>,
 ) -> Option<()> {
     match expr {
-        DynamoExpression::Comparison { left, operator, right } => {
+        DynamoExpression::Comparison {
+            left,
+            operator,
+            right,
+        } => {
             if let Operand::Path(attr_name) = left {
                 let condition = ConditionInfo {
                     attribute_name: attr_name.clone(),
@@ -302,7 +322,11 @@ fn extract_conditions_recursive(
                 conditions.insert(attr_name.clone(), condition);
             }
         }
-        DynamoExpression::Between { operand, lower, upper } => {
+        DynamoExpression::Between {
+            operand,
+            lower,
+            upper,
+        } => {
             if let Operand::Path(attr_name) = operand {
                 let condition = ConditionInfo {
                     attribute_name: attr_name.clone(),
