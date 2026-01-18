@@ -95,6 +95,8 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = <Cli as clap::Parser>::parse();
     let client = Arc::new(aws::new_client(cli.endpoint_url.as_deref()).await?);
+    aws::validate_connection(&client).await?;
+
     match cli.command {
         Some(Commands::ListTables { json }) => {
             let options = subcommands::list_tables::Options { json };

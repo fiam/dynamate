@@ -1,27 +1,43 @@
 use aws_config::BehaviorVersion;
+use aws_config::environment::{
+    credentials::EnvironmentVariableCredentialsProvider, region::EnvironmentVariableRegionProvider,
+};
+use aws_config::meta::region::ProvideRegion;
 use aws_sdk_dynamodb::config::ProvideCredentials;
-use color_eyre::Result;
+use color_eyre::eyre::{Context, Result, eyre};
 
 pub async fn new_client(endpoint_url: Option<&str>) -> Result<aws_sdk_dynamodb::Client> {
-    let base_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-    let has_credentials = match base_config.credentials_provider() {
-        Some(provider) => provider.provide_credentials().await.is_ok(),
-        None => false,
-    };
-    let mut builder = aws_sdk_dynamodb::config::Builder::from(&base_config);
+    let region_provider = EnvironmentVariableRegionProvider::new();
+    let region = region_provider
+        .region()
+        .await
+        .ok_or_else(|| eyre!("AWS region not set. Use AWS_REGION or AWS_DEFAULT_REGION."))?;
+
+    let credential_check = EnvironmentVariableCredentialsProvider::new();
+    credential_check
+        .provide_credentials()
+        .await
+        .map_err(|err| eyre!("AWS credentials not found in environment: {err}"))?;
+
+    let credentials_provider = EnvironmentVariableCredentialsProvider::new();
+    let mut loader = aws_config::defaults(BehaviorVersion::latest())
+        .region(region)
+        .credentials_provider(credentials_provider);
+
     if let Some(url) = endpoint_url {
-        builder = builder.endpoint_url(url);
-        if !has_credentials {
-            // Provide dummy credentials
-            let provider = aws_credential_types::Credentials::from_keys("key", "secret", None);
-            builder = builder.credentials_provider(provider);
-        }
-        if base_config.region().is_none() {
-            // If no region is set, set a default one
-            builder = builder.region(aws_sdk_dynamodb::config::Region::new("us-east-1"));
-        }
+        loader = loader.endpoint_url(url);
     }
-    let config = builder.build();
-    let client = aws_sdk_dynamodb::Client::from_conf(config);
-    Ok(client)
+
+    let config = loader.load().await;
+    Ok(aws_sdk_dynamodb::Client::new(&config))
+}
+
+pub async fn validate_connection(client: &aws_sdk_dynamodb::Client) -> Result<()> {
+    client
+        .list_tables()
+        .limit(1)
+        .send()
+        .await
+        .map(|_| ())
+        .wrap_err("Failed to connect to DynamoDB")
 }
