@@ -40,6 +40,9 @@ use ratatui::widgets::Clear;
 use ratatui::{DefaultTerminal, Frame};
 use tokio_stream::StreamExt;
 
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
+
 use dynamate::aws;
 
 mod env;
@@ -191,27 +194,68 @@ impl App {
         let mut interval = tokio::time::interval(period);
         let mut events = EventStream::new();
 
-        while !self.should_quit {
-            tokio::select! {
-                _ = interval.tick() => {
-                    terminal.draw(|frame| self.render(frame))?;
-                    // if self.should_redraw {
-                    //     terminal.draw(|frame| self.render(frame))?;
-                    //     self.should_redraw = false;
-                    // }
-                },
-                Some(Ok(event)) = events.next() => {
-                    if self.handle_event(&event) {
+        #[cfg(unix)]
+        let mut sigint = signal(SignalKind::interrupt())?;
+        #[cfg(unix)]
+        let mut sigterm = signal(SignalKind::terminate())?;
+
+        #[cfg(unix)]
+        {
+            while !self.should_quit {
+                tokio::select! {
+                    _ = interval.tick() => {
                         terminal.draw(|frame| self.render(frame))?;
-                    }
-                },
-                Some(msg) = self.env.rx().recv() => {
-                    self.handle_msg(msg);
-                    if self.should_redraw {
+                        // if self.should_redraw {
+                        //     terminal.draw(|frame| self.render(frame))?;
+                        //     self.should_redraw = false;
+                        // }
+                    },
+                    Some(Ok(event)) = events.next() => {
+                        if self.handle_event(&event) {
+                            terminal.draw(|frame| self.render(frame))?;
+                        }
+                    },
+                    Some(msg) = self.env.rx().recv() => {
+                        self.handle_msg(msg);
+                        if self.should_redraw {
+                            terminal.draw(|frame| self.render(frame))?;
+                            self.should_redraw = false;
+                        }
+                    },
+                    _ = sigint.recv() => {
+                        self.should_quit = true;
+                    },
+                    _ = sigterm.recv() => {
+                        self.should_quit = true;
+                    },
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            while !self.should_quit {
+                tokio::select! {
+                    _ = interval.tick() => {
                         terminal.draw(|frame| self.render(frame))?;
-                        self.should_redraw = false;
-                    }
-                },
+                        // if self.should_redraw {
+                        //     terminal.draw(|frame| self.render(frame))?;
+                        //     self.should_redraw = false;
+                        // }
+                    },
+                    Some(Ok(event)) = events.next() => {
+                        if self.handle_event(&event) {
+                            terminal.draw(|frame| self.render(frame))?;
+                        }
+                    },
+                    Some(msg) = self.env.rx().recv() => {
+                        self.handle_msg(msg);
+                        if self.should_redraw {
+                            terminal.draw(|frame| self.render(frame))?;
+                            self.should_redraw = false;
+                        }
+                    },
+                }
             }
         }
         Ok(())
