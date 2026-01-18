@@ -49,8 +49,6 @@ mod subcommands;
 mod util;
 mod widgets;
 
-use widgets::Widget;
-
 use crate::widgets::theme::Theme;
 
 #[derive(clap::Parser)]
@@ -72,6 +70,10 @@ struct Cli {
     /// Endpoint URL for the DynamoDB service
     #[arg(long)]
     endpoint_url: Option<String>,
+
+    /// Table name to open directly
+    #[arg(short, long)]
+    table: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -105,7 +107,9 @@ async fn main() -> Result<()> {
         }
         None => {
             logging::initialize()?;
-            App::default().run_tui(client.clone()).await?;
+            App::default()
+                .run_tui(client.clone(), cli.table.as_deref())
+                .await?;
             Ok(())
         }
     }
@@ -156,10 +160,14 @@ impl App {
         }
     }
 
-    pub async fn run_tui(self, client: Arc<aws_sdk_dynamodb::Client>) -> Result<()> {
+    pub async fn run_tui(
+        self,
+        client: Arc<aws_sdk_dynamodb::Client>,
+        table_name: Option<&str>,
+    ) -> Result<()> {
         let terminal = ratatui::init();
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-        let app_result = self.run(terminal, client).await;
+        let app_result = self.run(terminal, client, table_name).await;
         crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
         ratatui::restore();
         app_result
@@ -169,8 +177,12 @@ impl App {
         mut self,
         mut terminal: DefaultTerminal,
         client: Arc<aws_sdk_dynamodb::Client>,
+        table_name: Option<&str>,
     ) -> Result<()> {
-        let widget = Arc::new(widgets::TablePickerWidget::new(client));
+        let widget: Arc<dyn crate::widgets::Widget> = match table_name {
+            Some(name) => Arc::new(widgets::QueryWidget::new(client, name)),
+            None => Arc::new(widgets::TablePickerWidget::new(client)),
+        };
         widget.start(self.env.tx());
 
         self.widgets.push(widget);
