@@ -168,7 +168,7 @@ impl App {
         mut terminal: DefaultTerminal,
         client: Arc<aws_sdk_dynamodb::Client>,
     ) -> Result<()> {
-        let widget = Arc::new(widgets::QueryWidget::new(client, "test1"));
+        let widget = Arc::new(widgets::TablePickerWidget::new(client));
         widget.start(self.env.tx());
 
         self.widgets.push(widget);
@@ -294,6 +294,13 @@ impl App {
 
     fn handle_msg(&mut self, msg: env::Message) {
         match msg {
+            env::Message::PushWidget(widget) => {
+                widget.start(self.env.tx());
+                self.widgets.push(widget);
+            }
+            env::Message::PopWidget => {
+                self.widgets.pop();
+            }
             env::Message::SetPopup(popup) => {
                 if self.popup.is_some() {
                     panic!("popup is already set");

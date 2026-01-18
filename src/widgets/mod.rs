@@ -5,14 +5,18 @@ use ratatui::{Frame, layout::Rect};
 use theme::Theme;
 
 mod query;
+mod table_picker;
 pub mod theme;
 
 pub use query::QueryWidget;
+pub use table_picker::TablePickerWidget;
 
 use crate::help;
 
 pub trait Env {
     fn invalidate(&self);
+    fn push_widget(&self, widget: Arc<dyn Widget>);
+    fn pop_widget(&self);
     fn set_popup(&self, popup: Arc<dyn Popup>);
     fn dismiss_popup(&self);
 }
