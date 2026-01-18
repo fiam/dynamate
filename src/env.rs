@@ -2,13 +2,11 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::widgets::{Popup, Widget};
+use crate::widgets::Popup;
 
 pub enum Message {
     // Invalidate the current frame and request a redraw
     Invalidate,
-    PushWidget(Arc<dyn Widget>),
-    PopWidget,
     SetPopup(Arc<dyn Popup>),
     DismissPopup,
 }
@@ -36,14 +34,6 @@ impl crate::widgets::Env for EnvTx {
     fn invalidate(&self) {
         self.send(Message::Invalidate);
     }
-    fn push_widget(&self, widget: Arc<dyn Widget>) {
-        self.send(Message::PushWidget(widget));
-    }
-
-    fn pop_widget(&self) {
-        self.send(Message::PopWidget);
-    }
-
     fn set_popup(&self, popup: Arc<dyn Popup>) {
         self.send(Message::SetPopup(popup));
     }

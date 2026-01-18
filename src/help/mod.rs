@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
@@ -23,7 +23,7 @@ pub struct Entry<'a> {
 }
 
 impl<'a> Entry<'a> {
-    fn into_owned(&self) -> Entry<'static> {
+    fn to_owned_entry(&self) -> Entry<'static> {
         Entry {
             keys: Cow::Owned(self.keys.as_ref().to_owned()),
             short: Cow::Owned(self.short.as_ref().to_owned()),
@@ -46,7 +46,7 @@ fn make_spans<'a>(entries: &'a [&Entry<'a>], theme: &Theme) -> Vec<Span<'a>> {
         })
         .collect();
     // Remove the last span
-    if spans.len() > 0 {
+    if !spans.is_empty() {
         spans.pop();
     }
     spans
@@ -61,7 +61,7 @@ pub fn height<'a>(entries: &'a [&Entry<'a>], area: Rect) -> u16 {
     let available_width = area.width as usize;
 
     // number of rows needed = ceil(total_width / available_width)
-    ((total_width + available_width - 1) / available_width) as u16
+    total_width.div_ceil(available_width) as u16
 }
 
 pub fn render<'a>(entries: &'a [&Entry<'a>], frame: &mut Frame, area: Rect, theme: &Theme) {

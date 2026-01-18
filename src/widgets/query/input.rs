@@ -1,9 +1,12 @@
 use crossterm::event;
 use ratatui::{
-    buffer::Buffer, layout::{Position, Rect}, style::Style, widgets::{Block, Paragraph, Widget}, Frame
+    Frame,
+    layout::{Position, Rect},
+    style::Style,
+    widgets::{Block, Paragraph, Widget},
 };
 
-use crate::widgets::{query::input, theme};
+use crate::widgets::theme;
 
 #[derive(Default)]
 pub struct Input {
@@ -13,14 +16,6 @@ pub struct Input {
 }
 
 impl Input {
-    pub fn new() -> Self {
-        Self {
-            input: String::new(),
-            character_index: 0,
-            is_active: false,
-        }
-    }
-
     pub fn value(&self) -> &str {
         &self.input
     }
@@ -38,8 +33,6 @@ impl Input {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &theme::Theme) {
-        // keep 2 for borders and 1 for cursor
-        let width = area.width.max(3) - 3;
         let scroll = 0;
         let style = if self.is_active() {
             Style::default().fg(theme.secondary())
@@ -70,10 +63,14 @@ impl Input {
         }
         if let Some(key) = evt.as_key_press_event() {
             match key.code {
-                event::KeyCode::Char('a') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                event::KeyCode::Char('a')
+                    if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                {
                     self.character_index = 0;
                 }
-                event::KeyCode::Char('e') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                event::KeyCode::Char('e')
+                    if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                {
                     self.character_index = self.input.len();
                 }
                 event::KeyCode::Char(c) => {

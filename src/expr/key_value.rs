@@ -27,10 +27,8 @@ pub fn parse_expressions(input: &str) -> Result<Vec<KeyValue>, ParseError> {
 }
 
 fn parse_key_value(chars: &[char], start: usize) -> Result<(String, Value, usize), ParseError> {
-    let i = start;
-
     // Parse key
-    let (key, mut i) = parse_token_as_string(chars, i)?;
+    let (key, mut i) = parse_token_as_string(chars, start)?;
 
     // Expect '='
     if i >= chars.len() || chars[i] != '=' {
@@ -50,7 +48,6 @@ fn parse_key_value(chars: &[char], start: usize) -> Result<(String, Value, usize
 fn parse_value(chars: &[char], start: usize) -> Result<(Value, usize), ParseError> {
     let mut i = start;
 
-    // Skip whitespace before value
     while i < chars.len() && chars[i].is_whitespace() {
         i += 1;
     }
@@ -62,12 +59,10 @@ fn parse_value(chars: &[char], start: usize) -> Result<(Value, usize), ParseErro
         });
     }
 
-    // Check if value starts with a quote (explicit string)
     if chars[i] == '"' || chars[i] == '\'' {
         let (string_val, new_pos) = parse_quoted_string(chars, i)?;
         Ok((Value::String(string_val), new_pos))
     } else {
-        // Parse unquoted token and infer type
         let (token, new_pos) = parse_unquoted_token(chars, i)?;
         let value = infer_value_type(&token)?;
         Ok((value, new_pos))
@@ -76,7 +71,10 @@ fn parse_value(chars: &[char], start: usize) -> Result<(Value, usize), ParseErro
 
 fn parse_token_as_string(chars: &[char], start: usize) -> Result<(String, usize), ParseError> {
     let mut i = start;
-    let mut result = String::new();
+
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
 
     if i >= chars.len() {
         return Err(ParseError::InvalidSyntax {
@@ -85,14 +83,10 @@ fn parse_token_as_string(chars: &[char], start: usize) -> Result<(String, usize)
         });
     }
 
-    // Check if token starts with a quote
     if chars[i] == '"' || chars[i] == '\'' {
-        let (string_val, new_pos) = parse_quoted_string(chars, i)?;
-        Ok((string_val, new_pos))
+        parse_quoted_string(chars, i)
     } else {
-        // Parse unquoted token
-        let (token, new_pos) = parse_unquoted_token(chars, i)?;
-        Ok((token, new_pos))
+        parse_unquoted_token(chars, i)
     }
 }
 

@@ -4,6 +4,7 @@ use aws_sdk_dynamodb::types::AttributeValue;
 
 use crate::expr::{Comparator, DynamoExpression, FunctionName, Operand};
 
+#[derive(Default)]
 pub struct ScanBuilder {
     filter_expression: Option<String>,
     expression_attribute_names: HashMap<String, String>,
@@ -12,11 +13,7 @@ pub struct ScanBuilder {
 
 impl ScanBuilder {
     pub fn new() -> Self {
-        Self {
-            filter_expression: None,
-            expression_attribute_names: HashMap::new(),
-            expression_attribute_values: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn from_expression(expr: &DynamoExpression) -> Self {

@@ -4,7 +4,7 @@ use super::{QueryBuilder, QueryType, ScanBuilder, TableInfo};
 use crate::expr::DynamoExpression;
 
 pub enum DynamoDbRequest {
-    Query(QueryBuilder),
+    Query(Box<QueryBuilder>),
     Scan(ScanBuilder),
 }
 
@@ -17,7 +17,7 @@ impl DynamoDbRequest {
         let query_builder = QueryBuilder::new(&table_info, expr);
 
         if query_builder.is_query() {
-            Self::Query(query_builder)
+            Self::Query(Box::new(query_builder))
         } else {
             Self::Scan(ScanBuilder::from_expression(expr))
         }
@@ -33,7 +33,7 @@ impl DynamoDbRequest {
 
     pub fn query_builder(&self) -> Option<&QueryBuilder> {
         match self {
-            Self::Query(builder) => Some(builder),
+            Self::Query(builder) => Some(builder.as_ref()),
             Self::Scan(_) => None,
         }
     }
@@ -55,7 +55,7 @@ impl DynamoDbRequest {
                 QueryType::LocalSecondaryIndexQuery { index_name, .. } => {
                     format!("Query (LSI: {})", index_name)
                 }
-                QueryType::TableScan => "Scan".to_string(), // This shouldn't happen
+                QueryType::TableScan => "Scan".to_string(),
             },
             Self::Scan(_) => "Scan".to_string(),
         }

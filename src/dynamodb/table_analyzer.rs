@@ -193,7 +193,6 @@ struct ConditionInfo {
     attribute_name: String,
     comparator: Comparator,
     operand: Operand,
-    upper_bound: Option<Operand>, // For BETWEEN operations
 }
 
 impl ConditionInfo {
@@ -220,16 +219,6 @@ impl ConditionInfo {
         Some(KeyCondition {
             attribute_name: self.attribute_name.clone(),
             condition,
-        })
-    }
-
-    fn to_between_condition(&self, upper: &Operand) -> Option<KeyCondition> {
-        let lower_val = operand_to_attribute_value(&self.operand)?;
-        let upper_val = operand_to_attribute_value(upper)?;
-
-        Some(KeyCondition {
-            attribute_name: self.attribute_name.clone(),
-            condition: KeyConditionType::Between(lower_val, upper_val),
         })
     }
 }
@@ -317,7 +306,6 @@ fn extract_conditions_recursive(
                     attribute_name: attr_name.clone(),
                     comparator: operator.clone(),
                     operand: right.clone(),
-                    upper_bound: None,
                 };
                 conditions.insert(attr_name.clone(), condition);
             }
@@ -325,14 +313,13 @@ fn extract_conditions_recursive(
         DynamoExpression::Between {
             operand,
             lower,
-            upper,
+            upper: _,
         } => {
             if let Operand::Path(attr_name) = operand {
                 let condition = ConditionInfo {
                     attribute_name: attr_name.clone(),
                     comparator: Comparator::GreaterOrEqual, // BETWEEN is >= lower AND <= upper
                     operand: lower.clone(),
-                    upper_bound: Some(upper.clone()),
                 };
                 conditions.insert(attr_name.clone(), condition);
             }
@@ -343,18 +330,18 @@ fn extract_conditions_recursive(
         }
         DynamoExpression::Function { name, args } => {
             // Handle begins_with function for range key conditions
-            if matches!(name, crate::expr::FunctionName::BeginsWith) && args.len() == 2 {
-                if let (Operand::Path(attr_name), prefix_operand) = (&args[0], &args[1]) {
-                    conditions.insert(
-                        attr_name.clone(),
-                        ConditionInfo {
-                            attribute_name: attr_name.clone(),
-                            comparator: Comparator::GreaterOrEqual, // We'll handle begins_with specially
-                            operand: prefix_operand.clone(),
-                            upper_bound: None,
-                        },
-                    );
-                }
+            if matches!(name, crate::expr::FunctionName::BeginsWith)
+                && args.len() == 2
+                && let (Operand::Path(attr_name), prefix_operand) = (&args[0], &args[1])
+            {
+                conditions.insert(
+                    attr_name.clone(),
+                    ConditionInfo {
+                        attribute_name: attr_name.clone(),
+                        comparator: Comparator::GreaterOrEqual, // We'll handle begins_with specially
+                        operand: prefix_operand.clone(),
+                    },
+                );
             }
         }
         _ => {

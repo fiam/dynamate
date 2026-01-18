@@ -28,15 +28,15 @@
 //! [examples]: https://github.com/ratatui/ratatui/blob/main/examples
 //! [examples readme]: https://github.com/ratatui/ratatui/blob/main/examples/README.md
 use std::borrow::Cow;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use crossterm::event::{Event, EventStream, KeyCode};
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Style, Stylize};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Stylize;
+use ratatui::text::Line;
+use ratatui::widgets::Clear;
 use ratatui::{DefaultTerminal, Frame};
 use tokio_stream::StreamExt;
 
@@ -289,17 +289,11 @@ impl App {
             }
             return true;
         }
-        return false;
+        false
     }
 
     fn handle_msg(&mut self, msg: env::Message) {
         match msg {
-            env::Message::PushWidget(widget) => {
-                self.widgets.push(widget);
-            }
-            env::Message::PopWidget => {
-                self.widgets.pop();
-            }
             env::Message::SetPopup(popup) => {
                 if self.popup.is_some() {
                     panic!("popup is already set");

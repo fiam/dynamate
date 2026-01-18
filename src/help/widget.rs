@@ -1,9 +1,8 @@
 use crossterm::event::{Event, KeyCode};
 use ratatui::{
     Frame,
-    buffer::Buffer,
     layout::{Constraint, Margin, Rect},
-    style::{Color, Style, Stylize},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, BorderType, Padding, Row, Table},
 };
@@ -21,7 +20,7 @@ pub struct Widget {
 impl Widget {
     pub fn new<'a>(entries: Vec<&Entry<'a>>) -> Self {
         Self {
-            entries: entries.into_iter().map(|e| e.into_owned()).collect(),
+            entries: entries.into_iter().map(|e| e.to_owned_entry()).collect(),
         }
     }
 }
@@ -41,20 +40,16 @@ impl crate::widgets::Widget for Widget {
         let rows: Vec<_> = self
             .entries
             .chunks(2)
-            .into_iter()
             .map(|chunk| {
                 let left_key = chunk
-                    .get(0)
-                    .map(|e| make_key(&e, theme))
+                    .first()
+                    .map(|e| make_key(e, theme))
                     .unwrap_or_default();
                 let left_desc = chunk
-                    .get(0)
+                    .first()
                     .map(|e| Span::raw(e.long.as_ref()))
                     .unwrap_or_default();
-                let right_key = chunk
-                    .get(1)
-                    .map(|e| make_key(&e, theme))
-                    .unwrap_or_default();
+                let right_key = chunk.get(1).map(|e| make_key(e, theme)).unwrap_or_default();
                 let right_desc = chunk
                     .get(1)
                     .map(|e| Span::raw(e.long.as_ref()))
@@ -80,14 +75,11 @@ impl crate::widgets::Widget for Widget {
     }
 
     fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
-        if let Some(key) = event.as_key_press_event() {
-            match key.code {
-                KeyCode::Char('h') => {
-                    env.dismiss_popup();
-                    return true;
-                }
-                _ => {}
-            }
+        if let Some(key) = event.as_key_press_event()
+            && let KeyCode::Char('h') = key.code
+        {
+            env.dismiss_popup();
+            return true;
         }
         false
     }

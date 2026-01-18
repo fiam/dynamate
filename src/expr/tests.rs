@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod expr_tests {
     use super::super::*;
 
     // DynamoDB Expression Tests

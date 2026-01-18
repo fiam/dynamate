@@ -3,27 +3,18 @@ use std::{
     cmp::{max, min},
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Instant,
 };
 
-use aws_sdk_dynamodb::{
-    operation::{
-        query::{Query, QueryOutput},
-        scan::ScanOutput,
-    },
-    types::{AttributeValue, TableDescription},
-};
+use aws_sdk_dynamodb::types::{AttributeValue, TableDescription};
 use crossterm::event::{Event, KeyCode};
 use ratatui::{
     Frame,
-    buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::Style,
-    text::{self, Line},
-    widgets::{Block, Clear, HighlightSpacing, Row, StatefulWidget, Table, TableState},
+    text::Line,
+    widgets::{Block, HighlightSpacing, Row, StatefulWidget, Table, TableState},
 };
-use ratatui::{text::Text, widgets::Widget};
-use tokio::{sync::OnceCell, try_join};
+use tokio::sync::OnceCell;
 
 use item_keys::ItemKeys;
 use keys_widget::KeysWidget;
@@ -34,7 +25,7 @@ use crate::{
     widgets::{EnvHandle, theme::Theme},
 };
 use dynamate::{
-    dynamodb::{execute, DynamoDbRequest, Kind, Output, QueryBuilder, ScanBuilder},
+    dynamodb::{DynamoDbRequest, Kind, Output, ScanBuilder, execute},
     expr::parse_dynamo_expression,
 };
 
@@ -83,7 +74,7 @@ impl Item {
                     format!("{val:?}")
                 }
             })
-            .unwrap_or_else(|| "".to_string())
+            .unwrap_or_default()
     }
 
     fn value_size(&self, key: &str) -> usize {
@@ -98,13 +89,6 @@ enum LoadingState {
     Loading,
     Loaded,
     Error(String),
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-enum EditingState {
-    #[default]
-    None,
-    Editing,
 }
 
 impl crate::widgets::Widget for QueryWidget {
@@ -125,7 +109,7 @@ impl crate::widgets::Widget for QueryWidget {
         let header = Row::new(
             keys_view
                 .as_slice()
-                .into_iter()
+                .iter()
                 .map(|key| Line::from(key.clone())),
         )
         .style(Style::new().bold());
@@ -133,7 +117,7 @@ impl crate::widgets::Widget for QueryWidget {
         let items = &state.items;
         let widths: Vec<Constraint> = keys_view
             .as_slice()
-            .into_iter()
+            .iter()
             .map(|key| {
                 let max_value = items
                     .iter()
@@ -156,15 +140,13 @@ impl crate::widgets::Widget for QueryWidget {
 
         // a block with a right aligned title with the loading state on the right
         let (title, title_bottom) = match &state.loading_state {
-            LoadingState::Idle | LoadingState::Loaded => {
-                (
-                    format!("Results{}", output_info(state.query_output.as_ref())),
-                    pad(
-                        format!("{} results, showing {}-{}", total, first_item, last_item),
-                        2,
-                    ),
-                )
-            }
+            LoadingState::Idle | LoadingState::Loaded => (
+                format!("Results{}", output_info(state.query_output.as_ref())),
+                pad(
+                    format!("{} results, showing {}-{}", total, first_item, last_item),
+                    2,
+                ),
+            ),
             LoadingState::Loading => ("Loading".to_string(), "".to_string()),
             LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
         };
@@ -197,10 +179,8 @@ impl crate::widgets::Widget for QueryWidget {
 
     fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
         let input_is_active = self.sync_state.read().unwrap().input.is_active();
-        if input_is_active {
-            if self.sync_state.write().unwrap().input.handle_event(event) {
-                return true;
-            }
+        if input_is_active && self.sync_state.write().unwrap().input.handle_event(event) {
+            return true;
         }
         if let Some(key) = event.as_key_press_event() {
             match key.code {
@@ -268,21 +248,9 @@ impl QueryWidget {
         short: Cow::Borrowed("fields"),
         long: Cow::Borrowed("Enable/disable fields"),
     }];
-    const HELP_EDITING: &'static [help::Entry<'static>] = &[
-        help::Entry {
-            keys: Cow::Borrowed("esc"),
-            short: Cow::Borrowed("cancel"),
-            long: Cow::Borrowed("Cancel the current operation"),
-        },
-        help::Entry {
-            keys: Cow::Borrowed("enter"),
-            short: Cow::Borrowed("query"),
-            long: Cow::Borrowed("Execute query"),
-        },
-    ];
     pub fn new(client: Arc<aws_sdk_dynamodb::Client>, table_name: &str) -> Self {
         Self {
-            client: client,
+            client,
             table_name: table_name.to_string(),
             sync_state: Arc::new(std::sync::RwLock::new(QuerySyncState::default())),
             async_state: Arc::new(tokio::sync::RwLock::new(QueryAsyncState::default())),
@@ -422,6 +390,6 @@ fn output_info(output: Option<&Output>) -> String {
         Some(Kind::QueryLSI(index_name)) => {
             format!(" (Query LSI: {})", index_name)
         }
-        None => "".to_string()
+        None => "".to_string(),
     }
 }

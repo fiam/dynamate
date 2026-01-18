@@ -6,18 +6,10 @@ use std::{
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
-    buffer::Buffer,
-    layout::{Alignment, Constraint, Layout, Margin, Rect},
-    style::{
-        Color, Modifier, Style, Stylize,
-        palette::tailwind::{BLUE, GREEN, SLATE},
-    },
-    symbols,
+    layout::{Constraint, Margin, Rect},
+    style::{Modifier, Style, palette::tailwind::SLATE},
     text::{Line, Span, Text},
-    widgets::{
-        Block, Borders, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph, Row,
-        StatefulWidget, Table, TableState, Wrap,
-    },
+    widgets::{Block, HighlightSpacing, Padding, Row, StatefulWidget, Table, TableState},
 };
 
 use crate::{
@@ -26,12 +18,7 @@ use crate::{
     widgets::{EnvHandle, Popup, theme},
 };
 
-const TODO_HEADER_STYLE: Style = Style::new().fg(SLATE.c100).bg(BLUE.c800);
-const NORMAL_ROW_BG: Color = SLATE.c950;
-const ALT_ROW_BG_COLOR: Color = SLATE.c900;
-const SELECTED_STYLE: Style = Style::new().bg(SLATE.c800).add_modifier(Modifier::BOLD);
-const TEXT_FG_COLOR: Color = SLATE.c200;
-const COMPLETED_TEXT_FG_COLOR: Color = GREEN.c500;
+const HIGHLIGHT_STYLE: Style = Style::new().bg(SLATE.c800).add_modifier(Modifier::BOLD);
 
 #[derive(Clone)]
 pub struct KeysWidget {
@@ -81,8 +68,10 @@ impl KeysWidget {
         },
     ];
     pub fn new(keys: &[Key], on_event: impl Fn(Event) + Send + Sync + 'static) -> Self {
-        let mut state = KeysWidgetState::default();
-        state.keys = keys.to_vec();
+        let mut state = KeysWidgetState {
+            keys: keys.to_vec(),
+            ..KeysWidgetState::default()
+        };
         state.table_state.select(Some(0));
         Self {
             state: Arc::new(RwLock::new(state)),
@@ -133,7 +122,7 @@ impl crate::widgets::Widget for KeysWidget {
                 let right = if key.hidden {
                     Span::styled(name, Style::default().add_modifier(Modifier::DIM))
                 } else {
-                    Span::raw(name)
+                    Span::styled(name, Style::default().fg(SLATE.c200))
                 };
                 Row::new(vec![left, right])
             })
@@ -142,7 +131,7 @@ impl crate::widgets::Widget for KeysWidget {
         let widths = &[Constraint::Length(3), Constraint::Fill(1)];
         let table = Table::new(rows, widths)
             .block(block)
-            //.highlight_style(SELECTED_STYLE)
+            .row_highlight_style(HIGHLIGHT_STYLE)
             .highlight_symbol(Text::styled(">  ", Style::default().fg(theme.secondary())))
             .highlight_spacing(HighlightSpacing::Always);
 
@@ -168,16 +157,16 @@ impl crate::widgets::Widget for KeysWidget {
                 }
                 KeyCode::Char(' ') => {
                     let mut state = self.state.write().unwrap();
-                    if let Some(selected) = state.table_state.selected() {
-                        if let Some(key) = state.keys.get_mut(selected) {
-                            key.hidden = !key.hidden;
-                            let event = if key.hidden {
-                                Event::KeyHidden(key.name.clone())
-                            } else {
-                                Event::KeyUnhidden(key.name.clone())
-                            };
-                            (self.on_event)(event);
-                        }
+                    if let Some(selected) = state.table_state.selected()
+                        && let Some(key) = state.keys.get_mut(selected)
+                    {
+                        key.hidden = !key.hidden;
+                        let event = if key.hidden {
+                            Event::KeyHidden(key.name.clone())
+                        } else {
+                            Event::KeyUnhidden(key.name.clone())
+                        };
+                        (self.on_event)(event);
                     }
                 }
                 KeyCode::Char('a') => {
@@ -205,9 +194,4 @@ impl Popup for KeysWidget {
             height: area.height / 2,
         }
     }
-}
-
-fn key(s: &str) -> Span<'_> {
-    // render like a small “keycap”
-    Span::styled(format!("[{s}]"), Style::default().bold().fg(Color::White))
 }

@@ -230,12 +230,10 @@ impl QueryBuilder {
                     ) {
                         return Some(remaining);
                     }
-                } else {
-                    if let Some(remaining) =
-                        self.extract_remaining_conditions(expr, hash_key_condition, None)
-                    {
-                        return Some(remaining);
-                    }
+                } else if let Some(remaining) =
+                    self.extract_remaining_conditions(expr, hash_key_condition, None)
+                {
+                    return Some(remaining);
                 }
             }
             QueryType::TableScan => {
