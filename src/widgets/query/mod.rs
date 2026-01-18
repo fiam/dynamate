@@ -189,9 +189,13 @@ impl crate::widgets::Widget for QueryWidget {
                     self.sync_state.write().unwrap().input.toggle_active()
                 }
                 KeyCode::Enter if input_is_active => {
-                    let mut state = self.sync_state.write().unwrap();
-                    self.start_query(Some(state.input.value()), env.clone());
-                    state.input.toggle_active();
+                    let query = {
+                        let mut state = self.sync_state.write().unwrap();
+                        let value = state.input.value().to_string();
+                        state.input.toggle_active();
+                        value
+                    };
+                    self.start_query(Some(&query), env.clone());
                 }
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(env.clone()),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
