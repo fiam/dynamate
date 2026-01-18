@@ -55,9 +55,19 @@ pub async fn execute(
     table_name: &str,
     db_request: &DynamoDbRequest,
 ) -> Result<Output, Error> {
+    execute_page(client, table_name, db_request, None, None).await
+}
+
+pub async fn execute_page(
+    client: Arc<Client>,
+    table_name: &str,
+    db_request: &DynamoDbRequest,
+    start_key: Option<HashMap<String, AttributeValue>>,
+    limit: Option<i32>,
+) -> Result<Output, Error> {
     match db_request {
         DynamoDbRequest::Query(builder) => {
-            let output = execute_query(client, table_name, builder).await?;
+            let output = execute_query(client, table_name, builder, start_key, limit).await?;
             let kind = match builder.query_type() {
                 QueryType::TableQuery { .. } => Kind::Query,
                 QueryType::GlobalSecondaryIndexQuery { index_name, .. } => {
@@ -78,7 +88,7 @@ pub async fn execute(
             })
         }
         DynamoDbRequest::Scan(builder) => {
-            let result = execute_scan(client, table_name, builder).await?;
+            let result = execute_scan(client, table_name, builder, start_key, limit).await?;
             Ok(Output {
                 items: result.items,
                 count: result.count,
@@ -95,6 +105,8 @@ async fn execute_scan(
     client: Arc<Client>,
     table_name: &str,
     builder: &ScanBuilder,
+    start_key: Option<HashMap<String, AttributeValue>>,
+    limit: Option<i32>,
 ) -> Result<ScanOutput, aws_sdk_dynamodb::Error> {
     let mut request = client.scan().table_name(table_name);
 
@@ -117,6 +129,14 @@ async fn execute_scan(
         }
     }
 
+    if let Some(start_key) = start_key {
+        request = request.set_exclusive_start_key(Some(start_key));
+    }
+
+    if let Some(limit) = limit {
+        request = request.limit(limit);
+    }
+
     let output = request.send().await?;
     Ok(output)
 }
@@ -125,6 +145,8 @@ async fn execute_query(
     client: Arc<Client>,
     table_name: &str,
     builder: &QueryBuilder,
+    start_key: Option<HashMap<String, AttributeValue>>,
+    limit: Option<i32>,
 ) -> Result<QueryOutput, Error> {
     let mut request = client.query().table_name(table_name);
 
@@ -150,6 +172,14 @@ async fn execute_query(
 
     for (key, value) in builder.expression_attribute_values() {
         request = request.expression_attribute_values(key.clone(), value.clone());
+    }
+
+    if let Some(start_key) = start_key {
+        request = request.set_exclusive_start_key(Some(start_key));
+    }
+
+    if let Some(limit) = limit {
+        request = request.limit(limit);
     }
 
     tracing::debug!(

@@ -25,7 +25,7 @@ use crate::{
     widgets::{EnvHandle, theme::Theme},
 };
 use dynamate::{
-    dynamodb::{DynamoDbRequest, Kind, Output, ScanBuilder, execute},
+    dynamodb::{DynamoDbRequest, Kind, Output, ScanBuilder, execute_page},
     expr::parse_dynamo_expression,
 };
 
@@ -49,6 +49,9 @@ struct QuerySyncState {
     items: Vec<Item>,
     item_keys: Arc<item_keys::ItemKeys>,
     table_state: TableState,
+    last_evaluated_key: Option<HashMap<String, AttributeValue>>,
+    last_query: String,
+    is_loading_more: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -190,7 +193,7 @@ impl crate::widgets::Widget for QueryWidget {
                     self.start_query(Some(state.input.value()), env.clone());
                     state.input.toggle_active();
                 }
-                KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
+                KeyCode::Char('j') | KeyCode::Down => self.scroll_down(env.clone()),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
                 KeyCode::Char('f') => {
                     let state = self.sync_state.read().unwrap();
@@ -224,7 +227,7 @@ impl crate::widgets::Widget for QueryWidget {
         if let Some(mouse) = event.as_mouse_event() {
             match mouse.kind {
                 crossterm::event::MouseEventKind::ScrollUp => self.scroll_up(),
-                crossterm::event::MouseEventKind::ScrollDown => self.scroll_down(),
+                crossterm::event::MouseEventKind::ScrollDown => self.scroll_down(env.clone()),
                 _ => return false, // not handled
             }
         }
@@ -243,6 +246,7 @@ impl QueryWidget {
         short: Cow::Borrowed("fields"),
         long: Cow::Borrowed("Enable/disable fields"),
     }];
+    const PAGE_SIZE: i32 = 100;
     pub fn new(client: Arc<aws_sdk_dynamodb::Client>, table_name: &str) -> Self {
         Self {
             client,
@@ -282,20 +286,48 @@ impl QueryWidget {
         Ok(arc_ref.clone())
     }
 
-    fn scroll_down(&self) {
-        self.sync_state
-            .write()
-            .unwrap()
-            .table_state
-            .scroll_down_by(1);
+    fn scroll_down(&self, env: EnvHandle) {
+        let should_load_more = {
+            let mut state = self.sync_state.write().unwrap();
+            state.table_state.scroll_down_by(1);
+            self.should_load_more(&state)
+        };
+
+        if should_load_more {
+            self.load_more(env);
+        }
     }
 
     fn scroll_up(&self) {
         self.sync_state.write().unwrap().table_state.scroll_up_by(1);
     }
 
-    async fn create_request(&self, query: Option<&str>) -> Result<DynamoDbRequest, String> {
-        let query = query.unwrap_or("").trim();
+    fn should_load_more(&self, state: &QuerySyncState) -> bool {
+        if state.is_loading_more || state.last_evaluated_key.is_none() {
+            return false;
+        }
+        let selected = state.table_state.selected().unwrap_or(0);
+        selected + 1 >= state.items.len()
+    }
+
+    fn load_more(&self, env: EnvHandle) {
+        let (query, start_key) = {
+            let mut state = self.sync_state.write().unwrap();
+            if state.is_loading_more {
+                return;
+            }
+            let Some(start_key) = state.last_evaluated_key.clone() else {
+                return;
+            };
+            state.is_loading_more = true;
+            (state.last_query.clone(), start_key)
+        };
+
+        self.start_query_page(query, Some(start_key), true, env);
+    }
+
+    async fn create_request(&self, query: &str) -> Result<DynamoDbRequest, String> {
+        let query = query.trim();
         if query.is_empty() {
             return Ok(DynamoDbRequest::Scan(ScanBuilder::new()));
         }
@@ -308,17 +340,47 @@ impl QueryWidget {
     }
 
     fn start_query(&self, query: Option<&str>, env: EnvHandle) {
+        let query = query.unwrap_or("").to_string();
+        {
+            let mut state = self.sync_state.write().unwrap();
+            state.items.clear();
+            state.item_keys.clear();
+            state.table_state = TableState::default();
+            state.query_output = None;
+            state.last_evaluated_key = None;
+            state.is_loading_more = false;
+            state.last_query = query.clone();
+            state.loading_state = LoadingState::Loading;
+        }
+        env.invalidate();
+        self.start_query_page(query, None, false, env);
+    }
+
+    fn start_query_page(
+        &self,
+        query: String,
+        start_key: Option<HashMap<String, AttributeValue>>,
+        append: bool,
+        env: EnvHandle,
+    ) {
         let this: QueryWidget = self.clone();
-        let query = query.map(|q| q.to_string());
         tokio::spawn(async move {
-            this.set_loading_state(LoadingState::Loading);
-            env.invalidate();
-            match this.create_request(query.as_deref()).await {
+            match this.create_request(&query).await {
                 Ok(request) => {
-                    match execute(this.client.clone(), &this.table_name, &request).await {
+                    match execute_page(
+                        this.client.clone(),
+                        &this.table_name,
+                        &request,
+                        start_key,
+                        Some(Self::PAGE_SIZE),
+                    )
+                    .await
+                    {
                         Ok(query_output) => {
-                            this.process_query_output(query_output).await;
-                            this.set_loading_state(LoadingState::Loaded);
+                            this.process_query_output(query_output, append).await;
+                            if !append {
+                                this.set_loading_state(LoadingState::Loaded);
+                            }
                         }
                         Err(e) => {
                             this.set_loading_state(LoadingState::Error(e.to_string()));
@@ -333,7 +395,7 @@ impl QueryWidget {
         });
     }
 
-    async fn process_query_output(&self, output: Output) {
+    async fn process_query_output(&self, output: Output, append: bool) {
         let mut item_keys = HashSet::new();
         let shared_item_keys = self.sync_state.read().unwrap().item_keys.clone();
 
@@ -350,11 +412,13 @@ impl QueryWidget {
         let table_desc = self.table_description().await.ok();
 
         let mut state = self.sync_state.write().unwrap();
-        // Clear previous results
-        state.items.clear();
+        if !append {
+            state.items.clear();
+        }
         state.items.extend(new_items);
+        state.last_evaluated_key = output.last_evaluated_key().cloned();
+        state.is_loading_more = false;
 
-        // Update item keys with table description
         if let Some(table_desc) = table_desc {
             state.item_keys.extend(item_keys, &table_desc);
         }

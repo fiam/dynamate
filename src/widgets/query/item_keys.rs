@@ -85,6 +85,14 @@ impl ItemKeys {
         inner.hidden.contains(key)
     }
 
+    pub fn clear(&self) {
+        let mut inner = self.inner.write().unwrap();
+        inner.set.clear();
+        inner.hidden.clear();
+        inner.sorted.clear();
+        inner.visible.clear();
+    }
+
     fn update_visible(&self, inner: &mut Inner) {
         inner.visible = inner
             .sorted
