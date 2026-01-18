@@ -38,7 +38,7 @@ pub struct QueryWidget {
     client: Arc<aws_sdk_dynamodb::Client>,
     table_name: String,
     sync_state: Arc<std::sync::RwLock<QuerySyncState>>,
-    async_state: Arc<tokio::sync::RwLock<QueryAsyncState>>,
+    table_desc: Arc<OnceCell<Arc<TableDescription>>>,
 }
 
 #[derive(Default)]
@@ -49,11 +49,6 @@ struct QuerySyncState {
     items: Vec<Item>,
     item_keys: Arc<item_keys::ItemKeys>,
     table_state: TableState,
-}
-
-#[derive(Debug, Default)]
-struct QueryAsyncState {
-    table_desc: OnceCell<Arc<TableDescription>>,
 }
 
 #[derive(Debug, Clone)]
@@ -253,7 +248,7 @@ impl QueryWidget {
             client,
             table_name: table_name.to_string(),
             sync_state: Arc::new(std::sync::RwLock::new(QuerySyncState::default())),
-            async_state: Arc::new(tokio::sync::RwLock::new(QueryAsyncState::default())),
+            table_desc: Arc::new(OnceCell::new()),
         }
     }
 
@@ -266,8 +261,7 @@ impl QueryWidget {
     }
 
     async fn table_description(&self) -> Result<Arc<TableDescription>, String> {
-        let state = self.async_state.write().await;
-        let arc_ref = state
+        let arc_ref = self
             .table_desc
             .get_or_try_init(|| async {
                 let out = self
