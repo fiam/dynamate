@@ -34,14 +34,18 @@ impl Input {
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &theme::Theme) {
         let scroll = 0;
-        let style = if self.is_active() {
-            Style::default().fg(theme.secondary())
+        let border = if self.is_active() {
+            theme.accent()
         } else {
-            Style::default()
+            theme.border()
         };
-        let block = Block::bordered().title("Query").style(style);
+        let block = Block::bordered()
+            .title("Query")
+            .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()))
+            .border_style(Style::default().fg(border));
         let input_area = area;
         let input = Paragraph::new(self.input.as_str())
+            .style(Style::default().fg(theme.text()))
             .scroll((0, scroll as u16))
             .block(block);
         input.render(area, frame.buffer_mut());

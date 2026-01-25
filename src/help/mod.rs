@@ -212,10 +212,13 @@ fn make_spans<'a>(
             }
             let keys = display.keys.as_ref();
             Some([
-                Span::styled(format!("[{keys}]"), Style::default().bold()),
+                Span::styled(
+                    format!("[{keys}]"),
+                    Style::default().bold().fg(theme.accent()),
+                ),
                 Span::raw(" "),
-                Span::raw(display.short.to_string()),
-                Span::styled(" • ", Style::default().fg(theme.neutral())),
+                Span::styled(display.short.to_string(), Style::default().fg(theme.text())),
+                Span::styled(" • ", Style::default().fg(theme.text_muted())),
             ])
         })
         .flatten()

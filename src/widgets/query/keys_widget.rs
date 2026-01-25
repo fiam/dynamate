@@ -7,7 +7,7 @@ use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     layout::{Constraint, Margin, Rect},
-    style::{Modifier, Style, palette::tailwind::SLATE},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, HighlightSpacing, Padding, Row, StatefulWidget, Table, TableState},
 };
@@ -17,8 +17,6 @@ use crate::{
     util::{fill_bg, pad},
     widgets::{EnvHandle, Popup, theme},
 };
-
-const HIGHLIGHT_STYLE: Style = Style::new().bg(SLATE.c800).add_modifier(Modifier::BOLD);
 
 #[derive(Clone)]
 pub struct KeysWidget {
@@ -113,12 +111,14 @@ impl crate::widgets::Widget for KeysWidget {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &theme::Theme) {
-        fill_bg(frame.buffer_mut(), area, theme.neutral());
+        fill_bg(frame.buffer_mut(), area, theme.panel_bg());
         let mut state = self.state.write().unwrap();
 
         let block = Block::bordered()
             .title(Line::raw(pad("Show fields", 2)).centered())
-            .padding(Padding::new(1, 1, 1, 0));
+            .padding(Padding::new(1, 1, 1, 0))
+            .border_style(Style::default().fg(theme.border()))
+            .style(Style::default().bg(theme.panel_bg()).fg(theme.text()));
 
         // Iterate through all elements in the `items` and stylize them.
         let rows: Vec<Row> = state
@@ -128,13 +128,13 @@ impl crate::widgets::Widget for KeysWidget {
                 let left = if key.hidden {
                     Span::raw("")
                 } else {
-                    Span::styled("✓", Style::default().fg(theme.primary()))
+                    Span::styled("✓", Style::default().fg(theme.success()))
                 };
                 let name = key.name.clone();
                 let right = if key.hidden {
-                    Span::styled(name, Style::default().add_modifier(Modifier::DIM))
+                    Span::styled(name, Style::default().fg(theme.text_muted()))
                 } else {
-                    Span::styled(name, Style::default().fg(SLATE.c200))
+                    Span::styled(name, Style::default().fg(theme.text()))
                 };
                 Row::new(vec![left, right])
             })
@@ -143,8 +143,13 @@ impl crate::widgets::Widget for KeysWidget {
         let widths = &[Constraint::Length(3), Constraint::Fill(1)];
         let table = Table::new(rows, widths)
             .block(block)
-            .row_highlight_style(HIGHLIGHT_STYLE)
-            .highlight_symbol(Text::styled(">  ", Style::default().fg(theme.secondary())))
+            .row_highlight_style(
+                Style::default()
+                    .bg(theme.selection_bg())
+                    .fg(theme.selection_fg())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(Text::styled(">  ", Style::default().fg(theme.accent_alt())))
             .highlight_spacing(HighlightSpacing::Always);
 
         let mut table_area = area.inner(Margin::new(1, 0));

@@ -58,17 +58,20 @@ impl FilterInput {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let style = if self.is_active {
-            Style::default().fg(theme.secondary())
+        let border = if self.is_active {
+            theme.accent()
         } else {
-            Style::default().fg(theme.neutral_variant())
+            theme.border()
         };
         let title = if self.is_active {
             "Filter (type to search)"
         } else {
             "Filter (/ to edit, esc to clear)"
         };
-        let block = Block::bordered().title(title).style(style);
+        let block = Block::bordered()
+            .title(title)
+            .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()))
+            .border_style(Style::default().fg(border));
         let input = Paragraph::new(self.value.as_str()).block(block);
         input.render(area, frame.buffer_mut());
 
@@ -319,16 +322,22 @@ impl crate::widgets::Widget for TablePickerWidget {
             .title_top("Tables")
             .title_bottom(Line::styled(
                 pad(format!("{} tables", state.filtered_tables.len()), 2),
-                Style::default().fg(theme.neutral_variant()),
-            ));
+                Style::default().fg(theme.text_muted()),
+            ))
+            .border_style(Style::default().fg(theme.border()))
+            .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()));
 
         match &state.loading_state {
             LoadingState::Loading => {
-                let text = Paragraph::new("Loading tables...").block(block);
+                let text = Paragraph::new("Loading tables...")
+                    .style(Style::default().fg(theme.warning()))
+                    .block(block);
                 frame.render_widget(text, list_area);
             }
             LoadingState::Error(message) => {
-                let text = Paragraph::new(format!("Error: {message}")).block(block);
+                let text = Paragraph::new(format!("Error: {message}"))
+                    .style(Style::default().fg(theme.error()))
+                    .block(block);
                 frame.render_widget(text, list_area);
             }
             LoadingState::Idle | LoadingState::Loaded => {
@@ -346,13 +355,22 @@ impl crate::widgets::Widget for TablePickerWidget {
                 let rows: Vec<ListItem> = state
                     .filtered_tables
                     .iter()
-                    .map(|name| ListItem::new(Line::from(name.clone())))
+                    .map(|name| {
+                        ListItem::new(Line::styled(
+                            name.clone(),
+                            Style::default().fg(theme.text()),
+                        ))
+                    })
                     .collect();
                 let list = List::new(rows)
                     .block(block)
                     .highlight_symbol(">> ")
                     .highlight_spacing(HighlightSpacing::Always)
-                    .highlight_style(Style::default().bg(theme.secondary()));
+                    .highlight_style(
+                        Style::default()
+                            .bg(theme.selection_bg())
+                            .fg(theme.selection_fg()),
+                    );
 
                 StatefulWidget::render(list, list_area, frame.buffer_mut(), &mut state.list_state);
             }

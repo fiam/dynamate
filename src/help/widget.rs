@@ -4,7 +4,7 @@ use crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Margin, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Padding, Row, Table},
 };
@@ -38,12 +38,20 @@ impl Widget {
 impl crate::widgets::Widget for Widget {
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let buf = frame.buffer_mut();
-        fill_bg(buf, area, theme.neutral());
-        let title = Line::styled(pad("Help", 2), Style::default().fg(theme.primary())).centered();
+        fill_bg(buf, area, theme.panel_bg());
+        let title = Line::styled(
+            pad("Help", 2),
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .centered();
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .title(title)
-            .padding(Padding::new(5, 5, 5, 5));
+            .border_style(Style::default().fg(theme.border()))
+            .style(Style::default().bg(theme.panel_bg()).fg(theme.text()))
+            .padding(Padding::new(2, 2, 1, 1));
 
         let inner = area.inner(Margin::new(1, 1));
 
@@ -70,7 +78,7 @@ impl crate::widgets::Widget for Widget {
                     .unwrap_or_default();
                 let left_desc = chunk
                     .first()
-                    .map(|e| Span::raw(e.long.as_ref()))
+                    .map(|e| Span::styled(e.long.as_ref(), Style::default().fg(theme.text())))
                     .unwrap_or_default();
                 let right_key = chunk
                     .get(1)
@@ -78,7 +86,7 @@ impl crate::widgets::Widget for Widget {
                     .unwrap_or_default();
                 let right_desc = chunk
                     .get(1)
-                    .map(|e| Span::raw(e.long.as_ref()))
+                    .map(|e| Span::styled(e.long.as_ref(), Style::default().fg(theme.text())))
                     .unwrap_or_default();
                 Row::new(vec![
                     Line::from(left_key),
@@ -90,12 +98,14 @@ impl crate::widgets::Widget for Widget {
             .collect();
 
         let widths = &[
-            Constraint::Percentage(10),
-            Constraint::Percentage(40),
-            Constraint::Percentage(10),
-            Constraint::Percentage(40),
+            Constraint::Length(12),
+            Constraint::Fill(1),
+            Constraint::Length(12),
+            Constraint::Fill(1),
         ];
-        let table = Table::new(rows, widths).block(block);
+        let table = Table::new(rows, widths)
+            .block(block)
+            .style(Style::default().fg(theme.text()));
 
         ratatui::widgets::Widget::render(table, inner, buf);
     }
@@ -130,6 +140,9 @@ fn make_display_key(entry: &crate::help::DisplayEntry<'_>, theme: &Theme) -> Spa
     let keys = entry.keys.as_ref();
     Span::styled(
         format!("[{keys}]"),
-        Style::default().bold().fg(theme.secondary()),
+        Style::default()
+            .bold()
+            .fg(theme.accent_alt())
+            .add_modifier(Modifier::BOLD),
     )
 }

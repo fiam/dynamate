@@ -9,7 +9,7 @@ struct ErrorPopup {
 
 impl widgets::Widget for ErrorPopup {
     fn render(&self, frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
-        fill_bg(frame.buffer_mut(), area, theme.neutral());
+        fill_bg(frame.buffer_mut(), area, theme.panel_bg());
         let layout = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]);
         let [msg_area, button_area] = area.layout(&layout);
         //frame.render_widget(self, area);

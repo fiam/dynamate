@@ -623,8 +623,10 @@ impl QueryWidget {
             .title_top(title)
             .title_bottom(Line::styled(
                 title_bottom,
-                Style::default().fg(theme.neutral_variant()),
-            ));
+                Style::default().fg(theme.text_muted()),
+            ))
+            .border_style(Style::default().fg(theme.border()))
+            .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()));
 
         if state.table_state.selected().is_none() && !state.items.is_empty() {
             state.table_state.select(Some(0));
@@ -635,7 +637,11 @@ impl QueryWidget {
             .header(header)
             .highlight_spacing(HighlightSpacing::Always)
             .highlight_symbol(">>")
-            .row_highlight_style(Style::default().bg(theme.secondary()));
+            .row_highlight_style(
+                Style::default()
+                    .bg(theme.selection_bg())
+                    .fg(theme.selection_fg()),
+            );
 
         StatefulWidget::render(table, area, frame.buffer_mut(), &mut state.table_state);
     }
@@ -660,8 +666,10 @@ impl QueryWidget {
             .title_top(title)
             .title_bottom(Line::styled(
                 title_bottom,
-                Style::default().fg(theme.neutral_variant()),
-            ));
+                Style::default().fg(theme.text_muted()),
+            ))
+            .border_style(Style::default().fg(theme.border()))
+            .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()));
 
         let selected = state.table_state.selected().unwrap_or(0);
         let content = state

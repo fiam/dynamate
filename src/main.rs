@@ -39,7 +39,7 @@ use crossterm::event::{
 };
 use crossterm::terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Stylize;
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
 use ratatui::{DefaultTerminal, Frame};
@@ -57,8 +57,9 @@ mod subcommands;
 mod util;
 mod widgets;
 
-use crate::widgets::theme::Theme;
 use crate::help::ModDisplay;
+use crate::util::fill_bg;
+use crate::widgets::theme::Theme;
 
 #[derive(clap::Parser)]
 #[command(
@@ -399,6 +400,9 @@ impl App {
     fn render(&self, frame: &mut Frame) {
         let start = Instant::now();
         let theme = Theme::default();
+        let area = frame.area();
+        let buf = frame.buffer_mut();
+        fill_bg(buf, area, theme.bg());
         let all_help = self.make_help();
         let modifiers = *self.modifiers.read().unwrap();
         let help_mode = *self.help_mode.read().unwrap();
@@ -409,7 +413,13 @@ impl App {
             Constraint::Length(help_height),
         ]);
         let [title_area, body_area, footer_area] = frame.area().layout(&layout);
-        let title = Line::from("dynamate").centered().bold();
+        let title = Line::styled(
+            "dynamate",
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .centered();
         frame.render_widget(title, title_area);
         if let Some(widget) = self.widgets.last() {
             widget.render(frame, body_area, &theme);
