@@ -62,6 +62,7 @@ struct QuerySyncState {
     last_query: String,
     is_loading_more: bool,
     show_tree: bool,
+    reopen_tree: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,14 +109,12 @@ impl crate::widgets::Widget for QueryWidget {
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let mut state = self.sync_state.write().unwrap();
 
-        let layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]);
-        let [query_area, results_area] = area.layout(&layout);
-
-        state.input.render(frame, query_area, theme);
-
         if state.show_tree {
-            self.render_tree(frame, results_area, theme, &mut state);
+            self.render_tree(frame, area, theme, &mut state);
         } else {
+            let layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]);
+            let [query_area, results_area] = area.layout(&layout);
+            state.input.render(frame, query_area, theme);
             self.render_table(frame, results_area, theme, &mut state);
         }
     }
@@ -282,6 +281,14 @@ impl QueryWidget {
     ];
     const HELP_TREE: &'static [help::Entry<'static>] = &[
         help::Entry {
+            keys: Cow::Borrowed("j/k/↑/↓"),
+            short: Cow::Borrowed("next/prev"),
+            long: Cow::Borrowed("Next/previous item"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("e"),
             short: Cow::Borrowed("edit"),
             long: Cow::Borrowed("Edit item (JSON)"),
@@ -351,7 +358,8 @@ impl QueryWidget {
     }
 
     fn scroll_up(&self) {
-        self.sync_state.write().unwrap().table_state.scroll_up_by(1);
+        let mut state = self.sync_state.write().unwrap();
+        state.table_state.scroll_up_by(1);
     }
 
     fn should_load_more(&self, state: &QuerySyncState) -> bool {
@@ -392,6 +400,15 @@ impl QueryWidget {
     }
 
     fn start_query(&self, query: Option<&str>, env: EnvHandle) {
+        self.start_query_with_reopen(query, env, None);
+    }
+
+    fn start_query_with_reopen(
+        &self,
+        query: Option<&str>,
+        env: EnvHandle,
+        reopen_tree: Option<usize>,
+    ) {
         let query = query.unwrap_or("").to_string();
         {
             let mut state = self.sync_state.write().unwrap();
@@ -404,6 +421,7 @@ impl QueryWidget {
             state.last_query = query.clone();
             state.loading_state = LoadingState::Loading;
             state.show_tree = false;
+            state.reopen_tree = reopen_tree;
         }
         env.invalidate();
         self.start_query_page(query, None, false, env);
@@ -473,6 +491,18 @@ impl QueryWidget {
         state.is_loading_more = false;
 
         state.query_output = Some(output);
+        if !append {
+            if let Some(index) = state.reopen_tree.take() {
+                if state.items.is_empty() {
+                    state.show_tree = false;
+                    state.table_state.select(None);
+                } else {
+                    let clamped = index.min(state.items.len().saturating_sub(1));
+                    state.table_state.select(Some(clamped));
+                    state.show_tree = true;
+                }
+            }
+        }
 
         drop(state);
 
@@ -600,13 +630,14 @@ impl QueryWidget {
     }
 
     fn edit_selected(&self, format: EditorFormat, env: EnvHandle) {
-        let (item, query) = {
+        let (item, query, reopen_tree) = {
             let state = self.sync_state.read().unwrap();
             let selected = state.table_state.selected();
             let item = selected
                 .and_then(|index| state.items.get(index))
                 .map(|item| item.0.clone());
-            (item, state.last_query.clone())
+            let reopen_tree = if state.show_tree { selected } else { None };
+            (item, state.last_query.clone(), reopen_tree)
         };
 
         let Some(item) = item else {
@@ -651,7 +682,7 @@ impl QueryWidget {
             }
         };
 
-        self.put_item(updated, query, env);
+        self.put_item(updated, query, env, reopen_tree);
     }
 
     fn create_item(&self, format: EditorFormat, env: EnvHandle) {
@@ -684,7 +715,7 @@ impl QueryWidget {
             }
         };
 
-        self.put_item(updated, query, env);
+        self.put_item(updated, query, env, None);
     }
 
     fn open_editor(&self, initial: &str, env: EnvHandle) -> Result<String, String> {
@@ -733,7 +764,13 @@ impl QueryWidget {
         path
     }
 
-    fn put_item(&self, item: HashMap<String, AttributeValue>, query: String, env: EnvHandle) {
+    fn put_item(
+        &self,
+        item: HashMap<String, AttributeValue>,
+        query: String,
+        env: EnvHandle,
+        reopen_tree: Option<usize>,
+    ) {
         let this: QueryWidget = self.clone();
         tokio::spawn(async move {
             this.set_loading_state(LoadingState::Loading);
@@ -747,7 +784,7 @@ impl QueryWidget {
                 .await;
             match result {
                 Ok(_) => {
-                    this.start_query(Some(&query), env.clone());
+                    this.start_query_with_reopen(Some(&query), env.clone(), reopen_tree);
                 }
                 Err(err) => {
                     this.set_loading_state(LoadingState::Error(err.to_string()));
