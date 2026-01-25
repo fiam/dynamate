@@ -2,17 +2,24 @@ use std::{
     borrow::Cow,
     cmp::{max, min},
     collections::{HashMap, HashSet},
+    env, fs,
+    process::Command,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use aws_sdk_dynamodb::types::{AttributeValue, TableDescription};
-use crossterm::event::{Event, KeyCode};
+use crossterm::cursor::MoveTo;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode};
+use crossterm::terminal::{
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::Style,
     text::Line,
-    widgets::{Block, HighlightSpacing, Row, StatefulWidget, Table, TableState},
+    widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState},
 };
 use tokio::sync::OnceCell;
 
@@ -24,6 +31,7 @@ use crate::{
     util::pad,
     widgets::{EnvHandle, theme::Theme},
 };
+use dynamate::dynamodb::json;
 use dynamate::{
     dynamodb::{DynamoDbRequest, Kind, Output, ScanBuilder, execute_page},
     expr::parse_dynamo_expression,
@@ -32,6 +40,7 @@ use dynamate::{
 mod input;
 mod item_keys;
 mod keys_widget;
+mod tree;
 
 #[derive(Clone)]
 pub struct QueryWidget {
@@ -52,6 +61,7 @@ struct QuerySyncState {
     last_evaluated_key: Option<HashMap<String, AttributeValue>>,
     last_query: String,
     is_loading_more: bool,
+    show_tree: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -103,76 +113,11 @@ impl crate::widgets::Widget for QueryWidget {
 
         state.input.render(frame, query_area, theme);
 
-        let keys_view = state.item_keys.sorted();
-        let header = Row::new(
-            keys_view
-                .as_slice()
-                .iter()
-                .map(|key| Line::from(key.clone())),
-        )
-        .style(Style::new().bold());
-
-        let items = &state.items;
-        let widths: Vec<Constraint> = keys_view
-            .as_slice()
-            .iter()
-            .map(|key| {
-                let max_value = items
-                    .iter()
-                    .map(|item| item.value_size(key))
-                    .max()
-                    .unwrap_or(0);
-                let key_size = key.len() + 2;
-                Constraint::Min(max(max_value, key_size) as u16)
-            })
-            .collect();
-
-        drop(keys_view);
-
-        // maximum rows is the area height, minus 2 for the the top and bottom borders,
-        // minus 1 for the header
-        let max_rows = (results_area.height - 2 - 1) as usize;
-        let total = state.items.len();
-        let first_item = state.table_state.offset() + 1;
-        let last_item = min(first_item + max_rows, total);
-
-        // a block with a right aligned title with the loading state on the right
-        let (title, title_bottom) = match &state.loading_state {
-            LoadingState::Idle | LoadingState::Loaded => (
-                format!("Results{}", output_info(state.query_output.as_ref())),
-                pad(
-                    format!("{} results, showing {}-{}", total, first_item, last_item),
-                    2,
-                ),
-            ),
-            LoadingState::Loading => ("Loading".to_string(), "".to_string()),
-            LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
-        };
-
-        let block = Block::bordered()
-            .title_top(title)
-            .title_bottom(Line::styled(
-                title_bottom,
-                Style::default().fg(theme.neutral_variant()),
-            ));
-
-        if state.table_state.selected().is_none() && !state.items.is_empty() {
-            state.table_state.select(Some(0));
+        if state.show_tree {
+            self.render_tree(frame, results_area, theme, &mut state);
+        } else {
+            self.render_table(frame, results_area, theme, &mut state);
         }
-
-        let table = Table::new(&state.items, widths)
-            .block(block)
-            .header(header)
-            .highlight_spacing(HighlightSpacing::Always)
-            .highlight_symbol(">>")
-            .row_highlight_style(Style::default().bg(theme.secondary()));
-
-        StatefulWidget::render(
-            table,
-            results_area,
-            frame.buffer_mut(),
-            &mut state.table_state,
-        );
     }
 
     fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
@@ -196,6 +141,13 @@ impl crate::widgets::Widget for QueryWidget {
                         value
                     };
                     self.start_query(Some(&query), env.clone());
+                }
+                KeyCode::Enter => {
+                    self.edit_selected(EditorFormat::Plain, env.clone());
+                }
+                KeyCode::Char(' ') => {
+                    let mut state = self.sync_state.write().unwrap();
+                    state.show_tree = !state.show_tree;
                 }
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(env.clone()),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
@@ -221,6 +173,22 @@ impl crate::widgets::Widget for QueryWidget {
                     }));
                     env.set_popup(popup);
                 }
+                KeyCode::Char('t') => {
+                    let mut state = self.sync_state.write().unwrap();
+                    state.show_tree = !state.show_tree;
+                }
+                KeyCode::Char('e') => {
+                    self.edit_selected(EditorFormat::Plain, env.clone());
+                }
+                KeyCode::Char('E') => {
+                    self.edit_selected(EditorFormat::DynamoDb, env.clone());
+                }
+                KeyCode::Char('n') => {
+                    self.create_item(EditorFormat::Plain, env.clone());
+                }
+                KeyCode::Char('N') => {
+                    self.create_item(EditorFormat::DynamoDb, env.clone());
+                }
                 _ => {
                     return false; // not handled
                 }
@@ -240,16 +208,65 @@ impl crate::widgets::Widget for QueryWidget {
     }
 
     fn help(&self) -> Option<&[help::Entry<'_>]> {
-        Some(Self::HELP)
+        let show_tree = self.sync_state.read().unwrap().show_tree;
+        if show_tree {
+            Some(Self::HELP_TREE)
+        } else {
+            Some(Self::HELP_TABLE)
+        }
     }
 }
 
 impl QueryWidget {
-    const HELP: &'static [help::Entry<'static>] = &[help::Entry {
-        keys: Cow::Borrowed("f"),
-        short: Cow::Borrowed("fields"),
-        long: Cow::Borrowed("Enable/disable fields"),
-    }];
+    const HELP_TABLE: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("f"),
+            short: Cow::Borrowed("fields"),
+            long: Cow::Borrowed("Enable/disable fields"),
+        },
+        help::Entry {
+            keys: Cow::Borrowed("space"),
+            short: Cow::Borrowed("tree"),
+            long: Cow::Borrowed("View selected item"),
+        },
+        help::Entry {
+            keys: Cow::Borrowed("enter"),
+            short: Cow::Borrowed("edit"),
+            long: Cow::Borrowed("Edit item (JSON)"),
+        },
+        help::Entry {
+            keys: Cow::Borrowed("E"),
+            short: Cow::Borrowed("edit"),
+            long: Cow::Borrowed("Edit item (Dynamo JSON)"),
+        },
+        help::Entry {
+            keys: Cow::Borrowed("n"),
+            short: Cow::Borrowed("new"),
+            long: Cow::Borrowed("New item (JSON)"),
+        },
+        help::Entry {
+            keys: Cow::Borrowed("N"),
+            short: Cow::Borrowed("new"),
+            long: Cow::Borrowed("New item (Dynamo JSON)"),
+        },
+    ];
+    const HELP_TREE: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("space"),
+            short: Cow::Borrowed("table"),
+            long: Cow::Borrowed("Back to table"),
+        },
+        help::Entry {
+            keys: Cow::Borrowed("enter"),
+            short: Cow::Borrowed("edit"),
+            long: Cow::Borrowed("Edit item (JSON)"),
+        },
+        help::Entry {
+            keys: Cow::Borrowed("E"),
+            short: Cow::Borrowed("edit"),
+            long: Cow::Borrowed("Edit item (Dynamo JSON)"),
+        },
+    ];
     const PAGE_SIZE: i32 = 100;
     pub fn new(client: Arc<aws_sdk_dynamodb::Client>, table_name: &str) -> Self {
         Self {
@@ -294,7 +311,11 @@ impl QueryWidget {
         let should_load_more = {
             let mut state = self.sync_state.write().unwrap();
             state.table_state.scroll_down_by(1);
-            self.should_load_more(&state)
+            if state.show_tree {
+                false
+            } else {
+                self.should_load_more(&state)
+            }
         };
 
         if should_load_more {
@@ -355,6 +376,7 @@ impl QueryWidget {
             state.is_loading_more = false;
             state.last_query = query.clone();
             state.loading_state = LoadingState::Loading;
+            state.show_tree = false;
         }
         env.invalidate();
         self.start_query_page(query, None, false, env);
@@ -412,8 +434,8 @@ impl QueryWidget {
             })
             .collect();
 
-        // Get table description before acquiring the write lock
-        let table_desc = self.table_description().await.ok();
+        let keys_for_update: Vec<String> = item_keys.into_iter().collect();
+        let table_desc = self.table_desc.get().cloned();
 
         let mut state = self.sync_state.write().unwrap();
         if !append {
@@ -423,12 +445,296 @@ impl QueryWidget {
         state.last_evaluated_key = output.last_evaluated_key().cloned();
         state.is_loading_more = false;
 
+        state.query_output = Some(output);
+
+        drop(state);
+
         if let Some(table_desc) = table_desc {
-            state.item_keys.extend(item_keys, &table_desc);
+            shared_item_keys.extend(keys_for_update, &table_desc);
+        } else {
+            shared_item_keys.extend_unordered(keys_for_update.clone());
+            let this: QueryWidget = self.clone();
+            let shared_item_keys = shared_item_keys.clone();
+            tokio::spawn(async move {
+                if let Ok(table_desc) = this.table_description().await {
+                    shared_item_keys.extend(keys_for_update, &table_desc);
+                }
+            });
+        }
+    }
+
+    fn render_table(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        state: &mut QuerySyncState,
+    ) {
+        let keys_view = state.item_keys.sorted();
+        let header = Row::new(
+            keys_view
+                .as_slice()
+                .iter()
+                .map(|key| Line::from(key.clone())),
+        )
+        .style(Style::new().bold());
+
+        let items = &state.items;
+        let widths: Vec<Constraint> = keys_view
+            .as_slice()
+            .iter()
+            .map(|key| {
+                let max_value = items
+                    .iter()
+                    .map(|item| item.value_size(key))
+                    .max()
+                    .unwrap_or(0);
+                let key_size = key.len() + 2;
+                Constraint::Min(max(max_value, key_size) as u16)
+            })
+            .collect();
+
+        drop(keys_view);
+
+        // maximum rows is the area height, minus 2 for the the top and bottom borders,
+        // minus 1 for the header
+        let max_rows = (area.height - 2 - 1) as usize;
+        let total = state.items.len();
+        let first_item = state.table_state.offset() + 1;
+        let last_item = min(first_item + max_rows, total);
+
+        // a block with a right aligned title with the loading state on the right
+        let (title, title_bottom) = match &state.loading_state {
+            LoadingState::Idle | LoadingState::Loaded => (
+                format!("Results{}", output_info(state.query_output.as_ref())),
+                pad(
+                    format!("{} results, showing {}-{}", total, first_item, last_item),
+                    2,
+                ),
+            ),
+            LoadingState::Loading => ("Loading".to_string(), "".to_string()),
+            LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
+        };
+
+        let block = Block::bordered()
+            .title_top(title)
+            .title_bottom(Line::styled(
+                title_bottom,
+                Style::default().fg(theme.neutral_variant()),
+            ));
+
+        if state.table_state.selected().is_none() && !state.items.is_empty() {
+            state.table_state.select(Some(0));
         }
 
-        state.query_output = Some(output);
+        let table = Table::new(&state.items, widths)
+            .block(block)
+            .header(header)
+            .highlight_spacing(HighlightSpacing::Always)
+            .highlight_symbol(">>")
+            .row_highlight_style(Style::default().bg(theme.secondary()));
+
+        StatefulWidget::render(table, area, frame.buffer_mut(), &mut state.table_state);
     }
+
+    fn render_tree(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        state: &mut QuerySyncState,
+    ) {
+        let (title, title_bottom) = match &state.loading_state {
+            LoadingState::Idle | LoadingState::Loaded => (
+                format!("Item Tree{}", output_info(state.query_output.as_ref())),
+                pad("space: back to table", 2),
+            ),
+            LoadingState::Loading => ("Loading".to_string(), "".to_string()),
+            LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
+        };
+
+        let block = Block::bordered()
+            .title_top(title)
+            .title_bottom(Line::styled(
+                title_bottom,
+                Style::default().fg(theme.neutral_variant()),
+            ));
+
+        let selected = state.table_state.selected().unwrap_or(0);
+        let content = state
+            .items
+            .get(selected)
+            .map(|item| tree::item_to_lines(&item.0))
+            .unwrap_or_else(|| vec!["No item selected".to_string()]);
+
+        let text = content.join("\n");
+        let paragraph = Paragraph::new(text).block(block);
+        frame.render_widget(paragraph, area);
+    }
+
+    fn edit_selected(&self, format: EditorFormat, env: EnvHandle) {
+        let (item, query) = {
+            let state = self.sync_state.read().unwrap();
+            let selected = state.table_state.selected();
+            let item = selected
+                .and_then(|index| state.items.get(index))
+                .map(|item| item.0.clone());
+            (item, state.last_query.clone())
+        };
+
+        let Some(item) = item else {
+            self.set_loading_state(LoadingState::Error("No item selected".to_string()));
+            env.invalidate();
+            return;
+        };
+
+        let initial = match format {
+            EditorFormat::Plain => json::to_json_string(&item),
+            EditorFormat::DynamoDb => json::to_dynamodb_json_string(&item),
+        };
+        let initial = match initial {
+            Ok(value) => value,
+            Err(err) => {
+                self.set_loading_state(LoadingState::Error(err.to_string()));
+                env.invalidate();
+                return;
+            }
+        };
+
+        let edited = match self.open_editor(&initial, env.clone()) {
+            Ok(value) => value,
+            Err(err) => {
+                self.set_loading_state(LoadingState::Error(err));
+                env.invalidate();
+                return;
+            }
+        };
+        env.invalidate();
+
+        let updated = match format {
+            EditorFormat::Plain => json::from_json_string(&edited),
+            EditorFormat::DynamoDb => json::from_dynamodb_json_string(&edited),
+        };
+        let updated = match updated {
+            Ok(value) => value,
+            Err(err) => {
+                self.set_loading_state(LoadingState::Error(err.to_string()));
+                env.invalidate();
+                return;
+            }
+        };
+
+        self.put_item(updated, query, env);
+    }
+
+    fn create_item(&self, format: EditorFormat, env: EnvHandle) {
+        let query = self.sync_state.read().unwrap().last_query.clone();
+        let initial = match format {
+            EditorFormat::Plain => "{}\n".to_string(),
+            EditorFormat::DynamoDb => "{}\n".to_string(),
+        };
+
+        let edited = match self.open_editor(&initial, env.clone()) {
+            Ok(value) => value,
+            Err(err) => {
+                self.set_loading_state(LoadingState::Error(err));
+                env.invalidate();
+                return;
+            }
+        };
+        env.invalidate();
+
+        let updated = match format {
+            EditorFormat::Plain => json::from_json_string(&edited),
+            EditorFormat::DynamoDb => json::from_dynamodb_json_string(&edited),
+        };
+        let updated = match updated {
+            Ok(value) => value,
+            Err(err) => {
+                self.set_loading_state(LoadingState::Error(err.to_string()));
+                env.invalidate();
+                return;
+            }
+        };
+
+        self.put_item(updated, query, env);
+    }
+
+    fn open_editor(&self, initial: &str, env: EnvHandle) -> Result<String, String> {
+        let editor = env::var("EDITOR").map_err(|_| "EDITOR is not set".to_string())?;
+        let temp_path = self.temp_path();
+        fs::write(&temp_path, initial).map_err(|err| err.to_string())?;
+
+        disable_raw_mode().map_err(|err| err.to_string())?;
+        crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
+            .map_err(|err| err.to_string())?;
+
+        let command = format!("{editor} \"{}\"", temp_path.display());
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .status()
+            .map_err(|err| err.to_string())?;
+
+        crossterm::execute!(
+            std::io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            Clear(ClearType::All),
+            MoveTo(0, 0)
+        )
+        .map_err(|err| err.to_string())?;
+        enable_raw_mode().map_err(|err| err.to_string())?;
+        env.force_redraw();
+
+        if !status.success() {
+            return Err("Editor exited with a non-zero status".to_string());
+        }
+
+        let contents = fs::read_to_string(&temp_path).map_err(|err| err.to_string())?;
+        let _ = fs::remove_file(&temp_path);
+        Ok(contents)
+    }
+
+    fn temp_path(&self) -> std::path::PathBuf {
+        let mut path = env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        path.push(format!("dynamate-edit-{nanos}.json"));
+        path
+    }
+
+    fn put_item(&self, item: HashMap<String, AttributeValue>, query: String, env: EnvHandle) {
+        let this: QueryWidget = self.clone();
+        tokio::spawn(async move {
+            this.set_loading_state(LoadingState::Loading);
+            env.invalidate();
+            let result = this
+                .client
+                .put_item()
+                .table_name(&this.table_name)
+                .set_item(Some(item))
+                .send()
+                .await;
+            match result {
+                Ok(_) => {
+                    this.start_query(Some(&query), env.clone());
+                }
+                Err(err) => {
+                    this.set_loading_state(LoadingState::Error(err.to_string()));
+                    env.invalidate();
+                }
+            }
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EditorFormat {
+    Plain,
+    DynamoDb,
 }
 
 impl<'a> From<&Item> for Row<'a> {

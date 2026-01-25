@@ -61,6 +61,20 @@ impl ItemKeys {
         self.update_visible(&mut inner);
     }
 
+    /// Insert many keys and rebuild the cached order without table schema info.
+    /// This keeps things responsive when DescribeTable is slow or unavailable.
+    pub fn extend_unordered<I>(&self, keys: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut inner = self.inner.write().unwrap();
+        inner.set.extend(keys);
+        let mut keys: Vec<String> = inner.set.iter().cloned().collect();
+        keys.sort();
+        inner.sorted = keys;
+        self.update_visible(&mut inner);
+    }
+
     /// Borrow the current sorted view (no clone). Keep guard alive while using the slice.
     pub fn sorted(&self) -> SortedKeysGuard<'_> {
         SortedKeysGuard {
