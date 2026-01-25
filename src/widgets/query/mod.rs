@@ -5,10 +5,12 @@ use std::{
     env, fs,
     process::Command,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use aws_sdk_dynamodb::types::{AttributeValue, TableDescription};
+use aws_sdk_dynamodb::types::{
+    AttributeValue, KeySchemaElement, KeyType, TableDescription, TimeToLiveStatus,
+};
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyboardEnhancementFlags,
@@ -35,6 +37,10 @@ use crate::{
     widgets::{EnvHandle, theme::Theme},
 };
 use dynamate::dynamodb::json;
+use dynamate::dynamodb::size::estimate_item_size_bytes;
+use dynamate::dynamodb::{SecondaryIndex, TableInfo};
+use chrono::{DateTime, Utc};
+use humansize::{BINARY, format_size};
 use dynamate::{
     dynamodb::{DynamoDbRequest, Kind, Output, ScanBuilder, execute_page},
     expr::parse_dynamo_expression,
@@ -51,6 +57,7 @@ pub struct QueryWidget {
     table_name: String,
     sync_state: Arc<std::sync::RwLock<QuerySyncState>>,
     table_desc: Arc<OnceCell<Arc<TableDescription>>>,
+    ttl_attr: Arc<OnceCell<Option<String>>>,
 }
 
 #[derive(Default)]
@@ -311,6 +318,7 @@ impl QueryWidget {
             table_name: table_name.to_string(),
             sync_state: Arc::new(std::sync::RwLock::new(QuerySyncState::default())),
             table_desc: Arc::new(OnceCell::new()),
+            ttl_attr: Arc::new(OnceCell::new()),
         }
     }
 
@@ -342,6 +350,37 @@ impl QueryWidget {
             .await?;
 
         Ok(arc_ref.clone())
+    }
+
+    async fn ttl_attribute_name(&self) -> Option<String> {
+        let result = self
+            .ttl_attr
+            .get_or_try_init(|| async {
+                let output = self
+                    .client
+                    .describe_time_to_live()
+                    .table_name(self.table_name.clone())
+                    .send()
+                    .await;
+                let attr = match output {
+                    Ok(out) => out.time_to_live_description().and_then(|desc| {
+                        let enabled = matches!(
+                            desc.time_to_live_status(),
+                            Some(TimeToLiveStatus::Enabled | TimeToLiveStatus::Enabling)
+                        );
+                        if enabled {
+                            desc.attribute_name().map(|name| name.to_string())
+                        } else {
+                            None
+                        }
+                    }),
+                    Err(_) => None,
+                };
+                Ok::<Option<String>, String>(attr)
+            })
+            .await;
+
+        result.ok().and_then(|name| name.clone())
     }
 
     fn scroll_down(&self, env: EnvHandle) {
@@ -427,6 +466,10 @@ impl QueryWidget {
             state.reopen_tree = reopen_tree;
         }
         env.invalidate();
+        let this: QueryWidget = self.clone();
+        tokio::spawn(async move {
+            let _ = this.ttl_attribute_name().await;
+        });
         self.start_query_page(query, None, false, env);
     }
 
@@ -606,8 +649,8 @@ impl QueryWidget {
     ) {
         let (title, title_bottom) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => (
-                format!("Item View{}", output_info(state.query_output.as_ref())),
-                pad("esc: back to table", 2),
+                self.item_view_title(state),
+                self.item_view_subtitle(state),
             ),
             LoadingState::Loading => ("Loading".to_string(), "".to_string()),
             LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
@@ -630,6 +673,82 @@ impl QueryWidget {
         let text = content.join("\n");
         let paragraph = Paragraph::new(text).block(block);
         frame.render_widget(paragraph, area);
+    }
+
+    fn item_view_title(&self, state: &QuerySyncState) -> String {
+        let Some(table_desc) = self.table_desc.get() else {
+            return " Item ".to_string();
+        };
+        let (hash_key, range_key) = extract_hash_range(table_desc);
+
+        let selected = state.table_state.selected().unwrap_or(0);
+        let Some(item) = state.items.get(selected) else {
+            return " Item ".to_string();
+        };
+
+        let mut parts = Vec::new();
+        if let Some(hash_key) = hash_key {
+            let value = if item.0.contains_key(&hash_key) {
+                item.value(&hash_key)
+            } else {
+                "<missing>".to_string()
+            };
+            parts.push(format!("{hash_key}={value}"));
+        }
+        if let Some(range_key) = range_key {
+            let value = if item.0.contains_key(&range_key) {
+                item.value(&range_key)
+            } else {
+                "<missing>".to_string()
+            };
+            parts.push(format!("{range_key}={value}"));
+        }
+
+        if parts.is_empty() {
+            " Item ".to_string()
+        } else {
+            format!(" Item: {} ", parts.join(", "))
+        }
+    }
+
+    fn item_view_subtitle(&self, state: &QuerySyncState) -> String {
+        let selected = state.table_state.selected().unwrap_or(0);
+        let Some(item) = state.items.get(selected) else {
+            return pad("No item selected ", 2);
+        };
+        let bytes = estimate_item_size_bytes(&item.0);
+        let size = format_size(bytes as u64, BINARY);
+        let mut parts = vec![format!("~{}", size)];
+
+        if let Some(ttl_attr) = self.ttl_attr.get().and_then(|name| name.as_ref()) {
+            if let Some(ttl_value) = item.0.get(ttl_attr) {
+                if let Some(formatted) = format_ttl_value(ttl_value) {
+                    parts.push(format!("ttl: {formatted}"));
+                }
+            }
+        }
+
+        if let Some(table_desc) = self.table_desc.get() {
+            let table_info = TableInfo::from_table_description(table_desc);
+            let gsi_count = table_info
+                .global_secondary_indexes
+                .iter()
+                .filter(|index| item_matches_index(item, index))
+                .count();
+            let lsi_count = table_info
+                .local_secondary_indexes
+                .iter()
+                .filter(|index| item_matches_index(item, index))
+                .count();
+            if gsi_count > 0 {
+                parts.push(format!("GSI: {}", gsi_count));
+            }
+            if lsi_count > 0 {
+                parts.push(format!("LSI: {}", lsi_count));
+            }
+        }
+
+        pad(format!("{} ", parts.join(" · ")), 2)
     }
 
     fn edit_selected(&self, format: EditorFormat, env: EnvHandle) {
@@ -823,6 +942,49 @@ impl<'a> From<&Item> for Row<'a> {
         }
         Row::new(parts)
     }
+}
+
+fn extract_hash_range(table: &TableDescription) -> (Option<String>, Option<String>) {
+    let mut hash = None;
+    let mut range = None;
+    for KeySchemaElement {
+        attribute_name,
+        key_type,
+        ..
+    } in table.key_schema()
+    {
+        match key_type {
+            KeyType::Hash => hash = Some(attribute_name.clone()),
+            KeyType::Range => range = Some(attribute_name.clone()),
+            _ => {}
+        }
+    }
+    (hash, range)
+}
+
+fn item_matches_index(item: &Item, index: &SecondaryIndex) -> bool {
+    if !item.0.contains_key(&index.hash_key) {
+        return false;
+    }
+    match &index.range_key {
+        Some(range_key) => item.0.contains_key(range_key),
+        None => true,
+    }
+}
+
+fn format_ttl_value(value: &AttributeValue) -> Option<String> {
+    let text = match value {
+        AttributeValue::N(num) => num,
+        AttributeValue::S(text) => text,
+        _ => return None,
+    };
+    let ts: i64 = text.parse().ok()?;
+    if ts <= 0 {
+        return None;
+    }
+    let time = UNIX_EPOCH + Duration::from_secs(ts as u64);
+    let dt: DateTime<Utc> = time.into();
+    Some(dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
 }
 
 fn output_info(output: Option<&Output>) -> String {
