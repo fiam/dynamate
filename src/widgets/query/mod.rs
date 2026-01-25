@@ -10,7 +10,10 @@ use std::{
 
 use aws_sdk_dynamodb::types::{AttributeValue, TableDescription};
 use crossterm::cursor::MoveTo;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -723,7 +726,11 @@ impl QueryWidget {
         let temp_path = self.temp_path();
         fs::write(&temp_path, initial).map_err(|err| err.to_string())?;
 
+        let keyboard_support = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
         disable_raw_mode().map_err(|err| err.to_string())?;
+        if keyboard_support {
+            let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+        }
         crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
             .map_err(|err| err.to_string())?;
 
@@ -742,6 +749,12 @@ impl QueryWidget {
             MoveTo(0, 0)
         )
         .map_err(|err| err.to_string())?;
+        if keyboard_support {
+            let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
+            let _ = crossterm::execute!(std::io::stdout(), PushKeyboardEnhancementFlags(flags));
+        }
         enable_raw_mode().map_err(|err| err.to_string())?;
         env.force_redraw();
 
