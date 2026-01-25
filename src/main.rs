@@ -136,7 +136,7 @@ struct App {
 
 impl App {
     const FRAMES_PER_SECOND: f32 = 60.0;
-    const HELP_WITHOUT_POPUP: &'static [help::Entry<'static>] = &[
+    const HELP_WITHOUT_POPUP_BACK: &'static [help::Entry<'static>] = &[
         help::Entry {
             keys: Cow::Borrowed(""),
             short: Cow::Borrowed(""),
@@ -160,7 +160,37 @@ impl App {
         help::Entry {
             keys: Cow::Borrowed("esc"),
             short: Cow::Borrowed("back"),
-            long: Cow::Borrowed("Back/quit"),
+            long: Cow::Borrowed("Back"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+    ];
+    const HELP_WITHOUT_POPUP_EXIT: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^q")),
+                short: Some(Cow::Borrowed("quit")),
+                long: Some(Cow::Borrowed("Quit dynamate")),
+            }),
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("h"),
+            short: Cow::Borrowed("help"),
+            long: Cow::Borrowed("Show help"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("exit"),
+            long: Cow::Borrowed("Exit"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -354,8 +384,10 @@ impl App {
         };
         let app_help = if self.popup.is_some() {
             App::HELP_WITH_POPUP
+        } else if self.widgets.len() > 1 {
+            App::HELP_WITHOUT_POPUP_BACK
         } else {
-            App::HELP_WITHOUT_POPUP
+            App::HELP_WITHOUT_POPUP_EXIT
         };
         [help, Some(app_help)]
             .into_iter()
@@ -438,6 +470,15 @@ impl App {
             }
         }
 
+        if let Some(key) = event.as_key_press_event()
+            && matches!(key.code, KeyCode::Esc)
+            && self.popup.is_some()
+        {
+            self.popup = None;
+            self.should_redraw = true;
+            return true;
+        }
+
         if let Some(popup) = self.popup.as_ref()
             && popup.handle_event(self.env.tx(), event)
         {
@@ -486,7 +527,11 @@ impl App {
             }
             env::Message::PopWidget => {
                 self.widgets.pop();
-                self.should_redraw = true;
+                if self.widgets.is_empty() {
+                    self.should_quit = true;
+                } else {
+                    self.should_redraw = true;
+                }
             }
             env::Message::SetPopup(popup) => {
                 if self.popup.is_some() {
