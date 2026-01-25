@@ -15,6 +15,7 @@ use crate::help;
 
 pub trait Env {
     fn invalidate(&self);
+    fn force_redraw(&self);
     fn push_widget(&self, widget: Arc<dyn Widget>);
     fn pop_widget(&self);
     fn set_popup(&self, popup: Arc<dyn Popup>);

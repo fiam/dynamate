@@ -7,6 +7,7 @@ use crate::widgets::{Popup, Widget};
 pub enum Message {
     // Invalidate the current frame and request a redraw
     Invalidate,
+    ForceRedraw,
     PushWidget(Arc<dyn Widget>),
     PopWidget,
     SetPopup(Arc<dyn Popup>),
@@ -36,6 +37,11 @@ impl crate::widgets::Env for EnvTx {
     fn invalidate(&self) {
         self.send(Message::Invalidate);
     }
+
+    fn force_redraw(&self) {
+        self.send(Message::ForceRedraw);
+    }
+
     fn push_widget(&self, widget: Arc<dyn Widget>) {
         self.send(Message::PushWidget(widget));
     }

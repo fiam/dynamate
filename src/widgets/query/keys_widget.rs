@@ -50,21 +50,33 @@ impl KeysWidget {
             keys: Cow::Borrowed("↑/↓/i/j"),
             short: Cow::Borrowed("move"),
             long: Cow::Borrowed("Move the selected field up/down"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
         help::Entry {
             keys: Cow::Borrowed("Space"),
             short: Cow::Borrowed("toggle"),
             long: Cow::Borrowed("Select/deselect the current field"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
         help::Entry {
             keys: Cow::Borrowed("a"),
             short: Cow::Borrowed("all"),
             long: Cow::Borrowed("Select all fields"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
         help::Entry {
             keys: Cow::Borrowed("n"),
             short: Cow::Borrowed("none"),
             long: Cow::Borrowed("Deselect all fields"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
     ];
     pub fn new(keys: &[Key], on_event: impl Fn(Event) + Send + Sync + 'static) -> Self {

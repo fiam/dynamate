@@ -183,21 +183,25 @@ impl TablePickerWidget {
             keys: Cow::Borrowed("/"),
             short: Cow::Borrowed("filter"),
             long: Cow::Borrowed("Filter tables"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
         help::Entry {
-            keys: Cow::Borrowed("enter"),
+            keys: Cow::Borrowed("⏎"),
             short: Cow::Borrowed("select"),
             long: Cow::Borrowed("Open table"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
         help::Entry {
-            keys: Cow::Borrowed("j/k/up/down"),
+            keys: Cow::Borrowed("j/k/↑/↓"),
             short: Cow::Borrowed("move"),
             long: Cow::Borrowed("Move selection"),
-        },
-        help::Entry {
-            keys: Cow::Borrowed("esc"),
-            short: Cow::Borrowed("clear"),
-            long: Cow::Borrowed("Exit filter"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
     ];
 

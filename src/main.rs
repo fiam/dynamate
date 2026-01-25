@@ -28,11 +28,16 @@
 //! [examples]: https://github.com/ratatui/ratatui/blob/main/examples
 //! [examples readme]: https://github.com/ratatui/ratatui/blob/main/examples/README.md
 use std::borrow::Cow;
+use std::backtrace::Backtrace;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use color_eyre::Result;
-use crossterm::event::{Event, EventStream, KeyCode};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEventKind, KeyboardEnhancementFlags, ModifierKeyCode,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use crossterm::terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -53,6 +58,7 @@ mod util;
 mod widgets;
 
 use crate::widgets::theme::Theme;
+use crate::help::ModDisplay;
 
 #[derive(clap::Parser)]
 #[command(
@@ -124,32 +130,70 @@ struct App {
     should_redraw: bool,
     widgets: Vec<Arc<dyn crate::widgets::Widget>>,
     popup: Option<Arc<dyn crate::widgets::Popup>>,
+    modifiers: Arc<std::sync::RwLock<crossterm::event::KeyModifiers>>,
+    help_mode: Arc<std::sync::RwLock<ModDisplay>>,
 }
 
 impl App {
     const FRAMES_PER_SECOND: f32 = 60.0;
     const HELP_WITHOUT_POPUP: &'static [help::Entry<'static>] = &[
         help::Entry {
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^q")),
+                short: Some(Cow::Borrowed("quit")),
+                long: Some(Cow::Borrowed("Quit dynamate")),
+            }),
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("h"),
             short: Cow::Borrowed("help"),
             long: Cow::Borrowed("Show help"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
         help::Entry {
-            keys: Cow::Borrowed("q"),
-            short: Cow::Borrowed("quit"),
-            long: Cow::Borrowed("Quit dynamate"),
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("back"),
+            long: Cow::Borrowed("Back/quit"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
     ];
     const HELP_WITH_POPUP: &'static [help::Entry<'static>] = &[
         help::Entry {
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^q")),
+                short: Some(Cow::Borrowed("quit")),
+                long: Some(Cow::Borrowed("Quit dynamate")),
+            }),
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("h"),
+            short: Cow::Borrowed("help"),
+            long: Cow::Borrowed("Show help"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("esc"),
             short: Cow::Borrowed("close"),
             long: Cow::Borrowed("Close popup"),
-        },
-        help::Entry {
-            keys: Cow::Borrowed("q"),
-            short: Cow::Borrowed("quit"),
-            long: Cow::Borrowed("Quit dynamate"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
     ];
 
@@ -160,6 +204,10 @@ impl App {
             should_redraw: true,
             widgets: Vec::new(),
             popup: None,
+            modifiers: Arc::new(std::sync::RwLock::new(
+                crossterm::event::KeyModifiers::empty(),
+            )),
+            help_mode: Arc::new(std::sync::RwLock::new(ModDisplay::Both)),
         }
     }
 
@@ -168,10 +216,32 @@ impl App {
         client: Arc<aws_sdk_dynamodb::Client>,
         table_name: Option<&str>,
     ) -> Result<()> {
+        let app = self;
+        let keyboard_support = terminal::supports_keyboard_enhancement().unwrap_or(false);
+        if keyboard_support {
+            *app.help_mode.write().unwrap() = ModDisplay::Swap;
+        } else {
+            *app.help_mode.write().unwrap() = ModDisplay::Both;
+        }
+
         let terminal = ratatui::init();
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-        let app_result = self.run(terminal, client, table_name).await;
+
+        if keyboard_support {
+            let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                PushKeyboardEnhancementFlags(flags)
+            );
+        }
+
+        let app_result = app.run(terminal, client, table_name).await;
         crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
+        if keyboard_support {
+            let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+        }
         ratatui::restore();
         app_result
     }
@@ -198,6 +268,7 @@ impl App {
         let mut sigint = signal(SignalKind::interrupt())?;
         #[cfg(unix)]
         let mut sigterm = signal(SignalKind::terminate())?;
+        let mut sigquit = signal(SignalKind::quit())?;
 
         #[cfg(unix)]
         {
@@ -231,6 +302,10 @@ impl App {
                     },
                     _ = sigterm.recv() => {
                         self.should_quit = true;
+                    },
+                    _ = sigquit.recv() => {
+                        eprintln!("SIGQUIT received; dumping backtrace (set RUST_BACKTRACE=full for more detail):");
+                        eprintln!("{:?}", Backtrace::force_capture());
                     },
                 }
             }
@@ -293,7 +368,9 @@ impl App {
         let start = Instant::now();
         let theme = Theme::default();
         let all_help = self.make_help();
-        let help_height = help::height(&all_help, frame.area());
+        let modifiers = *self.modifiers.read().unwrap();
+        let help_mode = *self.help_mode.read().unwrap();
+        let help_height = help::height(&all_help, frame.area(), modifiers, help_mode);
         let layout = Layout::vertical([
             Constraint::Length(1),
             Constraint::Fill(1),
@@ -310,7 +387,7 @@ impl App {
             frame.render_widget(Clear, popup_area);
             popup.render(frame, popup_area, &theme);
         }
-        help::render(&all_help, frame, footer_area, &theme);
+        help::render(&all_help, frame, footer_area, &theme, modifiers, help_mode);
         let duration = start.elapsed();
         // Render duration in red at the bottom right corner
         let duration_str = format!("{:.2?}", duration);
@@ -323,6 +400,44 @@ impl App {
     }
 
     fn handle_event(&mut self, event: &Event) -> bool {
+        if let Some(key) = event.as_key_press_event()
+            && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
+        {
+            self.should_quit = true;
+            return true;
+        }
+
+        if let Some(key) = event.as_key_event() {
+            let mut modifiers = self.modifiers.write().unwrap();
+            let mut updated = false;
+            if let KeyCode::Modifier(modifier) = key.code {
+                if let Some(flag) = modifier_flag(modifier) {
+                    match key.kind {
+                        KeyEventKind::Press | KeyEventKind::Repeat => {
+                            if !modifiers.contains(flag) {
+                                modifiers.insert(flag);
+                                updated = true;
+                            }
+                        }
+                        KeyEventKind::Release => {
+                            if modifiers.contains(flag) {
+                                modifiers.remove(flag);
+                                updated = true;
+                            }
+                        }
+                    }
+                }
+            } else if *modifiers != key.modifiers {
+                *modifiers = key.modifiers;
+                updated = true;
+            }
+
+            if updated {
+                self.should_redraw = true;
+            }
+        }
+
         if let Some(popup) = self.popup.as_ref()
             && popup.handle_event(self.env.tx(), event)
         {
@@ -338,7 +453,11 @@ impl App {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Char('h') => {
-                    self.popup = Some(Arc::new(help::Widget::new(self.make_help())));
+                    self.popup = Some(Arc::new(help::Widget::new(
+                        self.make_help(),
+                        self.modifiers.clone(),
+                        self.help_mode.clone(),
+                    )));
                 }
                 KeyCode::Esc => {
                     if self.popup.is_some() {
@@ -350,9 +469,6 @@ impl App {
                     } else {
                         self.should_quit = true;
                     }
-                }
-                KeyCode::Char('q') => {
-                    self.should_quit = true;
                 }
                 _ => return false,
             }
@@ -366,9 +482,11 @@ impl App {
             env::Message::PushWidget(widget) => {
                 widget.start(self.env.tx());
                 self.widgets.push(widget);
+                self.should_redraw = true;
             }
             env::Message::PopWidget => {
                 self.widgets.pop();
+                self.should_redraw = true;
             }
             env::Message::SetPopup(popup) => {
                 if self.popup.is_some() {
@@ -391,5 +509,18 @@ impl App {
                 self.should_redraw = true;
             }
         }
+    }
+}
+
+fn modifier_flag(modifier: ModifierKeyCode) -> Option<crossterm::event::KeyModifiers> {
+    use crossterm::event::KeyModifiers;
+    match modifier {
+        ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => Some(KeyModifiers::CONTROL),
+        ModifierKeyCode::LeftShift
+        | ModifierKeyCode::RightShift
+        | ModifierKeyCode::IsoLevel3Shift
+        | ModifierKeyCode::IsoLevel5Shift => Some(KeyModifiers::SHIFT),
+        ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => Some(KeyModifiers::ALT),
+        _ => None,
     }
 }

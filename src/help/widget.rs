@@ -1,4 +1,6 @@
-use crossterm::event::{Event, KeyCode};
+use std::sync::{Arc, RwLock};
+
+use crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Margin, Rect},
@@ -8,19 +10,27 @@ use ratatui::{
 };
 
 use crate::{
-    help::Entry,
+    help::{Entry, ModDisplay},
     util::{fill_bg, pad},
     widgets::{EnvHandle, Popup, theme::Theme},
 };
 
 pub struct Widget {
     entries: Vec<Entry<'static>>,
+    modifiers: Arc<RwLock<KeyModifiers>>,
+    mode: Arc<RwLock<ModDisplay>>,
 }
 
 impl Widget {
-    pub fn new<'a>(entries: Vec<&Entry<'a>>) -> Self {
+    pub fn new<'a>(
+        entries: Vec<&Entry<'a>>,
+        modifiers: Arc<RwLock<KeyModifiers>>,
+        mode: Arc<RwLock<ModDisplay>>,
+    ) -> Self {
         Self {
             entries: entries.into_iter().map(|e| e.to_owned_entry()).collect(),
+            modifiers,
+            mode,
         }
     }
 }
@@ -37,19 +47,35 @@ impl crate::widgets::Widget for Widget {
 
         let inner = area.inner(Margin::new(1, 1));
 
-        let rows: Vec<_> = self
+        let modifiers = *self.modifiers.read().unwrap();
+        let mode = *self.mode.read().unwrap();
+        let visible: Vec<_> = self
             .entries
+            .iter()
+            .filter_map(|entry| {
+                let display = entry.display(modifiers, mode);
+                if display.keys.is_empty() {
+                    return None;
+                }
+                Some(display)
+            })
+            .collect();
+
+        let rows: Vec<_> = visible
             .chunks(2)
             .map(|chunk| {
                 let left_key = chunk
                     .first()
-                    .map(|e| make_key(e, theme))
+                    .map(|e| make_display_key(e, theme))
                     .unwrap_or_default();
                 let left_desc = chunk
                     .first()
                     .map(|e| Span::raw(e.long.as_ref()))
                     .unwrap_or_default();
-                let right_key = chunk.get(1).map(|e| make_key(e, theme)).unwrap_or_default();
+                let right_key = chunk
+                    .get(1)
+                    .map(|e| make_display_key(e, theme))
+                    .unwrap_or_default();
                 let right_desc = chunk
                     .get(1)
                     .map(|e| Span::raw(e.long.as_ref()))
@@ -100,8 +126,8 @@ impl Popup for Widget {
     }
 }
 
-fn make_key(entry: &Entry<'static>, theme: &Theme) -> Span<'static> {
-    let keys = &entry.keys;
+fn make_display_key(entry: &crate::help::DisplayEntry<'_>, theme: &Theme) -> Span<'static> {
+    let keys = entry.keys.as_ref();
     Span::styled(
         format!("[{keys}]"),
         Style::default().bold().fg(theme.secondary()),

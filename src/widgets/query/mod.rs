@@ -152,11 +152,10 @@ impl crate::widgets::Widget for QueryWidget {
                     self.start_query(Some(&query), env.clone());
                 }
                 KeyCode::Enter => {
-                    self.edit_selected(EditorFormat::Plain, env.clone());
-                }
-                KeyCode::Char(' ') => {
                     let mut state = self.sync_state.write().unwrap();
-                    state.show_tree = !state.show_tree;
+                    if !state.show_tree {
+                        state.show_tree = true;
+                    }
                 }
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(env.clone()),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
@@ -186,11 +185,23 @@ impl crate::widgets::Widget for QueryWidget {
                     let mut state = self.sync_state.write().unwrap();
                     state.show_tree = !state.show_tree;
                 }
+                KeyCode::Char('e')
+                    if !input_is_active
+                        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    self.edit_selected(EditorFormat::DynamoDb, env.clone());
+                }
                 KeyCode::Char('e') => {
                     self.edit_selected(EditorFormat::Plain, env.clone());
                 }
                 KeyCode::Char('E') => {
                     self.edit_selected(EditorFormat::DynamoDb, env.clone());
+                }
+                KeyCode::Char('n')
+                    if !input_is_active
+                        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    self.create_item(EditorFormat::DynamoDb, env.clone());
                 }
                 KeyCode::Char('n') => {
                     self.create_item(EditorFormat::Plain, env.clone());
@@ -232,58 +243,55 @@ impl QueryWidget {
             keys: Cow::Borrowed("f"),
             short: Cow::Borrowed("fields"),
             long: Cow::Borrowed("Enable/disable fields"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
         help::Entry {
-            keys: Cow::Borrowed("esc"),
-            short: Cow::Borrowed("back"),
-            long: Cow::Borrowed("Back to table picker"),
-        },
-        help::Entry {
-            keys: Cow::Borrowed("space"),
-            short: Cow::Borrowed("tree"),
+            keys: Cow::Borrowed("⏎"),
+            short: Cow::Borrowed("view"),
             long: Cow::Borrowed("View selected item"),
+            ctrl: None,
+            shift: None,
+            alt: None,
         },
         help::Entry {
-            keys: Cow::Borrowed("enter"),
+            keys: Cow::Borrowed("e"),
             short: Cow::Borrowed("edit"),
             long: Cow::Borrowed("Edit item (JSON)"),
-        },
-        help::Entry {
-            keys: Cow::Borrowed("E"),
-            short: Cow::Borrowed("edit"),
-            long: Cow::Borrowed("Edit item (Dynamo JSON)"),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^e")),
+                short: Some(Cow::Borrowed("edit (Dynamo JSON)")),
+                long: Some(Cow::Borrowed("Edit item (Dynamo JSON)")),
+            }),
+            shift: None,
+            alt: None,
         },
         help::Entry {
             keys: Cow::Borrowed("n"),
             short: Cow::Borrowed("new"),
-            long: Cow::Borrowed("New item (JSON)"),
-        },
-        help::Entry {
-            keys: Cow::Borrowed("N"),
-            short: Cow::Borrowed("new"),
-            long: Cow::Borrowed("New item (Dynamo JSON)"),
+            long: Cow::Borrowed("New item"),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^n")),
+                short: Some(Cow::Borrowed("new (Dynamo JSON)")),
+                long: Some(Cow::Borrowed("New item (Dynamo JSON)")),
+            }),
+            shift: None,
+            alt: None,
         },
     ];
     const HELP_TREE: &'static [help::Entry<'static>] = &[
         help::Entry {
-            keys: Cow::Borrowed("space"),
-            short: Cow::Borrowed("table"),
-            long: Cow::Borrowed("Back to table"),
-        },
-        help::Entry {
-            keys: Cow::Borrowed("esc"),
-            short: Cow::Borrowed("table"),
-            long: Cow::Borrowed("Back to table"),
-        },
-        help::Entry {
-            keys: Cow::Borrowed("enter"),
+            keys: Cow::Borrowed("e"),
             short: Cow::Borrowed("edit"),
             long: Cow::Borrowed("Edit item (JSON)"),
-        },
-        help::Entry {
-            keys: Cow::Borrowed("E"),
-            short: Cow::Borrowed("edit"),
-            long: Cow::Borrowed("Edit item (Dynamo JSON)"),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^e")),
+                short: Some(Cow::Borrowed("edit (Dynamo JSON)")),
+                long: Some(Cow::Borrowed("Edit item (Dynamo JSON)")),
+            }),
+            shift: None,
+            alt: None,
         },
     ];
     const PAGE_SIZE: i32 = 100;
@@ -565,8 +573,8 @@ impl QueryWidget {
     ) {
         let (title, title_bottom) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => (
-                format!("Item Tree{}", output_info(state.query_output.as_ref())),
-                pad("space: back to table", 2),
+                format!("Item View{}", output_info(state.query_output.as_ref())),
+                pad("esc: back to table", 2),
             ),
             LoadingState::Loading => ("Loading".to_string(), "".to_string()),
             LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
