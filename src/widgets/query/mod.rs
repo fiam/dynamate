@@ -133,6 +133,15 @@ impl crate::widgets::Widget for QueryWidget {
                 KeyCode::Esc if input_is_active => {
                     self.sync_state.write().unwrap().input.toggle_active()
                 }
+                KeyCode::Esc => {
+                    let mut state = self.sync_state.write().unwrap();
+                    if state.show_tree {
+                        state.show_tree = false;
+                    } else {
+                        drop(state);
+                        env.pop_widget();
+                    }
+                }
                 KeyCode::Enter if input_is_active => {
                     let query = {
                         let mut state = self.sync_state.write().unwrap();
@@ -225,6 +234,11 @@ impl QueryWidget {
             long: Cow::Borrowed("Enable/disable fields"),
         },
         help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("back"),
+            long: Cow::Borrowed("Back to table picker"),
+        },
+        help::Entry {
             keys: Cow::Borrowed("space"),
             short: Cow::Borrowed("tree"),
             long: Cow::Borrowed("View selected item"),
@@ -253,6 +267,11 @@ impl QueryWidget {
     const HELP_TREE: &'static [help::Entry<'static>] = &[
         help::Entry {
             keys: Cow::Borrowed("space"),
+            short: Cow::Borrowed("table"),
+            long: Cow::Borrowed("Back to table"),
+        },
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
             short: Cow::Borrowed("table"),
             long: Cow::Borrowed("Back to table"),
         },

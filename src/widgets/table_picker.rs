@@ -291,7 +291,6 @@ impl TablePickerWidget {
         };
         if let Some(table_name) = selected {
             let widget = Arc::new(QueryWidget::new(self.client.clone(), &table_name));
-            env.pop_widget();
             env.push_widget(widget);
             return true;
         }

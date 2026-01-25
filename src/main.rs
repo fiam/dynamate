@@ -135,7 +135,7 @@ impl App {
             long: Cow::Borrowed("Show help"),
         },
         help::Entry {
-            keys: Cow::Borrowed("q/esc"),
+            keys: Cow::Borrowed("q"),
             short: Cow::Borrowed("quit"),
             long: Cow::Borrowed("Quit dynamate"),
         },
@@ -216,8 +216,12 @@ impl App {
                         }
                     },
                     Some(msg) = self.env.rx().recv() => {
+                        let force_redraw = matches!(msg, env::Message::ForceRedraw);
                         self.handle_msg(msg);
-                        if self.should_redraw {
+                        if self.should_redraw || force_redraw {
+                            if force_redraw {
+                                terminal.clear()?;
+                            }
                             terminal.draw(|frame| self.render(frame))?;
                             self.should_redraw = false;
                         }
@@ -249,8 +253,12 @@ impl App {
                         }
                     },
                     Some(msg) = self.env.rx().recv() => {
+                        let force_redraw = matches!(msg, env::Message::ForceRedraw);
                         self.handle_msg(msg);
-                        if self.should_redraw {
+                        if self.should_redraw || force_redraw {
+                            if force_redraw {
+                                terminal.clear()?;
+                            }
                             terminal.draw(|frame| self.render(frame))?;
                             self.should_redraw = false;
                         }
@@ -336,6 +344,9 @@ impl App {
                     if self.popup.is_some() {
                         self.popup = None;
                         self.should_redraw = true;
+                    } else if self.widgets.len() > 1 {
+                        self.widgets.pop();
+                        self.should_redraw = true;
                     } else {
                         self.should_quit = true;
                     }
@@ -374,7 +385,9 @@ impl App {
                 self.should_redraw = true;
             }
             env::Message::Invalidate => {
-                // Redraw the screen
+                self.should_redraw = true;
+            }
+            env::Message::ForceRedraw => {
                 self.should_redraw = true;
             }
         }
