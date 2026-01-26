@@ -171,6 +171,28 @@ impl App {
             alt: None,
         },
     ];
+    const HELP_WITHOUT_POPUP_NO_ESC: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^q")),
+                short: Some(Cow::Borrowed("quit")),
+                long: Some(Cow::Borrowed("Quit dynamate")),
+            }),
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("h"),
+            short: Cow::Borrowed("help"),
+            long: Cow::Borrowed("Show help"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+    ];
     const HELP_WITHOUT_POPUP_EXIT: &'static [help::Entry<'static>] = &[
         help::Entry {
             keys: Cow::Borrowed(""),
@@ -265,7 +287,6 @@ impl App {
 
         if keyboard_support {
             let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
             let _ = crossterm::execute!(
                 std::io::stdout(),
@@ -392,6 +413,10 @@ impl App {
         };
         let app_help = if self.popup.is_some() {
             App::HELP_WITH_POPUP
+        } else if self.widgets.last().is_some_and(|w| w.suppress_global_help()) {
+            &[]
+        } else if self.widget_declares_esc() {
+            App::HELP_WITHOUT_POPUP_NO_ESC
         } else if self.widgets.len() > 1 {
             App::HELP_WITHOUT_POPUP_BACK
         } else {
@@ -516,6 +541,9 @@ impl App {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Char('h') => {
+                    if self.widgets.last().is_some_and(|w| w.suppress_global_help()) {
+                        return true;
+                    }
                     self.popup = Some(Arc::new(help::Widget::new(
                         self.make_help(),
                         self.modifiers.clone(),
@@ -526,6 +554,8 @@ impl App {
                     if self.popup.is_some() {
                         self.popup = None;
                         self.should_redraw = true;
+                    } else if self.widget_declares_esc() {
+                        return false;
                     } else if self.toast.is_some() {
                         self.toast = None;
                         self.should_redraw = true;
@@ -541,6 +571,16 @@ impl App {
             return true;
         }
         false
+    }
+
+    fn widget_declares_esc(&self) -> bool {
+        let Some(widget) = self.widgets.last() else {
+            return false;
+        };
+        let Some(entries) = widget.help() else {
+            return false;
+        };
+        entries.iter().any(entry_declares_esc)
     }
 
     fn handle_msg(&mut self, msg: env::Message) {
@@ -655,4 +695,19 @@ fn modifier_flag(modifier: ModifierKeyCode) -> Option<crossterm::event::KeyModif
         ModifierKeyCode::LeftAlt | ModifierKeyCode::RightAlt => Some(KeyModifiers::ALT),
         _ => None,
     }
+}
+
+fn entry_declares_esc(entry: &help::Entry<'_>) -> bool {
+    if entry.keys.to_ascii_lowercase().contains("esc") {
+        return true;
+    }
+    for variant in [entry.ctrl.as_ref(), entry.shift.as_ref(), entry.alt.as_ref()] {
+        if let Some(variant) = variant
+            && let Some(keys) = variant.keys.as_ref()
+            && keys.to_ascii_lowercase().contains("esc")
+        {
+            return true;
+        }
+    }
+    false
 }

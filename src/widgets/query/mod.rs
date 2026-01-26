@@ -245,6 +245,7 @@ impl crate::widgets::Widget for QueryWidget {
             Some(Self::HELP_TABLE)
         }
     }
+
 }
 
 impl QueryWidget {

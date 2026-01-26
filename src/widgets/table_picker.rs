@@ -11,6 +11,7 @@ use ratatui::{
     text::Line,
     widgets::{Block, HighlightSpacing, List, ListItem, ListState, Paragraph, StatefulWidget},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     env::{Toast, ToastKind},
@@ -59,26 +60,14 @@ impl FilterInput {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let border = if self.is_active {
-            theme.accent()
-        } else {
-            theme.border()
-        };
-        let title = if self.is_active {
-            "Filter (type to search)"
-        } else {
-            "Filter (/ to edit, esc to clear)"
-        };
         let block = Block::bordered()
-            .title(title)
+            .title("Filter")
             .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()))
-            .border_style(Style::default().fg(border));
+            .border_style(Style::default().fg(theme.accent()));
         let input = Paragraph::new(self.value.as_str()).block(block);
         input.render(area, frame.buffer_mut());
 
-        if self.is_active {
-            frame.set_cursor_position((area.x + self.cursor as u16 + 1, area.y + 1));
-        }
+        frame.set_cursor_position((area.x + self.cursor as u16 + 1, area.y + 1));
     }
 
     fn handle_event(&mut self, event: &Event) -> bool {
@@ -89,6 +78,7 @@ impl FilterInput {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Esc => {
+                    self.clear();
                     self.set_active(false);
                 }
                 KeyCode::Enter => {
@@ -187,6 +177,58 @@ impl TablePickerWidget {
             keys: Cow::Borrowed("/"),
             short: Cow::Borrowed("filter"),
             long: Cow::Borrowed("Filter tables"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("⏎"),
+            short: Cow::Borrowed("select"),
+            long: Cow::Borrowed("Open table"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("j/k/↑/↓"),
+            short: Cow::Borrowed("move"),
+            long: Cow::Borrowed("Move selection"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+    ];
+    const HELP_FILTER_EDIT: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("clear"),
+            long: Cow::Borrowed("Clear filter"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("⏎"),
+            short: Cow::Borrowed("apply"),
+            long: Cow::Borrowed("Apply filter"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+    ];
+    const HELP_FILTER_APPLIED: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("/"),
+            short: Cow::Borrowed("filter"),
+            long: Cow::Borrowed("Edit filter"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("clear filter"),
+            long: Cow::Borrowed("Clear filter"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -327,13 +369,19 @@ impl crate::widgets::Widget for TablePickerWidget {
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let mut state = self.state.write().unwrap();
-        let layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]);
-        let [filter_area, list_area] = area.layout(&layout);
+        let filter_active = state.filter.is_active();
+        let list_area = if filter_active {
+            let layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]);
+            let [filter_area, list_area] = area.layout(&layout);
+            state.filter.render(frame, filter_area, theme);
+            list_area
+        } else {
+            area
+        };
 
-        state.filter.render(frame, filter_area, theme);
-
+        let title = Line::styled("Tables", Style::default().fg(theme.text()));
         let block = Block::bordered()
-            .title_top("Tables")
+            .title_top(title)
             .title_bottom(Line::styled(
                 pad(format!("{} tables", state.filtered_tables.len()), 2),
                 Style::default().fg(theme.text_muted()),
@@ -356,43 +404,61 @@ impl crate::widgets::Widget for TablePickerWidget {
             }
             LoadingState::Idle | LoadingState::Loaded => {
                 if state.filtered_tables.is_empty() {
-                    let text = if state.tables.is_empty() {
-                        "No tables found"
-                    } else {
-                        "No tables match filter"
-                    };
-                    let empty = Paragraph::new(text).block(block);
+                    let empty = Paragraph::new("").block(block);
                     frame.render_widget(empty, list_area);
-                    return;
-                }
+                } else {
+                    let rows: Vec<ListItem> = state
+                        .filtered_tables
+                        .iter()
+                        .map(|name| {
+                            ListItem::new(Line::styled(
+                                name.clone(),
+                                Style::default().fg(theme.text()),
+                            ))
+                        })
+                        .collect();
+                    let list = List::new(rows)
+                        .block(block)
+                        .highlight_symbol(">> ")
+                        .highlight_spacing(HighlightSpacing::Always)
+                        .highlight_style(
+                            Style::default()
+                                .bg(theme.selection_bg())
+                                .fg(theme.selection_fg()),
+                        );
 
-                let rows: Vec<ListItem> = state
-                    .filtered_tables
-                    .iter()
-                    .map(|name| {
-                        ListItem::new(Line::styled(
-                            name.clone(),
-                            Style::default().fg(theme.text()),
-                        ))
-                    })
-                    .collect();
-                let list = List::new(rows)
-                    .block(block)
-                    .highlight_symbol(">> ")
-                    .highlight_spacing(HighlightSpacing::Always)
-                    .highlight_style(
-                        Style::default()
-                            .bg(theme.selection_bg())
-                            .fg(theme.selection_fg()),
+                    StatefulWidget::render(
+                        list,
+                        list_area,
+                        frame.buffer_mut(),
+                        &mut state.list_state,
                     );
+                }
+            }
+        }
 
-                StatefulWidget::render(list, list_area, frame.buffer_mut(), &mut state.list_state);
+        let value = state.filter.value.as_str();
+        if !value.is_empty() {
+            let title = format!("</{value}>");
+            let width = title.width() as u16;
+            if list_area.width > 2 && width < list_area.width - 2 {
+                let start = list_area.x + (list_area.width - width) / 2;
+                let y = list_area.y;
+                let buf = frame.buffer_mut();
+                buf.set_stringn(
+                    start,
+                    y,
+                    title,
+                    width as usize,
+                    Style::default().fg(theme.accent()),
+                );
             }
         }
     }
 
     fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
         let filter_active = self.state.read().unwrap().filter.is_active();
+        let filter_applied = !self.state.read().unwrap().filter.value.is_empty();
         if filter_active {
             let mut state = self.state.write().unwrap();
             if state.filter.handle_event(event) {
@@ -408,15 +474,18 @@ impl crate::widgets::Widget for TablePickerWidget {
                     state.filter.set_active(true);
                     return true;
                 }
-                KeyCode::Esc if filter_active => {
+                KeyCode::Enter if !filter_active => {
+                    return self.handle_selection(env);
+                }
+                KeyCode::Esc if !filter_active && filter_applied => {
                     let mut state = self.state.write().unwrap();
-                    state.filter.set_active(false);
                     state.filter.clear();
                     state.apply_filter();
                     return true;
                 }
-                KeyCode::Enter if !filter_active => {
-                    return self.handle_selection(env);
+                KeyCode::Esc if !filter_active => {
+                    env.pop_widget();
+                    return true;
                 }
                 KeyCode::Char('j') | KeyCode::Down => {
                     self.select_next();
@@ -433,6 +502,19 @@ impl crate::widgets::Widget for TablePickerWidget {
     }
 
     fn help(&self) -> Option<&[help::Entry<'_>]> {
-        Some(Self::HELP)
+        let state = self.state.read().unwrap();
+        let filter_active = state.filter.is_active();
+        let filter_applied = !state.filter.value.is_empty();
+        if filter_active {
+            Some(Self::HELP_FILTER_EDIT)
+        } else if filter_applied {
+            Some(Self::HELP_FILTER_APPLIED)
+        } else {
+            Some(Self::HELP)
+        }
+    }
+
+    fn suppress_global_help(&self) -> bool {
+        self.state.read().unwrap().filter.is_active()
     }
 }

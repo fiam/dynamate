@@ -49,6 +49,11 @@ pub trait Widget: Send + Sync
     fn help(&self) -> Option<&[help::Entry<'_>]> {
         None
     }
+
+    /// Whether global help should be suppressed (e.g., when capturing text input).
+    fn suppress_global_help(&self) -> bool {
+        false
+    }
 }
 
 pub trait Popup: Widget {
