@@ -13,8 +13,8 @@ use aws_sdk_dynamodb::types::{
 };
 use crossterm::cursor::MoveTo;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -22,6 +22,7 @@ use crossterm::terminal::{
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
+    prelude::Widget,
     style::Style,
     text::Line,
     widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState},
@@ -42,6 +43,7 @@ use dynamate::dynamodb::size::estimate_item_size_bytes;
 use dynamate::dynamodb::{SecondaryIndex, TableInfo};
 use chrono::{DateTime, Utc};
 use humansize::{BINARY, format_size};
+use unicode_width::UnicodeWidthStr;
 use dynamate::{
     dynamodb::{DynamoDbRequest, Kind, Output, ScanBuilder, execute_page},
     expr::parse_dynamo_expression,
@@ -64,9 +66,11 @@ pub struct QueryWidget {
 #[derive(Default)]
 struct QuerySyncState {
     input: input::Input,
+    filter: FilterInput,
     loading_state: LoadingState,
     query_output: Option<Output>,
     items: Vec<Item>,
+    filtered_indices: Vec<usize>,
     item_keys: Arc<item_keys::ItemKeys>,
     table_state: TableState,
     last_evaluated_key: Option<HashMap<String, AttributeValue>>,
@@ -74,6 +78,94 @@ struct QuerySyncState {
     is_loading_more: bool,
     show_tree: bool,
     reopen_tree: Option<usize>,
+}
+
+#[derive(Debug, Default)]
+struct FilterInput {
+    value: String,
+    cursor: usize,
+    is_active: bool,
+}
+
+impl FilterInput {
+    fn is_active(&self) -> bool {
+        self.is_active
+    }
+
+    fn set_active(&mut self, active: bool) {
+        self.is_active = active;
+        if active {
+            self.cursor = self.value.len();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let block = Block::bordered()
+            .title("Filter")
+            .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()))
+            .border_style(Style::default().fg(theme.accent()));
+        let input = Paragraph::new(self.value.as_str()).block(block);
+        input.render(area, frame.buffer_mut());
+
+        frame.set_cursor_position((area.x + self.cursor as u16 + 1, area.y + 1));
+    }
+
+    fn handle_event(&mut self, event: &Event) -> bool {
+        if !self.is_active {
+            return false;
+        }
+
+        if let Some(key) = event.as_key_press_event() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.clear();
+                    self.set_active(false);
+                }
+                KeyCode::Enter => {
+                    self.set_active(false);
+                }
+                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.cursor = 0;
+                }
+                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.cursor = self.value.len();
+                }
+                KeyCode::Backspace => {
+                    if self.cursor > 0 && !self.value.is_empty() {
+                        self.value.remove(self.cursor - 1);
+                        self.cursor -= 1;
+                    }
+                }
+                KeyCode::Delete => {
+                    if self.cursor < self.value.len() {
+                        self.value.remove(self.cursor);
+                    }
+                }
+                KeyCode::Left => {
+                    if self.cursor > 0 {
+                        self.cursor -= 1;
+                    }
+                }
+                KeyCode::Right => {
+                    if self.cursor < self.value.len() {
+                        self.cursor += 1;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    self.value.insert(self.cursor, c);
+                    self.cursor += 1;
+                }
+                _ => return false,
+            }
+            return true;
+        }
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +194,50 @@ impl Item {
     }
 }
 
+impl QuerySyncState {
+    fn filter_applied(&self) -> bool {
+        !self.filter.value.trim().is_empty()
+    }
+
+    fn apply_filter(&mut self) {
+        let needle = self.filter.value.trim().to_lowercase();
+        let current_item = self
+            .table_state
+            .selected()
+            .and_then(|idx| self.filtered_indices.get(idx).copied());
+
+        if needle.is_empty() {
+            self.filtered_indices = (0..self.items.len()).collect();
+        } else {
+            self.filtered_indices = self
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| item_matches_filter(item, &needle))
+                .map(|(idx, _)| idx)
+                .collect();
+        }
+
+        if self.filtered_indices.is_empty() {
+            self.table_state.select(None);
+            return;
+        }
+
+        if let Some(current_item) = current_item {
+            if let Some(new_idx) = self
+                .filtered_indices
+                .iter()
+                .position(|idx| *idx == current_item)
+            {
+                self.table_state.select(Some(new_idx));
+                return;
+            }
+        }
+
+        self.table_state.select(Some(0));
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum LoadingState {
     #[default]
@@ -123,17 +259,39 @@ impl crate::widgets::Widget for QueryWidget {
         if state.show_tree {
             self.render_tree(frame, area, theme, &mut state);
         } else {
-            let layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]);
-            let [query_area, results_area] = area.layout(&layout);
+            let filter_active = state.filter.is_active();
+            let layout = if filter_active {
+                Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Fill(1)])
+            } else {
+                Layout::vertical([Constraint::Length(3), Constraint::Fill(1)])
+            };
+            let (query_area, filter_area, results_area) = if filter_active {
+                let [query_area, filter_area, results_area] = area.layout(&layout);
+                (query_area, Some(filter_area), results_area)
+            } else {
+                let [query_area, results_area] = area.layout(&layout);
+                (query_area, None, results_area)
+            };
             state.input.render(frame, query_area, theme);
+            if let Some(filter_area) = filter_area {
+                state.filter.render(frame, filter_area, theme);
+            }
             self.render_table(frame, results_area, theme, &mut state);
         }
     }
 
     fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
         let input_is_active = self.sync_state.read().unwrap().input.is_active();
+        let filter_active = self.sync_state.read().unwrap().filter.is_active();
         if input_is_active && self.sync_state.write().unwrap().input.handle_event(event) {
             return true;
+        }
+        if filter_active {
+            let mut state = self.sync_state.write().unwrap();
+            if state.filter.handle_event(event) {
+                state.apply_filter();
+                return true;
+            }
         }
         if let Some(key) = event.as_key_press_event() {
             match key.code {
@@ -143,10 +301,19 @@ impl crate::widgets::Widget for QueryWidget {
                 KeyCode::Esc if input_is_active => {
                     self.sync_state.write().unwrap().input.toggle_active()
                 }
+                KeyCode::Esc if filter_active => {
+                    let mut state = self.sync_state.write().unwrap();
+                    state.filter.clear();
+                    state.filter.set_active(false);
+                    state.apply_filter();
+                }
                 KeyCode::Esc => {
                     let mut state = self.sync_state.write().unwrap();
                     if state.show_tree {
                         state.show_tree = false;
+                    } else if state.filter_applied() {
+                        state.filter.clear();
+                        state.apply_filter();
                     } else {
                         drop(state);
                         env.pop_widget();
@@ -165,6 +332,12 @@ impl crate::widgets::Widget for QueryWidget {
                     let mut state = self.sync_state.write().unwrap();
                     if !state.show_tree {
                         state.show_tree = true;
+                    }
+                }
+                KeyCode::Char('/') if !input_is_active && !filter_active => {
+                    let mut state = self.sync_state.write().unwrap();
+                    if !state.show_tree {
+                        state.filter.set_active(true);
                     }
                 }
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(env.clone()),
@@ -240,16 +413,110 @@ impl crate::widgets::Widget for QueryWidget {
     fn help(&self) -> Option<&[help::Entry<'_>]> {
         let show_tree = self.sync_state.read().unwrap().show_tree;
         if show_tree {
-            Some(Self::HELP_TREE)
+            return Some(Self::HELP_TREE);
+        }
+        let state = self.sync_state.read().unwrap();
+        if state.filter.is_active() {
+            Some(Self::HELP_FILTER_EDIT)
+        } else if state.filter_applied() {
+            Some(Self::HELP_FILTER_APPLIED)
         } else {
             Some(Self::HELP_TABLE)
         }
+    }
+
+    fn suppress_global_help(&self) -> bool {
+        self.sync_state.read().unwrap().filter.is_active()
     }
 
 }
 
 impl QueryWidget {
     const HELP_TABLE: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("/"),
+            short: Cow::Borrowed("filter"),
+            long: Cow::Borrowed("Filter items"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("f"),
+            short: Cow::Borrowed("fields"),
+            long: Cow::Borrowed("Enable/disable fields"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("⏎"),
+            short: Cow::Borrowed("view"),
+            long: Cow::Borrowed("View selected item"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("e"),
+            short: Cow::Borrowed("edit"),
+            long: Cow::Borrowed("Edit item (JSON)"),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^e")),
+                short: Some(Cow::Borrowed("edit (Dynamo JSON)")),
+                long: Some(Cow::Borrowed("Edit item (Dynamo JSON)")),
+            }),
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("n"),
+            short: Cow::Borrowed("new"),
+            long: Cow::Borrowed("New item"),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^n")),
+                short: Some(Cow::Borrowed("new (Dynamo JSON)")),
+                long: Some(Cow::Borrowed("New item (Dynamo JSON)")),
+            }),
+            shift: None,
+            alt: None,
+        },
+    ];
+    const HELP_FILTER_EDIT: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("clear"),
+            long: Cow::Borrowed("Clear filter"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("⏎"),
+            short: Cow::Borrowed("apply"),
+            long: Cow::Borrowed("Apply filter"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+    ];
+    const HELP_FILTER_APPLIED: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("/"),
+            short: Cow::Borrowed("filter"),
+            long: Cow::Borrowed("Edit filter"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("clear filter"),
+            long: Cow::Borrowed("Clear filter"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
         help::Entry {
             keys: Cow::Borrowed("f"),
             short: Cow::Borrowed("fields"),
@@ -423,8 +690,12 @@ impl QueryWidget {
         if state.is_loading_more || state.last_evaluated_key.is_none() {
             return false;
         }
+        let visible_len = state.filtered_indices.len();
+        if visible_len == 0 {
+            return state.filter_applied();
+        }
         let selected = state.table_state.selected().unwrap_or(0);
-        selected + 1 >= state.items.len()
+        selected + 1 >= visible_len
     }
 
     fn load_more(&self, env: EnvHandle) {
@@ -470,6 +741,7 @@ impl QueryWidget {
         {
             let mut state = self.sync_state.write().unwrap();
             state.items.clear();
+            state.filtered_indices.clear();
             state.item_keys.clear();
             state.table_state = TableState::default();
             state.query_output = None;
@@ -555,15 +827,24 @@ impl QueryWidget {
         state.is_loading_more = false;
 
         state.query_output = Some(output);
+        state.apply_filter();
         if !append {
             if let Some(index) = state.reopen_tree.take() {
-                if state.items.is_empty() {
+                if state.filtered_indices.is_empty() {
                     state.show_tree = false;
                     state.table_state.select(None);
                 } else {
-                    let clamped = index.min(state.items.len().saturating_sub(1));
-                    state.table_state.select(Some(clamped));
-                    state.show_tree = true;
+                    if let Some(pos) = state
+                        .filtered_indices
+                        .iter()
+                        .position(|idx| *idx == index)
+                    {
+                        state.table_state.select(Some(pos));
+                        state.show_tree = true;
+                    } else {
+                        state.show_tree = false;
+                        state.table_state.select(None);
+                    }
                 }
             }
         }
@@ -620,9 +901,14 @@ impl QueryWidget {
         // maximum rows is the area height, minus 2 for the the top and bottom borders,
         // minus 1 for the header
         let max_rows = (area.height - 2 - 1) as usize;
-        let total = state.items.len();
-        let first_item = state.table_state.offset() + 1;
-        let last_item = min(first_item + max_rows, total);
+        let total = state.filtered_indices.len();
+        let (first_item, last_item) = if total == 0 {
+            (0, 0)
+        } else {
+            let first_item = state.table_state.offset() + 1;
+            let last_item = min(first_item + max_rows, total);
+            (first_item, last_item)
+        };
 
         // a block with a right aligned title with the loading state on the right
         let (title, title_bottom, title_style) = match &state.loading_state {
@@ -659,11 +945,16 @@ impl QueryWidget {
             .border_style(border)
             .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()));
 
-        if state.table_state.selected().is_none() && !state.items.is_empty() {
+        if state.table_state.selected().is_none() && !state.filtered_indices.is_empty() {
             state.table_state.select(Some(0));
         }
 
-        let table = Table::new(&state.items, widths)
+        let filtered_items: Vec<&Item> = state
+            .filtered_indices
+            .iter()
+            .filter_map(|idx| state.items.get(*idx))
+            .collect();
+        let table = Table::new(filtered_items, widths)
             .block(block)
             .header(header)
             .highlight_spacing(HighlightSpacing::Always)
@@ -675,6 +966,24 @@ impl QueryWidget {
             );
 
         StatefulWidget::render(table, area, frame.buffer_mut(), &mut state.table_state);
+
+        let filter_value = state.filter.value.trim();
+        if !filter_value.is_empty() {
+            let title = format!("</{filter_value}>");
+            let width = title.width() as u16;
+            if area.width > 2 && width < area.width - 2 {
+                let start = area.x + (area.width - width) / 2;
+                let y = area.y;
+                let buf = frame.buffer_mut();
+                buf.set_stringn(
+                    start,
+                    y,
+                    title,
+                    width as usize,
+                    Style::default().fg(theme.accent()),
+                );
+            }
+        }
     }
 
     fn render_tree(
@@ -717,8 +1026,9 @@ impl QueryWidget {
 
         let selected = state.table_state.selected().unwrap_or(0);
         let content = state
-            .items
+            .filtered_indices
             .get(selected)
+            .and_then(|idx| state.items.get(*idx))
             .map(|item| tree::item_to_lines(&item.0))
             .unwrap_or_else(|| vec!["No item selected".to_string()]);
 
@@ -734,7 +1044,11 @@ impl QueryWidget {
         let (hash_key, range_key) = extract_hash_range(table_desc);
 
         let selected = state.table_state.selected().unwrap_or(0);
-        let Some(item) = state.items.get(selected) else {
+        let Some(item) = state
+            .filtered_indices
+            .get(selected)
+            .and_then(|idx| state.items.get(*idx))
+        else {
             return " Item ".to_string();
         };
 
@@ -765,7 +1079,11 @@ impl QueryWidget {
 
     fn item_view_subtitle(&self, state: &QuerySyncState) -> String {
         let selected = state.table_state.selected().unwrap_or(0);
-        let Some(item) = state.items.get(selected) else {
+        let Some(item) = state
+            .filtered_indices
+            .get(selected)
+            .and_then(|idx| state.items.get(*idx))
+        else {
             return pad("No item selected ", 2);
         };
         let bytes = estimate_item_size_bytes(&item.0);
@@ -807,10 +1125,12 @@ impl QueryWidget {
         let (item, query, reopen_tree) = {
             let state = self.sync_state.read().unwrap();
             let selected = state.table_state.selected();
-            let item = selected
+            let item_index = selected
+                .and_then(|index| state.filtered_indices.get(index).copied());
+            let item = item_index
                 .and_then(|index| state.items.get(index))
                 .map(|item| item.0.clone());
-            let reopen_tree = if state.show_tree { selected } else { None };
+            let reopen_tree = if state.show_tree { item_index } else { None };
             (item, state.last_query.clone(), reopen_tree)
         };
 
@@ -1034,6 +1354,24 @@ fn item_matches_index(item: &Item, index: &SecondaryIndex) -> bool {
         Some(range_key) => item.0.contains_key(range_key),
         None => true,
     }
+}
+
+fn item_matches_filter(item: &Item, needle: &str) -> bool {
+    for (key, value) in &item.0 {
+        if key.to_lowercase().contains(needle) {
+            return true;
+        }
+        let value = match value {
+            AttributeValue::S(v) => v.clone(),
+            AttributeValue::N(v) => v.clone(),
+            AttributeValue::Bool(v) => v.to_string(),
+            _ => format!("{value:?}"),
+        };
+        if value.to_lowercase().contains(needle) {
+            return true;
+        }
+    }
+    false
 }
 
 fn format_ttl_value(value: &AttributeValue) -> Option<String> {
