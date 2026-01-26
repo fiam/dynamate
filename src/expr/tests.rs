@@ -30,6 +30,32 @@ mod expr_tests {
     }
 
     #[test]
+    fn test_unquoted_string_defaults_to_value() {
+        let result = parse_dynamo_expression("city = Sidney").unwrap();
+        assert_eq!(
+            result,
+            DynamoExpression::Comparison {
+                left: Operand::Path("city".to_string()),
+                operator: Comparator::Equal,
+                right: Operand::Value("Sidney".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_backtick_path_on_rhs() {
+        let result = parse_dynamo_expression("city = `other field`").unwrap();
+        assert_eq!(
+            result,
+            DynamoExpression::Comparison {
+                left: Operand::Path("city".to_string()),
+                operator: Comparator::Equal,
+                right: Operand::Path("other field".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn test_all_comparators() {
         let tests = vec![
             ("age = 25", Comparator::Equal),

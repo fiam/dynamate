@@ -65,6 +65,16 @@ pub async fn execute_page(
     start_key: Option<HashMap<String, AttributeValue>>,
     limit: Option<i32>,
 ) -> Result<Output, Error> {
+    tracing::debug!(
+        "Dynamo request: table={}, kind={:?}, start_key_present={}, limit={:?}",
+        table_name,
+        match db_request {
+            DynamoDbRequest::Query(_) => "Query",
+            DynamoDbRequest::Scan(_) => "Scan",
+        },
+        start_key.is_some(),
+        limit
+    );
     match db_request {
         DynamoDbRequest::Query(builder) => {
             let output = execute_query(client, table_name, builder, start_key, limit).await?;
@@ -110,15 +120,18 @@ async fn execute_scan(
 ) -> Result<ScanOutput, aws_sdk_dynamodb::Error> {
     let mut request = client.scan().table_name(table_name);
 
+    tracing::debug!(
+        "Scan: table={}, filter expression: {:?}, attribute names: {:?}, attribute values {:?}, start_key_present={}, limit={:?}",
+        table_name,
+        builder.filter_expression(),
+        builder.expression_attribute_names(),
+        builder.expression_attribute_values(),
+        start_key.is_some(),
+        limit
+    );
+
     if let Some(filter_expr) = builder.filter_expression() {
         request = request.filter_expression(filter_expr);
-
-        tracing::debug!(
-            "Scan: filter expression: {}, attribute names: {:?}, attribute values {:?}",
-            filter_expr,
-            builder.expression_attribute_names(),
-            builder.expression_attribute_values()
-        );
 
         for (key, value) in builder.expression_attribute_names() {
             request = request.expression_attribute_names(key.clone(), value.clone());
@@ -174,6 +187,7 @@ async fn execute_query(
         request = request.expression_attribute_values(key.clone(), value.clone());
     }
 
+    let start_key_present = start_key.is_some();
     if let Some(start_key) = start_key {
         request = request.set_exclusive_start_key(Some(start_key));
     }
@@ -183,11 +197,15 @@ async fn execute_query(
     }
 
     tracing::debug!(
-        "Query: key condition expression: {:?}, filter expression: {:?}, attribute names: {:?}, attribute values: {:?}",
+        "Query: table={}, index={:?}, key condition expression: {:?}, filter expression: {:?}, attribute names: {:?}, attribute values: {:?}, start_key_present={}, limit={:?}",
+        table_name,
+        builder.index_name(),
         builder.key_condition_expression(),
         builder.filter_expression(),
         builder.expression_attribute_names(),
-        builder.expression_attribute_values()
+        builder.expression_attribute_values(),
+        start_key_present,
+        limit
     );
 
     let output = request.send().await?;

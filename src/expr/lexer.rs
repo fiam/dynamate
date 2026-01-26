@@ -8,6 +8,7 @@ pub struct Lexer {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Identifier(String),
+    Path(String),
     String(String),
     Number(f64),
     Boolean(bool),
@@ -184,6 +185,10 @@ impl Lexer {
             Some('"') => {
                 let s = self.read_string('"')?;
                 Ok(Token::String(s))
+            }
+            Some('`') => {
+                let s = self.read_string('`')?;
+                Ok(Token::Path(s))
             }
             Some('\'') => {
                 let s = self.read_string('\'')?;

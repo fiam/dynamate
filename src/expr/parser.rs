@@ -120,13 +120,19 @@ pub fn parse_function(lexer: &mut Lexer) -> Result<DynamoExpression, ParseError>
     }
 
     let mut args = Vec::new();
+    let mut arg_index = 0usize;
     loop {
         if let Ok(Token::RightParen) = lexer.peek_token() {
             lexer.next_token()?; // consume )
             break;
         }
 
-        args.push(parse_operand(lexer)?);
+        if arg_index == 0 {
+            args.push(parse_path_operand(lexer)?);
+        } else {
+            args.push(parse_value_operand(lexer)?);
+        }
+        arg_index += 1;
 
         match lexer.peek_token()? {
             Token::Comma => {
@@ -149,12 +155,12 @@ pub fn parse_function(lexer: &mut Lexer) -> Result<DynamoExpression, ParseError>
 }
 
 pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, ParseError> {
-    let left = parse_operand(lexer)?;
+    let left = parse_path_operand(lexer)?;
 
     match lexer.peek_token()? {
         Token::Between => {
             lexer.next_token()?; // consume BETWEEN
-            let lower = parse_operand(lexer)?;
+            let lower = parse_value_operand(lexer)?;
             match lexer.next_token()? {
                 Token::And => {}
                 token => {
@@ -164,7 +170,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
                     });
                 }
             }
-            let upper = parse_operand(lexer)?;
+            let upper = parse_value_operand(lexer)?;
             Ok(DynamoExpression::Between {
                 operand: left,
                 lower,
@@ -190,7 +196,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
                     break;
                 }
 
-                values.push(parse_operand(lexer)?);
+                values.push(parse_value_operand(lexer)?);
 
                 match lexer.peek_token()? {
                     Token::Comma => {
@@ -216,7 +222,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
         }
         Token::Equal => {
             lexer.next_token()?;
-            let right = parse_operand(lexer)?;
+            let right = parse_value_operand(lexer)?;
             Ok(DynamoExpression::Comparison {
                 left,
                 operator: Comparator::Equal,
@@ -225,7 +231,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
         }
         Token::NotEqual => {
             lexer.next_token()?;
-            let right = parse_operand(lexer)?;
+            let right = parse_value_operand(lexer)?;
             Ok(DynamoExpression::Comparison {
                 left,
                 operator: Comparator::NotEqual,
@@ -234,7 +240,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
         }
         Token::Less => {
             lexer.next_token()?;
-            let right = parse_operand(lexer)?;
+            let right = parse_value_operand(lexer)?;
             Ok(DynamoExpression::Comparison {
                 left,
                 operator: Comparator::Less,
@@ -243,7 +249,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
         }
         Token::LessOrEqual => {
             lexer.next_token()?;
-            let right = parse_operand(lexer)?;
+            let right = parse_value_operand(lexer)?;
             Ok(DynamoExpression::Comparison {
                 left,
                 operator: Comparator::LessOrEqual,
@@ -252,7 +258,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
         }
         Token::Greater => {
             lexer.next_token()?;
-            let right = parse_operand(lexer)?;
+            let right = parse_value_operand(lexer)?;
             Ok(DynamoExpression::Comparison {
                 left,
                 operator: Comparator::Greater,
@@ -261,7 +267,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
         }
         Token::GreaterOrEqual => {
             lexer.next_token()?;
-            let right = parse_operand(lexer)?;
+            let right = parse_value_operand(lexer)?;
             Ok(DynamoExpression::Comparison {
                 left,
                 operator: Comparator::GreaterOrEqual,
@@ -275,9 +281,21 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
     }
 }
 
-pub fn parse_operand(lexer: &mut Lexer) -> Result<Operand, ParseError> {
+pub fn parse_path_operand(lexer: &mut Lexer) -> Result<Operand, ParseError> {
     match lexer.next_token()? {
         Token::Identifier(name) => Ok(Operand::Path(name)),
+        Token::Path(name) => Ok(Operand::Path(name)),
+        token => Err(ParseError::UnexpectedToken {
+            token: format!("{:?}", token),
+            position: lexer.position,
+        }),
+    }
+}
+
+pub fn parse_value_operand(lexer: &mut Lexer) -> Result<Operand, ParseError> {
+    match lexer.next_token()? {
+        Token::Identifier(name) => Ok(Operand::Value(name)),
+        Token::Path(name) => Ok(Operand::Path(name)),
         Token::String(s) => Ok(Operand::Value(s)),
         Token::Number(n) => Ok(Operand::Number(n)),
         Token::Boolean(b) => Ok(Operand::Boolean(b)),
