@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -12,6 +12,22 @@ pub enum Message {
     PopWidget,
     SetPopup(Arc<dyn Popup>),
     DismissPopup,
+    ShowToast(Toast),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum ToastKind {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct Toast {
+    pub message: String,
+    pub kind: ToastKind,
+    pub duration: Duration,
 }
 
 pub struct Env {
@@ -57,6 +73,11 @@ impl crate::widgets::Env for EnvTx {
     fn dismiss_popup(&self) {
         self.send(Message::DismissPopup);
     }
+
+    fn show_toast(&self, toast: Toast) {
+        self.send(Message::ShowToast(toast));
+    }
+
 }
 
 impl Env {

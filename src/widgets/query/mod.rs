@@ -32,9 +32,10 @@ use item_keys::ItemKeys;
 use keys_widget::KeysWidget;
 
 use crate::{
+    env::{Toast, ToastKind},
     help,
     util::pad,
-    widgets::{EnvHandle, theme::Theme},
+    widgets::{EnvHandle, error::ErrorPopup, theme::Theme},
 };
 use dynamate::dynamodb::json;
 use dynamate::dynamodb::size::estimate_item_size_bytes;
@@ -330,6 +331,19 @@ impl QueryWidget {
         self.sync_state.write().unwrap().loading_state = state;
     }
 
+    fn show_error(&self, env: EnvHandle, message: &str) {
+        let is_empty = self.sync_state.read().unwrap().items.is_empty();
+        if is_empty {
+            env.set_popup(Arc::new(ErrorPopup::new("Error", message)));
+        } else {
+            env.show_toast(Toast {
+                message: message.to_string(),
+                kind: ToastKind::Error,
+                duration: Duration::from_secs(4),
+            });
+        }
+    }
+
     async fn table_description(&self) -> Result<Arc<TableDescription>, String> {
         let arc_ref = self
             .table_desc
@@ -500,12 +514,15 @@ impl QueryWidget {
                             }
                         }
                         Err(e) => {
-                            this.set_loading_state(LoadingState::Error(e.to_string()));
+                            let message = e.to_string();
+                            this.set_loading_state(LoadingState::Error(message.clone()));
+                            this.show_error(env.clone(), &message);
                         }
                     };
                 }
                 Err(e) => {
-                    this.set_loading_state(LoadingState::Error(e));
+                    this.set_loading_state(LoadingState::Error(e.clone()));
+                    this.show_error(env.clone(), &e);
                 }
             }
             env.invalidate();
@@ -607,25 +624,38 @@ impl QueryWidget {
         let last_item = min(first_item + max_rows, total);
 
         // a block with a right aligned title with the loading state on the right
-        let (title, title_bottom) = match &state.loading_state {
+        let (title, title_bottom, title_style) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => (
                 format!("Results{}", output_info(state.query_output.as_ref())),
                 pad(
                     format!("{} results, showing {}-{}", total, first_item, last_item),
                     2,
                 ),
+                Style::default().fg(theme.text()),
             ),
-            LoadingState::Loading => ("Loading".to_string(), "".to_string()),
-            LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
+            LoadingState::Loading => (
+                "Loading".to_string(),
+                "".to_string(),
+                Style::default().fg(theme.warning()),
+            ),
+            LoadingState::Error(_) => (
+                "Error".to_string(),
+                "".to_string(),
+                Style::default().fg(theme.error()),
+            ),
         };
 
+        let border = match &state.loading_state {
+            LoadingState::Error(_) => Style::default().fg(theme.error()),
+            _ => Style::default().fg(theme.border()),
+        };
         let block = Block::bordered()
-            .title_top(title)
+            .title_top(Line::styled(title, title_style))
             .title_bottom(Line::styled(
                 title_bottom,
                 Style::default().fg(theme.text_muted()),
             ))
-            .border_style(Style::default().fg(theme.border()))
+            .border_style(border)
             .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()));
 
         if state.table_state.selected().is_none() && !state.items.is_empty() {
@@ -653,22 +683,35 @@ impl QueryWidget {
         theme: &Theme,
         state: &mut QuerySyncState,
     ) {
-        let (title, title_bottom) = match &state.loading_state {
+        let (title, title_bottom, title_style) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => (
                 self.item_view_title(state),
                 self.item_view_subtitle(state),
+                Style::default().fg(theme.text()),
             ),
-            LoadingState::Loading => ("Loading".to_string(), "".to_string()),
-            LoadingState::Error(err) => (format!("Error: {err}"), "".to_string()),
+            LoadingState::Loading => (
+                "Loading".to_string(),
+                "".to_string(),
+                Style::default().fg(theme.warning()),
+            ),
+            LoadingState::Error(_) => (
+                "Error".to_string(),
+                "".to_string(),
+                Style::default().fg(theme.error()),
+            ),
         };
 
+        let border = match &state.loading_state {
+            LoadingState::Error(_) => Style::default().fg(theme.error()),
+            _ => Style::default().fg(theme.border()),
+        };
         let block = Block::bordered()
-            .title_top(title)
+            .title_top(Line::styled(title, title_style))
             .title_bottom(Line::styled(
                 title_bottom,
                 Style::default().fg(theme.text_muted()),
             ))
-            .border_style(Style::default().fg(theme.border()))
+            .border_style(border)
             .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()));
 
         let selected = state.table_state.selected().unwrap_or(0);
@@ -771,7 +814,9 @@ impl QueryWidget {
         };
 
         let Some(item) = item else {
-            self.set_loading_state(LoadingState::Error("No item selected".to_string()));
+            let message = "No item selected".to_string();
+            self.set_loading_state(LoadingState::Error(message.clone()));
+            self.show_error(env.clone(), &message);
             env.invalidate();
             return;
         };
@@ -783,7 +828,9 @@ impl QueryWidget {
         let initial = match initial {
             Ok(value) => value,
             Err(err) => {
-                self.set_loading_state(LoadingState::Error(err.to_string()));
+                let message = err.to_string();
+                self.set_loading_state(LoadingState::Error(message.clone()));
+                self.show_error(env.clone(), &message);
                 env.invalidate();
                 return;
             }
@@ -792,7 +839,8 @@ impl QueryWidget {
         let edited = match self.open_editor(&initial, env.clone()) {
             Ok(value) => value,
             Err(err) => {
-                self.set_loading_state(LoadingState::Error(err));
+                self.set_loading_state(LoadingState::Error(err.clone()));
+                self.show_error(env.clone(), &err);
                 env.invalidate();
                 return;
             }
@@ -806,7 +854,9 @@ impl QueryWidget {
         let updated = match updated {
             Ok(value) => value,
             Err(err) => {
-                self.set_loading_state(LoadingState::Error(err.to_string()));
+                let message = err.to_string();
+                self.set_loading_state(LoadingState::Error(message.clone()));
+                self.show_error(env.clone(), &message);
                 env.invalidate();
                 return;
             }
@@ -825,7 +875,8 @@ impl QueryWidget {
         let edited = match self.open_editor(&initial, env.clone()) {
             Ok(value) => value,
             Err(err) => {
-                self.set_loading_state(LoadingState::Error(err));
+                self.set_loading_state(LoadingState::Error(err.clone()));
+                self.show_error(env.clone(), &err);
                 env.invalidate();
                 return;
             }
@@ -839,7 +890,9 @@ impl QueryWidget {
         let updated = match updated {
             Ok(value) => value,
             Err(err) => {
-                self.set_loading_state(LoadingState::Error(err.to_string()));
+                let message = err.to_string();
+                self.set_loading_state(LoadingState::Error(message.clone()));
+                self.show_error(env.clone(), &message);
                 env.invalidate();
                 return;
             }
@@ -927,7 +980,9 @@ impl QueryWidget {
                     this.start_query_with_reopen(Some(&query), env.clone(), reopen_tree);
                 }
                 Err(err) => {
-                    this.set_loading_state(LoadingState::Error(err.to_string()));
+                    let message = err.to_string();
+                    this.set_loading_state(LoadingState::Error(message.clone()));
+                    this.show_error(env.clone(), &message);
                     env.invalidate();
                 }
             }

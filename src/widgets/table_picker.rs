@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, time::Duration};
 use std::sync::Arc;
 
 use aws_sdk_dynamodb::Client;
@@ -13,9 +13,10 @@ use ratatui::{
 };
 
 use crate::{
+    env::{Toast, ToastKind},
     help,
     util::pad,
-    widgets::{EnvHandle, QueryWidget, theme::Theme},
+    widgets::{EnvHandle, QueryWidget, error::ErrorPopup, theme::Theme},
 };
 
 #[derive(Clone)]
@@ -228,7 +229,20 @@ impl TablePickerWidget {
                 state.loading_state = LoadingState::Loaded;
             }
             Err(err) => {
-                state.loading_state = LoadingState::Error(err);
+                state.loading_state = LoadingState::Error(err.clone());
+                let is_empty = state.tables.is_empty();
+                drop(state);
+                if is_empty {
+                    env.set_popup(Arc::new(ErrorPopup::new("Error", err)));
+                } else {
+                    env.show_toast(Toast {
+                        message: err,
+                        kind: ToastKind::Error,
+                        duration: Duration::from_secs(4),
+                    });
+                }
+                env.invalidate();
+                return;
             }
         }
         env.invalidate();
@@ -334,8 +348,8 @@ impl crate::widgets::Widget for TablePickerWidget {
                     .block(block);
                 frame.render_widget(text, list_area);
             }
-            LoadingState::Error(message) => {
-                let text = Paragraph::new(format!("Error: {message}"))
+            LoadingState::Error(_) => {
+                let text = Paragraph::new("Error")
                     .style(Style::default().fg(theme.error()))
                     .block(block);
                 frame.render_widget(text, list_area);

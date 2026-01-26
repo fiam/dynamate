@@ -40,6 +40,8 @@ use crossterm::event::{
 use crossterm::terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::widgets::{Block, BorderType};
+use unicode_width::UnicodeWidthStr;
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
 use ratatui::{DefaultTerminal, Frame};
@@ -58,6 +60,7 @@ mod util;
 mod widgets;
 
 use crate::help::ModDisplay;
+use crate::env::{Toast, ToastKind};
 use crate::util::fill_bg;
 use crate::widgets::theme::Theme;
 
@@ -131,6 +134,7 @@ struct App {
     should_redraw: bool,
     widgets: Vec<Arc<dyn crate::widgets::Widget>>,
     popup: Option<Arc<dyn crate::widgets::Popup>>,
+    toast: Option<ToastState>,
     modifiers: Arc<std::sync::RwLock<crossterm::event::KeyModifiers>>,
     help_mode: Arc<std::sync::RwLock<ModDisplay>>,
 }
@@ -235,6 +239,7 @@ impl App {
             should_redraw: true,
             widgets: Vec::new(),
             popup: None,
+            toast: None,
             modifiers: Arc::new(std::sync::RwLock::new(
                 crossterm::event::KeyModifiers::empty(),
             )),
@@ -306,6 +311,7 @@ impl App {
             while !self.should_quit {
                 tokio::select! {
                     _ = interval.tick() => {
+                        self.prune_toast();
                         terminal.draw(|frame| self.render(frame))?;
                         // if self.should_redraw {
                         //     terminal.draw(|frame| self.render(frame))?;
@@ -347,6 +353,7 @@ impl App {
             while !self.should_quit {
                 tokio::select! {
                     _ = interval.tick() => {
+                        self.prune_toast();
                         terminal.draw(|frame| self.render(frame))?;
                         // if self.should_redraw {
                         //     terminal.draw(|frame| self.render(frame))?;
@@ -428,6 +435,11 @@ impl App {
             let popup_area = popup.rect(body_area);
             frame.render_widget(Clear, popup_area);
             popup.render(frame, popup_area, &theme);
+        }
+        if self.popup.is_none() {
+            if let Some(toast) = self.toast.as_ref() {
+                self.render_toast(frame, body_area, footer_area, &theme, toast);
+            }
         }
         help::render(&all_help, frame, footer_area, &theme, modifiers, help_mode);
         let duration = start.elapsed();
@@ -514,6 +526,9 @@ impl App {
                     if self.popup.is_some() {
                         self.popup = None;
                         self.should_redraw = true;
+                    } else if self.toast.is_some() {
+                        self.toast = None;
+                        self.should_redraw = true;
                     } else if self.widgets.len() > 1 {
                         self.widgets.pop();
                         self.should_redraw = true;
@@ -557,12 +572,74 @@ impl App {
                 self.popup = None;
                 self.should_redraw = true;
             }
+            env::Message::ShowToast(toast) => {
+                self.toast = Some(ToastState::from(toast));
+                self.should_redraw = true;
+            }
             env::Message::Invalidate => {
                 self.should_redraw = true;
             }
             env::Message::ForceRedraw => {
                 self.should_redraw = true;
             }
+        }
+    }
+
+    fn render_toast(
+        &self,
+        frame: &mut Frame,
+        body_area: Rect,
+        footer_area: Rect,
+        theme: &Theme,
+        toast: &ToastState,
+    ) {
+        let message = toast.message.as_str();
+        let text_width = message.width() as u16;
+        let width = (text_width + 6).min(body_area.width.saturating_sub(2)).max(20);
+        let height = 3u16;
+        let x = body_area.x + body_area.width.saturating_sub(width + 1);
+        let y = footer_area.y.saturating_sub(height + 1);
+        let area = Rect::new(x, y, width, height);
+
+        let color = match toast.kind {
+            ToastKind::Info => theme.accent(),
+            ToastKind::Warning => theme.warning(),
+            ToastKind::Error => theme.error(),
+        };
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(color))
+            .style(Style::default().bg(theme.panel_bg()).fg(theme.text()));
+        let text = Line::styled(message, Style::default().fg(theme.text()));
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+        let text_area = Rect::new(area.x + 2, area.y + 1, area.width - 4, 1);
+        frame.render_widget(text, text_area);
+    }
+
+    fn prune_toast(&mut self) {
+        if let Some(toast) = self.toast.as_ref() {
+            if toast.expires_at <= Instant::now() {
+                self.toast = None;
+                self.should_redraw = true;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ToastState {
+    message: String,
+    kind: ToastKind,
+    expires_at: Instant,
+}
+
+impl ToastState {
+    fn from(toast: Toast) -> Self {
+        Self {
+            message: toast.message,
+            kind: toast.kind,
+            expires_at: Instant::now() + toast.duration,
         }
     }
 }

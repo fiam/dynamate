@@ -6,6 +6,7 @@ use theme::Theme;
 
 mod query;
 mod table_picker;
+pub mod error;
 pub mod theme;
 
 pub use query::QueryWidget;
@@ -20,6 +21,7 @@ pub trait Env {
     fn pop_widget(&self);
     fn set_popup(&self, popup: Arc<dyn Popup>);
     fn dismiss_popup(&self);
+    fn show_toast(&self, toast: crate::env::Toast);
 }
 
 pub type EnvHandle = Arc<dyn Env + Send + Sync>;
