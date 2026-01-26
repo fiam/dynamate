@@ -6,13 +6,13 @@ use aws_sdk_dynamodb::types::AttributeValue;
 /// This is an estimate (sets are treated like lists).
 pub fn estimate_item_size_bytes(item: &HashMap<String, AttributeValue>) -> usize {
     item.iter()
-        .map(|(name, value)| name.as_bytes().len() + estimate_value_size_bytes(value))
+        .map(|(name, value)| name.len() + estimate_value_size_bytes(value))
         .sum()
 }
 
 fn estimate_value_size_bytes(value: &AttributeValue) -> usize {
     match value {
-        AttributeValue::S(text) => text.as_bytes().len(),
+        AttributeValue::S(text) => text.len(),
         AttributeValue::N(num) => number_size_bytes(num),
         AttributeValue::B(bytes) => bytes.as_ref().len(),
         AttributeValue::Bool(_) => 1,
@@ -24,13 +24,13 @@ fn estimate_value_size_bytes(value: &AttributeValue) -> usize {
         AttributeValue::M(map) => {
             let mut size = 3 + map.len();
             for (name, value) in map {
-                size += name.as_bytes().len();
+                size += name.len();
                 size += estimate_value_size_bytes(value);
             }
             size
         }
         AttributeValue::Ss(set) => {
-            let values_size: usize = set.iter().map(|s| s.as_bytes().len()).sum();
+            let values_size: usize = set.iter().map(|s| s.len()).sum();
             3 + set.len() + values_size
         }
         AttributeValue::Ns(set) => {
@@ -57,7 +57,7 @@ fn number_size_bytes(num: &str) -> usize {
         s = rest;
     }
 
-    let coeff = match s.find(|c| c == 'e' || c == 'E') {
+    let coeff = match s.find(['e', 'E']) {
         Some(idx) => &s[..idx],
         None => s,
     };
@@ -68,5 +68,5 @@ fn number_size_bytes(num: &str) -> usize {
         digits = digits.trim_end_matches('0').to_string();
     }
     let count = if digits.is_empty() { 1 } else { digits.len() };
-    (count + 1) / 2 + 1
+    count.div_ceil(2) + 1
 }

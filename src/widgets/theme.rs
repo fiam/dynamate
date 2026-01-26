@@ -32,10 +32,10 @@ impl Theme {
                 }
             }
 
-            if let Ok(luma) = terminal_light::luma() {
-                if luma > 0.6 {
-                    return Self::light();
-                }
+            if let Ok(luma) = terminal_light::luma()
+                && luma > 0.6
+            {
+                return Self::light();
             }
 
             Self::dark()

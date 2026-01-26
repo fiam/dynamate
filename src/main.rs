@@ -27,8 +27,8 @@
 //! [Ratatui]: https://github.com/ratatui/ratatui
 //! [examples]: https://github.com/ratatui/ratatui/blob/main/examples
 //! [examples readme]: https://github.com/ratatui/ratatui/blob/main/examples/README.md
-use std::borrow::Cow;
 use std::backtrace::Backtrace;
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,12 +40,12 @@ use crossterm::event::{
 use crossterm::terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style, Stylize};
-use ratatui::widgets::{Block, BorderType};
-use unicode_width::UnicodeWidthStr;
 use ratatui::text::Line;
 use ratatui::widgets::Clear;
+use ratatui::widgets::{Block, BorderType};
 use ratatui::{DefaultTerminal, Frame};
 use tokio_stream::StreamExt;
+use unicode_width::UnicodeWidthStr;
 
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
@@ -59,8 +59,8 @@ mod subcommands;
 mod util;
 mod widgets;
 
+use crate::env::{AppBus, AppBusRx, AppCommand, AppEvent, Toast, ToastKind, WidgetEvent};
 use crate::help::ModDisplay;
-use crate::env::{Toast, ToastKind};
 use crate::util::fill_bg;
 use crate::widgets::theme::Theme;
 
@@ -129,7 +129,9 @@ async fn main() -> Result<()> {
 }
 
 struct App {
-    env: env::Env,
+    bus: AppBus,
+    cmd_rx: tokio::sync::mpsc::UnboundedReceiver<AppCommand>,
+    event_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     should_quit: bool,
     should_redraw: bool,
     widgets: Vec<Arc<dyn crate::widgets::Widget>>,
@@ -255,8 +257,11 @@ impl App {
     ];
 
     pub fn default() -> Self {
+        let (bus, AppBusRx { cmd_rx, event_rx }) = AppBus::new();
         App {
-            env: env::Env::new(),
+            bus,
+            cmd_rx,
+            event_rx,
             should_quit: false,
             should_redraw: true,
             widgets: Vec::new(),
@@ -288,10 +293,7 @@ impl App {
         if keyboard_support {
             let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                PushKeyboardEnhancementFlags(flags)
-            );
+            let _ = crossterm::execute!(std::io::stdout(), PushKeyboardEnhancementFlags(flags));
         }
 
         let app_result = app.run(terminal, client, table_name).await;
@@ -310,10 +312,18 @@ impl App {
         table_name: Option<&str>,
     ) -> Result<()> {
         let widget: Arc<dyn crate::widgets::Widget> = match table_name {
-            Some(name) => Arc::new(widgets::QueryWidget::new(client, name)),
-            None => Arc::new(widgets::TablePickerWidget::new(client)),
+            Some(name) => Arc::new(widgets::QueryWidget::new(
+                client,
+                name,
+                env::WidgetId::app(),
+            )),
+            None => Arc::new(widgets::TablePickerWidget::new(
+                client,
+                env::WidgetId::app(),
+            )),
         };
-        widget.start(self.env.tx());
+        let ctx = widget.inner().ctx(self.bus.clone());
+        widget.start(ctx);
 
         self.widgets.push(widget);
 
@@ -333,6 +343,7 @@ impl App {
                 tokio::select! {
                     _ = interval.tick() => {
                         self.prune_toast();
+                        self.process_widget_self_events();
                         terminal.draw(|frame| self.render(frame))?;
                         // if self.should_redraw {
                         //     terminal.draw(|frame| self.render(frame))?;
@@ -344,9 +355,9 @@ impl App {
                             terminal.draw(|frame| self.render(frame))?;
                         }
                     },
-                    Some(msg) = self.env.rx().recv() => {
-                        let force_redraw = matches!(msg, env::Message::ForceRedraw);
-                        self.handle_msg(msg);
+                    Some(cmd) = self.cmd_rx.recv() => {
+                        let force_redraw = matches!(cmd, AppCommand::ForceRedraw);
+                        self.handle_cmd(cmd);
                         if self.should_redraw || force_redraw {
                             if force_redraw {
                                 terminal.clear()?;
@@ -354,6 +365,9 @@ impl App {
                             terminal.draw(|frame| self.render(frame))?;
                             self.should_redraw = false;
                         }
+                    },
+                    Some(event) = self.event_rx.recv() => {
+                        self.dispatch_app_event(&event);
                     },
                     _ = sigint.recv() => {
                         self.should_quit = true;
@@ -375,6 +389,7 @@ impl App {
                 tokio::select! {
                     _ = interval.tick() => {
                         self.prune_toast();
+                        self.process_widget_self_events();
                         terminal.draw(|frame| self.render(frame))?;
                         // if self.should_redraw {
                         //     terminal.draw(|frame| self.render(frame))?;
@@ -386,9 +401,9 @@ impl App {
                             terminal.draw(|frame| self.render(frame))?;
                         }
                     },
-                    Some(msg) = self.env.rx().recv() => {
-                        let force_redraw = matches!(msg, env::Message::ForceRedraw);
-                        self.handle_msg(msg);
+                    Some(cmd) = self.cmd_rx.recv() => {
+                        let force_redraw = matches!(cmd, AppCommand::ForceRedraw);
+                        self.handle_cmd(cmd);
                         if self.should_redraw || force_redraw {
                             if force_redraw {
                                 terminal.clear()?;
@@ -396,6 +411,9 @@ impl App {
                             terminal.draw(|frame| self.render(frame))?;
                             self.should_redraw = false;
                         }
+                    },
+                    Some(event) = self.event_rx.recv() => {
+                        self.dispatch_app_event(&event);
                     },
                 }
             }
@@ -413,7 +431,11 @@ impl App {
         };
         let app_help = if self.popup.is_some() {
             App::HELP_WITH_POPUP
-        } else if self.widgets.last().is_some_and(|w| w.suppress_global_help()) {
+        } else if self
+            .widgets
+            .last()
+            .is_some_and(|w| w.suppress_global_help())
+        {
             &[]
         } else if self.widget_declares_esc() {
             App::HELP_WITHOUT_POPUP_NO_ESC
@@ -461,10 +483,10 @@ impl App {
             frame.render_widget(Clear, popup_area);
             popup.render(frame, popup_area, &theme);
         }
-        if self.popup.is_none() {
-            if let Some(toast) = self.toast.as_ref() {
-                self.render_toast(frame, body_area, footer_area, &theme, toast);
-            }
+        if self.popup.is_none()
+            && let Some(toast) = self.toast.as_ref()
+        {
+            self.render_toast(frame, body_area, footer_area, &theme, toast);
         }
         help::render(&all_help, frame, footer_area, &theme, modifiers, help_mode);
         let duration = start.elapsed();
@@ -480,7 +502,9 @@ impl App {
 
     fn handle_event(&mut self, event: &Event) -> bool {
         if let Some(key) = event.as_key_press_event()
-            && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            && key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
         {
             self.should_quit = true;
@@ -527,13 +551,13 @@ impl App {
         }
 
         if let Some(popup) = self.popup.as_ref()
-            && popup.handle_event(self.env.tx(), event)
+            && popup.handle_event(self.make_ctx(popup.as_ref()), event)
         {
             return true;
         }
 
         if let Some(widget) = self.widgets.last()
-            && widget.handle_event(self.env.tx(), event)
+            && widget.handle_event(self.make_ctx(widget.as_ref()), event)
         {
             return true;
         }
@@ -541,13 +565,21 @@ impl App {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Char('h') => {
-                    if self.widgets.last().is_some_and(|w| w.suppress_global_help()) {
+                    if self
+                        .widgets
+                        .last()
+                        .is_some_and(|w| w.suppress_global_help())
+                    {
                         return true;
                     }
                     self.popup = Some(Arc::new(help::Widget::new(
                         self.make_help(),
                         self.modifiers.clone(),
                         self.help_mode.clone(),
+                        self.widgets
+                            .last()
+                            .map(|w| w.id())
+                            .unwrap_or_else(env::WidgetId::app),
                     )));
                 }
                 KeyCode::Esc => {
@@ -583,43 +615,109 @@ impl App {
         entries.iter().any(entry_declares_esc)
     }
 
-    fn handle_msg(&mut self, msg: env::Message) {
-        match msg {
-            env::Message::PushWidget(widget) => {
-                widget.start(self.env.tx());
+    fn make_ctx(&self, widget: &dyn crate::widgets::Widget) -> crate::env::WidgetCtx {
+        widget.inner().ctx(self.bus.clone())
+    }
+
+    fn process_widget_self_events(&mut self) {
+        for widget in &self.widgets {
+            let ctx = self.make_ctx(widget.as_ref());
+            for event in widget.inner().drain_self_events() {
+                widget.on_self_event(ctx.clone(), &event);
+            }
+        }
+        if let Some(popup) = self.popup.as_ref() {
+            let ctx = self.make_ctx(popup.as_ref());
+            for event in popup.inner().drain_self_events() {
+                popup.on_self_event(ctx.clone(), &event);
+            }
+        }
+    }
+
+    fn dispatch_app_event(&mut self, event: &AppEvent) {
+        if let Some(widget_event) = event.payload::<WidgetEvent>() {
+            match widget_event {
+                WidgetEvent::Created { id, parent } => {
+                    tracing::debug!(
+                        source = %event.source.as_str(),
+                        widget_id = %id.as_str(),
+                        parent = %parent.as_str(),
+                        "widget_created"
+                    );
+                }
+                WidgetEvent::Started { id } => {
+                    tracing::debug!(
+                        source = %event.source.as_str(),
+                        widget_id = %id.as_str(),
+                        "widget_started"
+                    );
+                }
+                WidgetEvent::Closed { id } => {
+                    tracing::debug!(
+                        source = %event.source.as_str(),
+                        widget_id = %id.as_str(),
+                        "widget_closed"
+                    );
+                }
+            }
+        }
+        for widget in &self.widgets {
+            let ctx = self.make_ctx(widget.as_ref());
+            widget.on_app_event(ctx, event);
+        }
+        if let Some(popup) = self.popup.as_ref() {
+            let ctx = self.make_ctx(popup.as_ref());
+            popup.on_app_event(ctx, event);
+        }
+    }
+
+    fn handle_cmd(&mut self, cmd: AppCommand) {
+        match cmd {
+            AppCommand::PushWidget(widget) => {
+                let ctx = self.make_ctx(widget.as_ref());
+                ctx.emit_self(WidgetEvent::Started { id: widget.id() });
+                ctx.broadcast_event(WidgetEvent::Created {
+                    id: widget.id(),
+                    parent: ctx.parent.clone(),
+                });
+                widget.start(ctx);
                 self.widgets.push(widget);
                 self.should_redraw = true;
             }
-            env::Message::PopWidget => {
-                self.widgets.pop();
+            AppCommand::PopWidget => {
+                let popped = self.widgets.pop();
+                if let Some(widget) = popped.as_ref() {
+                    let ctx = self.make_ctx(widget.as_ref());
+                    ctx.broadcast_event(WidgetEvent::Closed { id: widget.id() });
+                }
                 if self.widgets.is_empty() {
                     self.should_quit = true;
                 } else {
                     self.should_redraw = true;
                 }
             }
-            env::Message::SetPopup(popup) => {
+            AppCommand::SetPopup(popup) => {
                 if self.popup.is_some() {
                     panic!("popup is already set");
                 }
                 self.popup = Some(popup);
                 self.should_redraw = true;
             }
-            env::Message::DismissPopup => {
+            AppCommand::DismissPopup => {
                 if self.popup.is_none() {
                     panic!("popup is not set");
                 }
                 self.popup = None;
                 self.should_redraw = true;
             }
-            env::Message::ShowToast(toast) => {
+            AppCommand::ShowToast(toast) => {
                 self.toast = Some(ToastState::from(toast));
                 self.should_redraw = true;
             }
-            env::Message::Invalidate => {
+            AppCommand::Invalidate => {
                 self.should_redraw = true;
             }
-            env::Message::ForceRedraw => {
+            AppCommand::ForceRedraw => {
                 self.should_redraw = true;
             }
         }
@@ -635,7 +733,9 @@ impl App {
     ) {
         let message = toast.message.as_str();
         let text_width = message.width() as u16;
-        let width = (text_width + 6).min(body_area.width.saturating_sub(2)).max(20);
+        let width = (text_width + 6)
+            .min(body_area.width.saturating_sub(2))
+            .max(20);
         let height = 3u16;
         let x = body_area.x + body_area.width.saturating_sub(width + 1);
         let y = footer_area.y.saturating_sub(height + 1);
@@ -658,11 +758,11 @@ impl App {
     }
 
     fn prune_toast(&mut self) {
-        if let Some(toast) = self.toast.as_ref() {
-            if toast.expires_at <= Instant::now() {
-                self.toast = None;
-                self.should_redraw = true;
-            }
+        if let Some(toast) = self.toast.as_ref()
+            && toast.expires_at <= Instant::now()
+        {
+            self.toast = None;
+            self.should_redraw = true;
         }
     }
 }
@@ -701,7 +801,11 @@ fn entry_declares_esc(entry: &help::Entry<'_>) -> bool {
     if entry.keys.to_ascii_lowercase().contains("esc") {
         return true;
     }
-    for variant in [entry.ctrl.as_ref(), entry.shift.as_ref(), entry.alt.as_ref()] {
+    for variant in [
+        entry.ctrl.as_ref(),
+        entry.shift.as_ref(),
+        entry.alt.as_ref(),
+    ] {
         if let Some(variant) = variant
             && let Some(keys) = variant.keys.as_ref()
             && keys.to_ascii_lowercase().contains("esc")

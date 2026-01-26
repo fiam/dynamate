@@ -12,13 +12,19 @@ use crate::{
 };
 
 pub struct ErrorPopup {
+    inner: std::sync::Arc<widgets::WidgetInner>,
     title: String,
     message: String,
 }
 
 impl ErrorPopup {
-    pub fn new(title: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        message: impl Into<String>,
+        parent: crate::env::WidgetId,
+    ) -> Self {
         Self {
+            inner: std::sync::Arc::new(widgets::WidgetInner::new::<Self>(parent)),
             title: title.into(),
             message: message.into(),
         }
@@ -26,6 +32,10 @@ impl ErrorPopup {
 }
 
 impl widgets::Widget for ErrorPopup {
+    fn inner(&self) -> &widgets::WidgetInner {
+        self.inner.as_ref()
+    }
+
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         fill_bg(frame.buffer_mut(), area, theme.panel_bg());
         let title = Line::styled(

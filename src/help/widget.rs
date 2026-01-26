@@ -10,12 +10,14 @@ use ratatui::{
 };
 
 use crate::{
+    env::WidgetId,
     help::{Entry, ModDisplay},
     util::{fill_bg, pad},
-    widgets::{EnvHandle, Popup, theme::Theme},
+    widgets::{Popup, WidgetInner, theme::Theme},
 };
 
 pub struct Widget {
+    inner: Arc<WidgetInner>,
     entries: Vec<Entry<'static>>,
     modifiers: Arc<RwLock<KeyModifiers>>,
     mode: Arc<RwLock<ModDisplay>>,
@@ -26,8 +28,10 @@ impl Widget {
         entries: Vec<&Entry<'a>>,
         modifiers: Arc<RwLock<KeyModifiers>>,
         mode: Arc<RwLock<ModDisplay>>,
+        parent: WidgetId,
     ) -> Self {
         Self {
+            inner: Arc::new(WidgetInner::new::<Self>(parent)),
             entries: entries.into_iter().map(|e| e.to_owned_entry()).collect(),
             modifiers,
             mode,
@@ -36,6 +40,10 @@ impl Widget {
 }
 
 impl crate::widgets::Widget for Widget {
+    fn inner(&self) -> &WidgetInner {
+        self.inner.as_ref()
+    }
+
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let buf = frame.buffer_mut();
         fill_bg(buf, area, theme.panel_bg());
@@ -110,11 +118,11 @@ impl crate::widgets::Widget for Widget {
         ratatui::widgets::Widget::render(table, inner, buf);
     }
 
-    fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
+    fn handle_event(&self, ctx: crate::env::WidgetCtx, event: &Event) -> bool {
         if let Some(key) = event.as_key_press_event()
             && let KeyCode::Char('h') = key.code
         {
-            env.dismiss_popup();
+            ctx.dismiss_popup();
             return true;
         }
         false

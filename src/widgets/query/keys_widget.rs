@@ -15,11 +15,12 @@ use ratatui::{
 use crate::{
     help,
     util::{fill_bg, pad},
-    widgets::{EnvHandle, Popup, theme},
+    widgets::{Popup, WidgetInner, theme},
 };
 
 #[derive(Clone)]
 pub struct KeysWidget {
+    inner: Arc<WidgetInner>,
     on_event: Arc<dyn Fn(Event) + Send + Sync + 'static>,
     state: Arc<RwLock<KeysWidgetState>>,
 }
@@ -77,13 +78,18 @@ impl KeysWidget {
             alt: None,
         },
     ];
-    pub fn new(keys: &[Key], on_event: impl Fn(Event) + Send + Sync + 'static) -> Self {
+    pub fn new(
+        keys: &[Key],
+        on_event: impl Fn(Event) + Send + Sync + 'static,
+        parent: crate::env::WidgetId,
+    ) -> Self {
         let mut state = KeysWidgetState {
             keys: keys.to_vec(),
             ..KeysWidgetState::default()
         };
         state.table_state.select(Some(0));
         Self {
+            inner: Arc::new(WidgetInner::new::<Self>(parent)),
             state: Arc::new(RwLock::new(state)),
             on_event: Arc::new(on_event),
         }
@@ -106,6 +112,10 @@ impl KeysWidget {
 }
 
 impl crate::widgets::Widget for KeysWidget {
+    fn inner(&self) -> &WidgetInner {
+        self.inner.as_ref()
+    }
+
     fn help(&self) -> Option<&[help::Entry<'_>]> {
         Some(Self::HELP)
     }
@@ -163,7 +173,7 @@ impl crate::widgets::Widget for KeysWidget {
         );
     }
 
-    fn handle_event(&self, _env: EnvHandle, event: &crossterm::event::Event) -> bool {
+    fn handle_event(&self, _ctx: crate::env::WidgetCtx, event: &crossterm::event::Event) -> bool {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Down => {

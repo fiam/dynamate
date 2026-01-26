@@ -1,5 +1,5 @@
-use std::{borrow::Cow, time::Duration};
 use std::sync::Arc;
+use std::{borrow::Cow, time::Duration};
 
 use aws_sdk_dynamodb::Client;
 use crossterm::event::{Event, KeyCode, KeyModifiers};
@@ -17,11 +17,12 @@ use crate::{
     env::{Toast, ToastKind},
     help,
     util::pad,
-    widgets::{EnvHandle, QueryWidget, error::ErrorPopup, theme::Theme},
+    widgets::{QueryWidget, WidgetInner, error::ErrorPopup, theme::Theme},
 };
 
 #[derive(Clone)]
 pub struct TablePickerWidget {
+    inner: Arc<WidgetInner>,
     client: Arc<Client>,
     state: Arc<std::sync::RwLock<TablePickerState>>,
 }
@@ -251,16 +252,17 @@ impl TablePickerWidget {
         },
     ];
 
-    pub fn new(client: Arc<Client>) -> Self {
+    pub fn new(client: Arc<Client>, parent: crate::env::WidgetId) -> Self {
         Self {
+            inner: Arc::new(WidgetInner::new::<Self>(parent)),
             client,
             state: Arc::new(std::sync::RwLock::new(TablePickerState::default())),
         }
     }
 
-    async fn load(self, env: EnvHandle) {
+    async fn load(self, ctx: crate::env::WidgetCtx) {
         self.set_loading_state(LoadingState::Loading);
-        env.invalidate();
+        ctx.invalidate();
 
         let result = self.fetch_tables().await;
         let mut state = self.state.write().unwrap();
@@ -275,19 +277,19 @@ impl TablePickerWidget {
                 let is_empty = state.tables.is_empty();
                 drop(state);
                 if is_empty {
-                    env.set_popup(Arc::new(ErrorPopup::new("Error", err)));
+                    ctx.set_popup(Arc::new(ErrorPopup::new("Error", err, self.inner.id())));
                 } else {
-                    env.show_toast(Toast {
+                    ctx.show_toast(Toast {
                         message: err,
                         kind: ToastKind::Error,
                         duration: Duration::from_secs(4),
                     });
                 }
-                env.invalidate();
+                ctx.invalidate();
                 return;
             }
         }
-        env.invalidate();
+        ctx.invalidate();
     }
 
     async fn fetch_tables(&self) -> Result<Vec<String>, String> {
@@ -344,7 +346,7 @@ impl TablePickerWidget {
         state.list_state.select(Some(next));
     }
 
-    fn handle_selection(&self, env: EnvHandle) -> bool {
+    fn handle_selection(&self, ctx: crate::env::WidgetCtx) -> bool {
         let selected = {
             self.state
                 .read()
@@ -353,8 +355,12 @@ impl TablePickerWidget {
                 .map(str::to_string)
         };
         if let Some(table_name) = selected {
-            let widget = Arc::new(QueryWidget::new(self.client.clone(), &table_name));
-            env.push_widget(widget);
+            let widget = Arc::new(QueryWidget::new(
+                self.client.clone(),
+                &table_name,
+                self.inner.id(),
+            ));
+            ctx.push_widget(widget);
             return true;
         }
         false
@@ -362,9 +368,13 @@ impl TablePickerWidget {
 }
 
 impl crate::widgets::Widget for TablePickerWidget {
-    fn start(&self, env: EnvHandle) {
+    fn inner(&self) -> &WidgetInner {
+        self.inner.as_ref()
+    }
+
+    fn start(&self, ctx: crate::env::WidgetCtx) {
         let this = self.clone();
-        tokio::spawn(this.load(env));
+        tokio::spawn(this.load(ctx));
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -456,7 +466,7 @@ impl crate::widgets::Widget for TablePickerWidget {
         }
     }
 
-    fn handle_event(&self, env: EnvHandle, event: &Event) -> bool {
+    fn handle_event(&self, ctx: crate::env::WidgetCtx, event: &Event) -> bool {
         let filter_active = self.state.read().unwrap().filter.is_active();
         let filter_applied = !self.state.read().unwrap().filter.value.is_empty();
         if filter_active {
@@ -475,7 +485,7 @@ impl crate::widgets::Widget for TablePickerWidget {
                     return true;
                 }
                 KeyCode::Enter if !filter_active => {
-                    return self.handle_selection(env);
+                    return self.handle_selection(ctx);
                 }
                 KeyCode::Esc if !filter_active && filter_applied => {
                     let mut state = self.state.write().unwrap();
@@ -484,7 +494,7 @@ impl crate::widgets::Widget for TablePickerWidget {
                     return true;
                 }
                 KeyCode::Esc if !filter_active => {
-                    env.pop_widget();
+                    ctx.pop_widget();
                     return true;
                 }
                 KeyCode::Char('j') | KeyCode::Down => {

@@ -1,51 +1,90 @@
-use std::sync::Arc;
+use std::any::type_name;
 
 use crossterm::event::Event;
+use rand::{Rng, distributions::Alphanumeric};
 use ratatui::{Frame, layout::Rect};
 use theme::Theme;
 
+pub mod error;
 mod query;
 mod table_picker;
-pub mod error;
 pub mod theme;
 
 pub use query::QueryWidget;
 pub use table_picker::TablePickerWidget;
 
+use crate::env::{AppBus, AppEvent, WidgetCtx, WidgetId};
 use crate::help;
 
-pub trait Env {
-    fn invalidate(&self);
-    fn force_redraw(&self);
-    fn push_widget(&self, widget: Arc<dyn Widget>);
-    fn pop_widget(&self);
-    fn set_popup(&self, popup: Arc<dyn Popup>);
-    fn dismiss_popup(&self);
-    fn show_toast(&self, toast: crate::env::Toast);
+pub struct WidgetInner {
+    id: WidgetId,
+    parent: WidgetId,
+    self_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    self_rx: std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
 }
 
-pub type EnvHandle = Arc<dyn Env + Send + Sync>;
-
-pub trait Widget: Send + Sync
-// where
-//     for<'a> &'a Self: ratatui::widgets::Widget, // <-- “references to this type implement ratatui::Widget”
-{
-    /// Start any background work (make it &self for Arc; use interior mutability for state)
-    fn start(&self, _env: EnvHandle) {
-        // Start any background tasks or initialization here
+impl WidgetInner {
+    pub fn new<T: 'static>(parent: WidgetId) -> Self {
+        let type_name = type_basename(type_name::<T>());
+        let suffix: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect();
+        let (self_tx, self_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        Self {
+            id: WidgetId::new(type_name, &suffix),
+            parent,
+            self_tx,
+            self_rx: std::sync::Mutex::new(self_rx),
+        }
     }
+
+    pub fn id(&self) -> WidgetId {
+        self.id.clone()
+    }
+
+    pub fn parent(&self) -> WidgetId {
+        self.parent.clone()
+    }
+
+    pub fn ctx(&self, bus: AppBus) -> WidgetCtx {
+        WidgetCtx::new(self.id.clone(), self.parent(), bus, self.self_tx.clone())
+    }
+
+    pub fn drain_self_events(&self) -> Vec<AppEvent> {
+        let mut rx = self.self_rx.lock().unwrap();
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+}
+
+fn type_basename(full: &str) -> &str {
+    full.rsplit("::").next().unwrap_or(full)
+}
+
+pub trait Widget: Send + Sync {
+    fn inner(&self) -> &WidgetInner;
+
+    fn id(&self) -> WidgetId {
+        self.inner().id()
+    }
+
+    /// Start any background work (use interior mutability for state).
+    fn start(&self, _ctx: WidgetCtx) {}
 
     /// Render the widget's content.
-    fn render(&self, _frame: &mut Frame, _area: Rect, _theme: &Theme) {
-        //frame.render_widget(self, area);
-    }
+    fn render(&self, _frame: &mut Frame, _area: Rect, _theme: &Theme) {}
 
     /// Handle input events. Returns true if the event was handled.
-    fn handle_event(&self, _env: EnvHandle, _event: &Event) -> bool {
+    fn handle_event(&self, _ctx: WidgetCtx, _event: &Event) -> bool {
         false
     }
 
-    /// Optional help to display at the bottom while this widget is active
+    /// Optional help to display at the bottom while this widget is active.
     fn help(&self) -> Option<&[help::Entry<'_>]> {
         None
     }
@@ -54,6 +93,12 @@ pub trait Widget: Send + Sync
     fn suppress_global_help(&self) -> bool {
         false
     }
+
+    /// Receive broadcast events sent by other widgets.
+    fn on_app_event(&self, _ctx: WidgetCtx, _event: &AppEvent) {}
+
+    /// Receive events emitted by this widget itself.
+    fn on_self_event(&self, _ctx: WidgetCtx, _event: &AppEvent) {}
 }
 
 pub trait Popup: Widget {

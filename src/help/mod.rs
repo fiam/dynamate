@@ -53,7 +53,10 @@ impl<'a> Entry<'a> {
             short: Cow::Owned(self.short.as_ref().to_owned()),
             long: Cow::Owned(self.long.as_ref().to_owned()),
             ctrl: self.ctrl.as_ref().map(|variant| Variant {
-                keys: variant.keys.as_ref().map(|value| Cow::Owned(value.as_ref().to_owned())),
+                keys: variant
+                    .keys
+                    .as_ref()
+                    .map(|value| Cow::Owned(value.as_ref().to_owned())),
                 short: variant
                     .short
                     .as_ref()
@@ -64,7 +67,10 @@ impl<'a> Entry<'a> {
                     .map(|value| Cow::Owned(value.as_ref().to_owned())),
             }),
             shift: self.shift.as_ref().map(|variant| Variant {
-                keys: variant.keys.as_ref().map(|value| Cow::Owned(value.as_ref().to_owned())),
+                keys: variant
+                    .keys
+                    .as_ref()
+                    .map(|value| Cow::Owned(value.as_ref().to_owned())),
                 short: variant
                     .short
                     .as_ref()
@@ -75,7 +81,10 @@ impl<'a> Entry<'a> {
                     .map(|value| Cow::Owned(value.as_ref().to_owned())),
             }),
             alt: self.alt.as_ref().map(|variant| Variant {
-                keys: variant.keys.as_ref().map(|value| Cow::Owned(value.as_ref().to_owned())),
+                keys: variant
+                    .keys
+                    .as_ref()
+                    .map(|value| Cow::Owned(value.as_ref().to_owned())),
                 short: variant
                     .short
                     .as_ref()
@@ -124,17 +133,17 @@ impl<'a> Entry<'a> {
                     long = value.as_ref();
                 }
             }
-        } else if modifiers.contains(KeyModifiers::ALT) {
-            if let Some(variant) = self.alt.as_ref() {
-                if let Some(value) = variant.keys.as_ref() {
-                    keys = value.as_ref();
-                }
-                if let Some(value) = variant.short.as_ref() {
-                    short = value.as_ref();
-                }
-                if let Some(value) = variant.long.as_ref() {
-                    long = value.as_ref();
-                }
+        } else if modifiers.contains(KeyModifiers::ALT)
+            && let Some(variant) = self.alt.as_ref()
+        {
+            if let Some(value) = variant.keys.as_ref() {
+                keys = value.as_ref();
+            }
+            if let Some(value) = variant.short.as_ref() {
+                short = value.as_ref();
+            }
+            if let Some(value) = variant.long.as_ref() {
+                long = value.as_ref();
             }
         }
 

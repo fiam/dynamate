@@ -1,11 +1,29 @@
-use std::{sync::Arc, time::Duration};
+use std::any::Any;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::widgets::{Popup, Widget};
 
-pub enum Message {
-    // Invalidate the current frame and request a redraw
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WidgetId(String);
+
+impl WidgetId {
+    pub fn new(type_name: &str, suffix: &str) -> Self {
+        Self(format!("{type_name}-{suffix}"))
+    }
+
+    pub fn app() -> Self {
+        Self("app".to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+pub enum AppCommand {
     Invalidate,
     ForceRedraw,
     PushWidget(Arc<dyn Widget>),
@@ -13,6 +31,32 @@ pub enum Message {
     SetPopup(Arc<dyn Popup>),
     DismissPopup,
     ShowToast(Toast),
+}
+
+#[derive(Clone)]
+pub struct AppEvent {
+    pub source: WidgetId,
+    pub payload: Arc<dyn Any + Send + Sync>,
+}
+
+impl AppEvent {
+    pub fn new<T: Any + Send + Sync>(source: WidgetId, payload: T) -> Self {
+        Self {
+            source,
+            payload: Arc::new(payload),
+        }
+    }
+
+    pub fn payload<T: Any>(&self) -> Option<&T> {
+        self.payload.as_ref().downcast_ref::<T>()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum WidgetEvent {
+    Created { id: WidgetId, parent: WidgetId },
+    Started { id: WidgetId },
+    Closed { id: WidgetId },
 }
 
 #[allow(dead_code)]
@@ -30,70 +74,91 @@ pub struct Toast {
     pub duration: Duration,
 }
 
-pub struct Env {
-    tx: Arc<EnvTx>,
-    rx: UnboundedReceiver<Message>,
+#[derive(Clone)]
+pub struct AppBus {
+    cmd_tx: UnboundedSender<AppCommand>,
+    event_tx: UnboundedSender<AppEvent>,
 }
 
-struct EnvTx {
-    tx: UnboundedSender<Message>,
+pub struct AppBusRx {
+    pub cmd_rx: UnboundedReceiver<AppCommand>,
+    pub event_rx: UnboundedReceiver<AppEvent>,
 }
 
-impl EnvTx {
-    fn new(tx: UnboundedSender<Message>) -> Self {
-        EnvTx { tx }
+impl AppBus {
+    pub fn new() -> (Self, AppBusRx) {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<AppCommand>();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        (Self { cmd_tx, event_tx }, AppBusRx { cmd_rx, event_rx })
     }
 
-    fn send(&self, msg: Message) {
-        let _ = self.tx.send(msg);
+    pub fn command(&self, cmd: AppCommand) {
+        let _ = self.cmd_tx.send(cmd);
+    }
+
+    pub fn broadcast(&self, event: AppEvent) {
+        let _ = self.event_tx.send(event);
     }
 }
 
-impl crate::widgets::Env for EnvTx {
-    fn invalidate(&self) {
-        self.send(Message::Invalidate);
-    }
-
-    fn force_redraw(&self) {
-        self.send(Message::ForceRedraw);
-    }
-
-    fn push_widget(&self, widget: Arc<dyn Widget>) {
-        self.send(Message::PushWidget(widget));
-    }
-
-    fn pop_widget(&self) {
-        self.send(Message::PopWidget);
-    }
-
-    fn set_popup(&self, popup: Arc<dyn Popup>) {
-        self.send(Message::SetPopup(popup));
-    }
-
-    fn dismiss_popup(&self) {
-        self.send(Message::DismissPopup);
-    }
-
-    fn show_toast(&self, toast: Toast) {
-        self.send(Message::ShowToast(toast));
-    }
-
+#[derive(Clone)]
+pub struct WidgetCtx {
+    pub id: WidgetId,
+    pub parent: WidgetId,
+    bus: AppBus,
+    self_tx: UnboundedSender<AppEvent>,
 }
 
-impl Env {
-    pub fn new() -> Self {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
-        Env {
-            tx: Arc::new(EnvTx::new(tx)),
-            rx,
+impl WidgetCtx {
+    pub(crate) fn new(
+        id: WidgetId,
+        parent: WidgetId,
+        bus: AppBus,
+        self_tx: UnboundedSender<AppEvent>,
+    ) -> Self {
+        Self {
+            id,
+            parent,
+            bus,
+            self_tx,
         }
     }
 
-    pub fn tx(&self) -> Arc<dyn crate::widgets::Env + Send + Sync> {
-        self.tx.clone()
+    pub fn invalidate(&self) {
+        self.bus.command(AppCommand::Invalidate);
     }
 
-    pub fn rx(&mut self) -> &mut UnboundedReceiver<Message> {
-        &mut self.rx
+    pub fn force_redraw(&self) {
+        self.bus.command(AppCommand::ForceRedraw);
+    }
+
+    pub fn push_widget(&self, widget: Arc<dyn Widget>) {
+        self.bus.command(AppCommand::PushWidget(widget));
+    }
+
+    pub fn pop_widget(&self) {
+        self.bus.command(AppCommand::PopWidget);
+    }
+
+    pub fn set_popup(&self, popup: Arc<dyn Popup>) {
+        self.bus.command(AppCommand::SetPopup(popup));
+    }
+
+    pub fn dismiss_popup(&self) {
+        self.bus.command(AppCommand::DismissPopup);
+    }
+
+    pub fn show_toast(&self, toast: Toast) {
+        self.bus.command(AppCommand::ShowToast(toast));
+    }
+
+    pub fn emit_self<T: Any + Send + Sync>(&self, payload: T) {
+        let event = AppEvent::new(self.id.clone(), payload);
+        let _ = self.self_tx.send(event);
+    }
+
+    pub fn broadcast_event<T: Any + Send + Sync>(&self, payload: T) {
+        let event = AppEvent::new(self.id.clone(), payload);
+        self.bus.broadcast(event);
     }
 }
