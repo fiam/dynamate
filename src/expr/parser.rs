@@ -294,7 +294,7 @@ pub fn parse_path_operand(lexer: &mut Lexer) -> Result<Operand, ParseError> {
 
 pub fn parse_value_operand(lexer: &mut Lexer) -> Result<Operand, ParseError> {
     match lexer.next_token()? {
-        Token::Identifier(name) => Ok(Operand::Value(name)),
+        Token::Identifier(name) => Ok(infer_identifier_operand(&name)),
         Token::Path(name) => Ok(Operand::Path(name)),
         Token::String(s) => Ok(Operand::Value(s)),
         Token::Number(n) => Ok(Operand::Number(n)),
@@ -305,4 +305,33 @@ pub fn parse_value_operand(lexer: &mut Lexer) -> Result<Operand, ParseError> {
             position: lexer.position,
         }),
     }
+}
+
+fn infer_identifier_operand(token: &str) -> Operand {
+    let lower = token.to_ascii_lowercase();
+    if lower == "true" {
+        return Operand::Boolean(true);
+    }
+    if lower == "false" {
+        return Operand::Boolean(false);
+    }
+    if lower == "null" {
+        return Operand::Null;
+    }
+    if let Some(num) = parse_numeric_identifier(token) {
+        return Operand::Number(num);
+    }
+    Operand::Value(token.to_string())
+}
+
+fn parse_numeric_identifier(token: &str) -> Option<f64> {
+    if !token.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if !token.chars().all(|c| {
+        c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E')
+    }) {
+        return None;
+    }
+    token.parse::<f64>().ok()
 }
