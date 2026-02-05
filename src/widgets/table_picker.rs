@@ -1,15 +1,20 @@
-use std::cell::RefCell;
-use std::{borrow::Cow, time::Duration};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, time::Duration};
 
 use aws_sdk_dynamodb::Client;
+use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
+use aws_sdk_dynamodb::operation::RequestId;
+use aws_sdk_dynamodb::types::{
+    AttributeValue, DeleteRequest, KeySchemaElement, KeyType, TableDescription, WriteRequest,
+};
 use crossterm::event::{Event, KeyCode, KeyModifiers};
+use humansize::{format_size, BINARY};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     prelude::Widget,
     style::Style,
-    text::{Line, Span},
-    widgets::{Block, HighlightSpacing, List, ListItem, ListState, Paragraph, StatefulWidget},
+    text::{Line, Span, Text},
+    widgets::{Block, Cell, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -17,7 +22,13 @@ use crate::{
     env::{Toast, ToastKind},
     help,
     util::pad,
-    widgets::{QueryWidget, WidgetInner, error::ErrorPopup, theme::Theme},
+    widgets::{
+        QueryWidget,
+        WidgetInner,
+        confirm::{ConfirmAction, ConfirmPopup},
+        error::ErrorPopup,
+        theme::Theme,
+    },
 };
 
 pub struct TablePickerWidget {
@@ -26,13 +37,53 @@ pub struct TablePickerWidget {
     state: RefCell<TablePickerState>,
 }
 
+#[derive(Debug, Clone)]
+struct TableMeta {
+    status: String,
+    item_count: Option<i64>,
+    size_bytes: Option<i64>,
+    gsi_count: usize,
+    lsi_count: usize,
+}
+
+impl TableMeta {
+    fn placeholder() -> Self {
+        Self {
+            status: "unknown".to_string(),
+            item_count: None,
+            size_bytes: None,
+            gsi_count: 0,
+            lsi_count: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TableEntry {
+    name: String,
+    meta: TableMeta,
+}
+
+impl TableEntry {
+    fn new(name: String, meta: TableMeta) -> Self {
+        Self { name, meta }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum LoadingState {
     #[default]
     Idle,
     Loading,
     Loaded,
+    Busy(String),
     Error(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TableAction {
+    Delete,
+    Purge,
 }
 
 #[derive(Debug, Default)]
@@ -126,52 +177,121 @@ impl FilterInput {
 #[derive(Debug, Default)]
 struct TablePickerState {
     loading_state: LoadingState,
-    tables: Vec<String>,
-    filtered_tables: Vec<String>,
-    list_state: ListState,
+    tables: Vec<TableEntry>,
+    filtered_indices: Vec<usize>,
+    table_state: TableState,
     filter: FilterInput,
+    last_render_capacity: usize,
+}
+
+struct TableListPayload {
+    tables: Vec<TableEntry>,
+    warnings: Vec<String>,
 }
 
 struct TableListEvent {
-    result: Result<Vec<String>, String>,
+    result: Result<TableListPayload, String>,
+}
+
+struct DeleteTableRequest {
+    table_name: String,
+}
+
+struct DeleteTableEvent {
+    table_name: String,
+    result: Result<(), String>,
+}
+
+struct PurgeTableRequest {
+    table_name: String,
+}
+
+struct PurgeTableEvent {
+    result: Result<usize, String>,
 }
 
 impl TablePickerState {
     fn apply_filter(&mut self) {
         let filter = self.filter.value.trim().to_lowercase();
-        let current = self.selected_table_name().map(|name| name.to_string());
+        let current = self
+            .table_state
+            .selected()
+            .and_then(|idx| self.filtered_indices.get(idx).copied());
+
         if filter.is_empty() {
-            self.filtered_tables.clone_from(&self.tables);
+            self.filtered_indices = (0..self.tables.len()).collect();
         } else {
-            self.filtered_tables = self
+            self.filtered_indices = self
                 .tables
                 .iter()
-                .filter(|name| name.to_lowercase().contains(&filter))
-                .cloned()
+                .enumerate()
+                .filter(|(_, entry)| entry.name.to_lowercase().contains(&filter))
+                .map(|(idx, _)| idx)
                 .collect();
+        }
+
+        if self.filtered_indices.is_empty() {
+            self.table_state.select(None);
+            *self.table_state.offset_mut() = 0;
+            return;
         }
 
         if let Some(current) = current
             && let Some(index) = self
-                .filtered_tables
+                .filtered_indices
                 .iter()
-                .position(|name| name == &current)
+                .position(|idx| *idx == current)
         {
-            self.list_state.select(Some(index));
+            self.table_state.select(Some(index));
+            self.clamp_offset();
             return;
         }
 
-        if self.filtered_tables.is_empty() {
-            self.list_state.select(None);
-        } else {
-            self.list_state.select(Some(0));
-        }
+        self.table_state.select(Some(0));
+        self.clamp_offset();
     }
 
     fn selected_table_name(&self) -> Option<&str> {
-        self.list_state
+        self.selected_table().map(|entry| entry.name.as_str())
+    }
+
+    fn selected_table(&self) -> Option<&TableEntry> {
+        self.table_state
             .selected()
-            .and_then(|idx| self.filtered_tables.get(idx).map(String::as_str))
+            .and_then(|idx| self.filtered_indices.get(idx).copied())
+            .and_then(|idx| self.tables.get(idx))
+    }
+
+    fn clamp_offset(&mut self) {
+        let total = self.filtered_indices.len();
+        let max_rows = self.last_render_capacity.max(1);
+        if total == 0 {
+            self.table_state.select(None);
+            *self.table_state.offset_mut() = 0;
+            return;
+        }
+        let selected = match self.table_state.selected() {
+            Some(selected) if selected < total => selected,
+            Some(_) | None => {
+                let last = total.saturating_sub(1);
+                self.table_state.select(Some(last));
+                last
+            }
+        };
+        if total <= max_rows {
+            *self.table_state.offset_mut() = 0;
+            return;
+        }
+        let offset = self.table_state.offset();
+        if selected < offset {
+            *self.table_state.offset_mut() = selected;
+            return;
+        }
+        let end = offset.saturating_add(max_rows);
+        if selected >= end {
+            let new_offset = selected + 1 - max_rows;
+            *self.table_state.offset_mut() = new_offset.min(total.saturating_sub(1));
+        }
     }
 }
 
@@ -197,6 +317,22 @@ impl TablePickerWidget {
             keys: Cow::Borrowed("j/k/↑/↓"),
             short: Cow::Borrowed("move"),
             long: Cow::Borrowed("Move selection"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("^d"),
+            short: Cow::Borrowed("delete"),
+            long: Cow::Borrowed("Delete table"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("^p"),
+            short: Cow::Borrowed("purge"),
+            long: Cow::Borrowed("Purge table"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -253,6 +389,22 @@ impl TablePickerWidget {
             shift: None,
             alt: None,
         },
+        help::Entry {
+            keys: Cow::Borrowed("^d"),
+            short: Cow::Borrowed("delete"),
+            long: Cow::Borrowed("Delete table"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("^p"),
+            short: Cow::Borrowed("purge"),
+            long: Cow::Borrowed("Purge table"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
     ];
 
     pub fn new(client: Client, parent: crate::env::WidgetId) -> Self {
@@ -263,7 +415,7 @@ impl TablePickerWidget {
         }
     }
 
-    async fn fetch_tables(client: Client) -> Result<Vec<String>, String> {
+    async fn fetch_tables(client: Client) -> Result<TableListPayload, String> {
         let mut table_names = Vec::new();
         let mut last_evaluated_table_name = None;
 
@@ -283,33 +435,47 @@ impl TablePickerWidget {
         }
 
         table_names.sort();
-        Ok(table_names)
+        let mut tables = Vec::with_capacity(table_names.len());
+        let mut warnings = Vec::new();
+        for name in table_names {
+            match fetch_table_meta(&client, &name).await {
+                Ok(meta) => tables.push(TableEntry::new(name, meta)),
+                Err(err) => {
+                    warnings.push(format!("{name}: {err}"));
+                    tables.push(TableEntry::new(name, TableMeta::placeholder()));
+                }
+            }
+        }
+
+        Ok(TableListPayload { tables, warnings })
     }
 
     fn select_next(&self) {
         let mut state = self.state.borrow_mut();
-        let len = state.filtered_tables.len();
+        let len = state.filtered_indices.len();
         if len == 0 {
             return;
         }
-        let next = match state.list_state.selected() {
+        let next = match state.table_state.selected() {
             Some(index) => (index + 1).min(len - 1),
             None => 0,
         };
-        state.list_state.select(Some(next));
+        state.table_state.select(Some(next));
+        state.clamp_offset();
     }
 
     fn select_previous(&self) {
         let mut state = self.state.borrow_mut();
-        let len = state.filtered_tables.len();
+        let len = state.filtered_indices.len();
         if len == 0 {
             return;
         }
-        let next = match state.list_state.selected() {
+        let next = match state.table_state.selected() {
             Some(index) => index.saturating_sub(1),
             None => 0,
         };
-        state.list_state.select(Some(next));
+        state.table_state.select(Some(next));
+        state.clamp_offset();
     }
 
     fn handle_selection(&self, ctx: crate::env::WidgetCtx) -> bool {
@@ -330,6 +496,139 @@ impl TablePickerWidget {
         }
         false
     }
+
+    fn reload_tables(&self, ctx: crate::env::WidgetCtx) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.loading_state = LoadingState::Loading;
+        }
+        ctx.invalidate();
+        let client = self.client.clone();
+        let ctx_clone = ctx.clone();
+        tokio::spawn(async move {
+            let result = Self::fetch_tables(client).await;
+            ctx_clone.emit_self(TableListEvent { result });
+        });
+    }
+
+    fn show_error(&self, ctx: crate::env::WidgetCtx, message: &str) {
+        let is_empty = self.state.borrow().tables.is_empty();
+        if is_empty {
+            ctx.set_popup(Box::new(ErrorPopup::new("Error", message, self.inner.id())));
+        } else {
+            ctx.show_toast(Toast {
+                message: message.to_string(),
+                kind: ToastKind::Error,
+                duration: Duration::from_secs(4),
+            });
+        }
+    }
+
+    fn confirm_table_action(&self, ctx: crate::env::WidgetCtx, action: TableAction) {
+        let selected = {
+            self.state
+                .borrow()
+                .selected_table()
+                .cloned()
+        };
+        let Some(entry) = selected else {
+            self.show_error(ctx, "No table selected");
+            return;
+        };
+
+        let mut lines = vec![format!("Table={}", entry.name)];
+        if let Some(count) = entry.meta.item_count {
+            lines.push(format!("Items=~{count}"));
+        }
+        let message = lines.join("\n");
+
+        let (title, confirm_label, confirm_key) = match action {
+            TableAction::Delete => (
+                "Delete table",
+                "Delete",
+                ConfirmAction::new(
+                    KeyCode::Char('d'),
+                    KeyModifiers::CONTROL,
+                    "^d",
+                    "delete",
+                    "Delete table",
+                ),
+            ),
+            TableAction::Purge => (
+                "Purge table",
+                "Purge",
+                ConfirmAction::new(
+                    KeyCode::Char('p'),
+                    KeyModifiers::CONTROL,
+                    "^p",
+                    "purge",
+                    "Purge table",
+                ),
+            ),
+        };
+
+        let table_name = entry.name.clone();
+        let ctx_for_action = ctx.clone();
+        let popup = Box::new(ConfirmPopup::new_with_action(
+            title,
+            message,
+            confirm_label,
+            "cancel",
+            confirm_key,
+            move || match action {
+                TableAction::Delete => {
+                    ctx_for_action.emit_self(DeleteTableRequest {
+                        table_name: table_name.clone(),
+                    });
+                }
+                TableAction::Purge => {
+                    ctx_for_action.emit_self(PurgeTableRequest {
+                        table_name: table_name.clone(),
+                    });
+                }
+            },
+            self.inner.id(),
+        ));
+        ctx.set_popup(popup);
+    }
+
+    fn delete_table(&self, table_name: String, ctx: crate::env::WidgetCtx) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.loading_state = LoadingState::Busy(format!("Deleting {table_name}..."));
+        }
+        ctx.invalidate();
+        let client = self.client.clone();
+        let ctx_clone = ctx.clone();
+        tokio::spawn(async move {
+            let result = client
+                .delete_table()
+                .table_name(&table_name)
+                .send()
+                .await;
+            let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
+            ctx_clone.emit_self(DeleteTableEvent {
+                table_name,
+                result: event_result,
+            });
+        });
+    }
+
+    fn purge_table(&self, table_name: String, ctx: crate::env::WidgetCtx) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.loading_state = LoadingState::Busy(format!("Purging {table_name}..."));
+        }
+        ctx.invalidate();
+        let client = self.client.clone();
+        let ctx_clone = ctx.clone();
+        tokio::spawn(async move {
+            let result = purge_table_items(client, &table_name).await;
+            ctx_clone.emit_self(PurgeTableEvent {
+                result,
+            });
+        });
+    }
 }
 
 impl crate::widgets::Widget for TablePickerWidget {
@@ -342,17 +641,7 @@ impl crate::widgets::Widget for TablePickerWidget {
     }
 
     fn start(&self, ctx: crate::env::WidgetCtx) {
-        {
-            let mut state = self.state.borrow_mut();
-            state.loading_state = LoadingState::Loading;
-        }
-        ctx.invalidate();
-        let client = self.client.clone();
-        let ctx_clone = ctx.clone();
-        tokio::spawn(async move {
-            let result = Self::fetch_tables(client).await;
-            ctx_clone.emit_self(TableListEvent { result });
-        });
+        self.reload_tables(ctx);
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -388,10 +677,19 @@ impl crate::widgets::Widget for TablePickerWidget {
         } else {
             Line::styled("Tables", Style::default().fg(theme.text()))
         };
+
+        let total_tables = state.tables.len();
+        let filtered_tables = state.filtered_indices.len();
+        let count_label = if total_tables == filtered_tables {
+            format!("{total_tables} tables")
+        } else {
+            format!("{filtered_tables} of {total_tables} tables")
+        };
+
         let block = Block::bordered()
             .title_top(title)
             .title_bottom(Line::styled(
-                pad(format!("{} tables", state.filtered_tables.len()), 2),
+                pad(count_label, 2),
                 Style::default().fg(theme.text_muted()),
             ))
             .border_style(Style::default().fg(theme.border()))
@@ -404,6 +702,12 @@ impl crate::widgets::Widget for TablePickerWidget {
                     .block(block);
                 frame.render_widget(text, list_area);
             }
+            LoadingState::Busy(message) => {
+                let text = Paragraph::new(message.as_str())
+                    .style(Style::default().fg(theme.warning()))
+                    .block(block);
+                frame.render_widget(text, list_area);
+            }
             LoadingState::Error(_) => {
                 let text = Paragraph::new("Error")
                     .style(Style::default().fg(theme.error()))
@@ -411,36 +715,68 @@ impl crate::widgets::Widget for TablePickerWidget {
                 frame.render_widget(text, list_area);
             }
             LoadingState::Idle | LoadingState::Loaded => {
-                if state.filtered_tables.is_empty() {
+                if state.filtered_indices.is_empty() {
                     let empty = Paragraph::new("").block(block);
                     frame.render_widget(empty, list_area);
                 } else {
-                    let rows: Vec<ListItem> = state
-                        .filtered_tables
+                    let header = Row::new(vec![
+                        Cell::from("Table"),
+                        Cell::from("Status"),
+                        Cell::from(Text::from("Items").alignment(Alignment::Right)),
+                        Cell::from(Text::from("Size").alignment(Alignment::Right)),
+                        Cell::from(Text::from("Indexes").alignment(Alignment::Right)),
+                    ])
+                    .style(
+                        Style::default()
+                            .fg(theme.text_muted())
+                            .add_modifier(ratatui::style::Modifier::BOLD),
+                    );
+
+                    let rows: Vec<Row> = state
+                        .filtered_indices
                         .iter()
-                        .map(|name| {
-                            ListItem::new(Line::styled(
-                                name.clone(),
-                                Style::default().fg(theme.text()),
-                            ))
+                        .filter_map(|idx| state.tables.get(*idx))
+                        .map(|entry| {
+                            let status_style = status_style(&entry.meta.status, theme);
+                            let items = format_count(entry.meta.item_count);
+                            let size = format_size_bytes(entry.meta.size_bytes);
+                            let idx_label = format!("G{}/L{}", entry.meta.gsi_count, entry.meta.lsi_count);
+                            Row::new(vec![
+                                Cell::from(entry.name.clone()),
+                                Cell::from(entry.meta.status.clone()).style(status_style),
+                                Cell::from(Text::from(items).alignment(Alignment::Right)),
+                                Cell::from(Text::from(size).alignment(Alignment::Right)),
+                                Cell::from(Text::from(idx_label).alignment(Alignment::Right)),
+                            ])
                         })
                         .collect();
-                    let list = List::new(rows)
-                        .block(block)
-                        .highlight_symbol(">> ")
-                        .highlight_spacing(HighlightSpacing::Always)
-                        .highlight_style(
-                            Style::default()
-                                .bg(theme.selection_bg())
-                                .fg(theme.selection_fg()),
-                        );
 
-                    StatefulWidget::render(
-                        list,
-                        list_area,
-                        frame.buffer_mut(),
-                        &mut state.list_state,
+                    let inner = block.inner(list_area);
+                    let table = Table::new(
+                        rows,
+                        [
+                            Constraint::Fill(1),
+                            Constraint::Length(10),
+                            Constraint::Length(9),
+                            Constraint::Length(10),
+                            Constraint::Length(8),
+                        ],
+                    )
+                    .block(block)
+                    .header(header)
+                    .highlight_spacing(HighlightSpacing::Always)
+                    .highlight_symbol(">> ")
+                    .row_highlight_style(
+                        Style::default()
+                            .bg(theme.selection_bg())
+                            .fg(theme.selection_fg()),
                     );
+
+                    let visible_rows = inner.height.saturating_sub(1) as usize;
+                    state.last_render_capacity = visible_rows;
+                    state.clamp_offset();
+
+                    StatefulWidget::render(table, list_area, frame.buffer_mut(), &mut state.table_state);
                 }
             }
         }
@@ -468,10 +804,20 @@ impl crate::widgets::Widget for TablePickerWidget {
         if let Some(list_event) = event.payload::<TableListEvent>() {
             let mut state = self.state.borrow_mut();
             match list_event.result.as_ref() {
-                Ok(tables) => {
-                    state.tables = tables.clone();
+                Ok(payload) => {
+                    state.tables = payload.tables.clone();
                     state.apply_filter();
                     state.loading_state = LoadingState::Loaded;
+                    if !payload.warnings.is_empty() {
+                        ctx.show_toast(Toast {
+                            message: format!(
+                                "{} tables missing metadata",
+                                payload.warnings.len()
+                            ),
+                            kind: ToastKind::Warning,
+                            duration: Duration::from_secs(4),
+                        });
+                    }
                     ctx.invalidate();
                 }
                 Err(err) => {
@@ -494,14 +840,77 @@ impl crate::widgets::Widget for TablePickerWidget {
                     ctx.invalidate();
                 }
             }
+            return;
+        }
+
+        if let Some(request) = event.payload::<DeleteTableRequest>() {
+            self.delete_table(request.table_name.clone(), ctx);
+            return;
+        }
+
+        if let Some(request) = event.payload::<PurgeTableRequest>() {
+            self.purge_table(request.table_name.clone(), ctx);
+            return;
+        }
+
+        if let Some(result) = event.payload::<DeleteTableEvent>() {
+            match result.result.as_ref() {
+                Ok(()) => {
+                    ctx.show_toast(Toast {
+                        message: format!("Table {} deleted", result.table_name),
+                        kind: ToastKind::Info,
+                        duration: Duration::from_secs(3),
+                    });
+                    self.reload_tables(ctx);
+                }
+                Err(err) => {
+                    let message = format!("Failed to delete table: {err}");
+                    {
+                        let mut state = self.state.borrow_mut();
+                        state.loading_state = LoadingState::Loaded;
+                    }
+                    self.show_error(ctx.clone(), &message);
+                    ctx.invalidate();
+                }
+            }
+            return;
+        }
+
+        if let Some(result) = event.payload::<PurgeTableEvent>() {
+            match result.result.as_ref() {
+                Ok(count) => {
+                    ctx.show_toast(Toast {
+                        message: format!("Purged {count} items"),
+                        kind: ToastKind::Info,
+                        duration: Duration::from_secs(3),
+                    });
+                    self.reload_tables(ctx);
+                }
+                Err(err) => {
+                    let message = format!("Failed to purge table: {err}");
+                    {
+                        let mut state = self.state.borrow_mut();
+                        state.loading_state = LoadingState::Loaded;
+                    }
+                    self.show_error(ctx.clone(), &message);
+                    ctx.invalidate();
+                }
+            }
         }
     }
 
     fn handle_event(&self, ctx: crate::env::WidgetCtx, event: &Event) -> bool {
-        let (filter_active, filter_applied) = {
+        let (filter_active, filter_applied, busy) = {
             let state = self.state.borrow();
-            (state.filter.is_active(), !state.filter.value.is_empty())
+            (
+                state.filter.is_active(),
+                !state.filter.value.is_empty(),
+                matches!(state.loading_state, LoadingState::Busy(_)),
+            )
         };
+        if busy {
+            return true;
+        }
         if filter_active {
             let mut state = self.state.borrow_mut();
             if state.filter.handle_event(event) {
@@ -538,6 +947,14 @@ impl crate::widgets::Widget for TablePickerWidget {
                     self.select_previous();
                     return true;
                 }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.confirm_table_action(ctx, TableAction::Delete);
+                    return true;
+                }
+                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.confirm_table_action(ctx, TableAction::Purge);
+                    return true;
+                }
                 _ => {}
             }
         }
@@ -560,4 +977,195 @@ impl crate::widgets::Widget for TablePickerWidget {
     fn suppress_global_help(&self) -> bool {
         self.state.borrow().filter.is_active()
     }
+}
+
+fn format_sdk_error<E>(err: &SdkError<E>) -> String
+where
+    E: ProvideErrorMetadata + RequestId + std::error::Error + 'static,
+{
+    if let Some(service_err) = err.as_service_error() {
+        let code = service_err.code().unwrap_or("ServiceError");
+        let message = service_err.message().unwrap_or("").trim();
+        let mut summary = if message.is_empty() {
+            code.to_string()
+        } else {
+            format!("{code}: {message}")
+        };
+        if let Some(request_id) = service_err.request_id() {
+            summary.push_str(&format!(" (request id: {request_id})"));
+        }
+        return summary;
+    }
+    DisplayErrorContext(err).to_string()
+}
+
+async fn fetch_table_meta(client: &Client, table_name: &str) -> Result<TableMeta, String> {
+    let output = client
+        .describe_table()
+        .table_name(table_name)
+        .send()
+        .await
+        .map_err(|err| format_sdk_error(&err))?;
+    let table_desc = output
+        .table()
+        .ok_or_else(|| "DescribeTable: missing table".to_string())?;
+
+    let status = table_desc
+        .table_status()
+        .map(|status| status.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let item_count = table_desc.item_count();
+    let size_bytes = table_desc.table_size_bytes();
+    let gsi_count = table_desc.global_secondary_indexes().len();
+    let lsi_count = table_desc.local_secondary_indexes().len();
+
+    Ok(TableMeta {
+        status,
+        item_count,
+        size_bytes,
+        gsi_count,
+        lsi_count,
+    })
+}
+
+fn format_count(count: Option<i64>) -> String {
+    count.map(|value| value.to_string()).unwrap_or_else(|| "—".to_string())
+}
+
+fn format_size_bytes(size: Option<i64>) -> String {
+    size
+        .and_then(|value| u64::try_from(value).ok())
+        .map(|value| format_size(value, BINARY))
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn status_style(status: &str, theme: &Theme) -> Style {
+    let lower = status.to_ascii_lowercase();
+    if lower == "active" {
+        Style::default().fg(theme.success())
+    } else if lower.contains("create") || lower.contains("update") || lower.contains("delete") {
+        Style::default().fg(theme.warning())
+    } else if lower.contains("error") {
+        Style::default().fg(theme.error())
+    } else {
+        Style::default().fg(theme.text_muted())
+    }
+}
+
+fn extract_hash_range(table: &TableDescription) -> (Option<String>, Option<String>) {
+    let mut hash = None;
+    let mut range = None;
+    for KeySchemaElement {
+        attribute_name,
+        key_type,
+        ..
+    } in table.key_schema()
+    {
+        match key_type {
+            KeyType::Hash => hash = Some(attribute_name.clone()),
+            KeyType::Range => range = Some(attribute_name.clone()),
+            _ => {}
+        }
+    }
+    (hash, range)
+}
+
+async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, String> {
+    let output = client
+        .describe_table()
+        .table_name(table_name)
+        .send()
+        .await
+        .map_err(|err| format_sdk_error(&err))?;
+    let table_desc = output
+        .table()
+        .ok_or_else(|| "DescribeTable: missing table".to_string())?;
+    let (hash_key, range_key) = extract_hash_range(table_desc);
+    let Some(hash_key) = hash_key else {
+        return Err("Table is missing a partition key".to_string());
+    };
+
+    let mut deleted = 0usize;
+    let mut last_evaluated_key: Option<HashMap<String, AttributeValue>> = None;
+
+    loop {
+        let mut expr_names = HashMap::new();
+        expr_names.insert("#hk".to_string(), hash_key.clone());
+        let mut projection = "#hk".to_string();
+        if let Some(range_key) = range_key.as_ref() {
+            expr_names.insert("#rk".to_string(), range_key.clone());
+            projection.push_str(", #rk");
+        }
+
+        let output = client
+            .scan()
+            .table_name(table_name)
+            .projection_expression(projection)
+            .set_expression_attribute_names(Some(expr_names))
+            .limit(25)
+            .set_exclusive_start_key(last_evaluated_key.clone())
+            .send()
+            .await
+            .map_err(|err| format_sdk_error(&err))?;
+
+        let items = output.items();
+        if items.is_empty() {
+            if output.last_evaluated_key().is_none() {
+                break;
+            }
+            last_evaluated_key = output.last_evaluated_key().cloned();
+            continue;
+        }
+
+        let mut write_requests = Vec::with_capacity(items.len());
+        for item in items {
+            let hash_value = item
+                .get(&hash_key)
+                .ok_or_else(|| format!("Missing {hash_key} in item"))?
+                .clone();
+            let mut key = HashMap::new();
+            key.insert(hash_key.clone(), hash_value);
+            if let Some(range_key) = range_key.as_ref() {
+                let range_value = item
+                    .get(range_key)
+                    .ok_or_else(|| format!("Missing {range_key} in item"))?
+                    .clone();
+                key.insert(range_key.clone(), range_value);
+            }
+            let delete_request = DeleteRequest::builder()
+                .set_key(Some(key))
+                .build()
+                .map_err(|err| err.to_string())?;
+            write_requests.push(WriteRequest::builder().delete_request(delete_request).build());
+        }
+
+        let batch_count = write_requests.len();
+        let mut request_items = HashMap::new();
+        request_items.insert(table_name.to_string(), write_requests);
+        let mut pending = request_items;
+        loop {
+            let output = client
+                .batch_write_item()
+                .set_request_items(Some(pending.clone()))
+                .send()
+                .await
+                .map_err(|err| format_sdk_error(&err))?;
+            let unprocessed = output.unprocessed_items().cloned().unwrap_or_default();
+            if unprocessed.is_empty() {
+                break;
+            }
+            pending = unprocessed;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        deleted = deleted.saturating_add(batch_count);
+
+        last_evaluated_key = output.last_evaluated_key().cloned();
+        if last_evaluated_key.is_none() {
+            break;
+        }
+
+    }
+
+    Ok(deleted)
 }

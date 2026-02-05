@@ -23,6 +23,8 @@ pub struct ConfirmPopup {
     cancel_label: String,
     on_confirm: Box<dyn Fn() + Send + 'static>,
     selection: Cell<Selection>,
+    confirm_action: ConfirmAction,
+    help_entries: Vec<help::Entry<'static>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,41 +33,52 @@ enum Selection {
     Cancel,
 }
 
+#[derive(Clone, Debug)]
+pub struct ConfirmHotkey {
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
+    pub label: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfirmAction {
+    pub hotkey: ConfirmHotkey,
+    pub short: String,
+    pub long: String,
+}
+
+impl ConfirmAction {
+    pub fn new(
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        label: impl Into<String>,
+        short: impl Into<String>,
+        long: impl Into<String>,
+    ) -> Self {
+        Self {
+            hotkey: ConfirmHotkey {
+                code,
+                modifiers,
+                label: label.into(),
+            },
+            short: short.into(),
+            long: long.into(),
+        }
+    }
+}
+
 impl ConfirmPopup {
-    const HELP: &'static [help::Entry<'static>] = &[
-        help::Entry {
-            keys: Cow::Borrowed("tab/←/→"),
-            short: Cow::Borrowed("move"),
-            long: Cow::Borrowed("Move between actions"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed("⏎"),
-            short: Cow::Borrowed("select"),
-            long: Cow::Borrowed("Select action"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed("^d"),
-            short: Cow::Borrowed("delete"),
-            long: Cow::Borrowed("Delete item"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed("esc"),
-            short: Cow::Borrowed("cancel"),
-            long: Cow::Borrowed("Cancel"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-    ];
+    fn delete_item_action() -> ConfirmAction {
+        ConfirmAction {
+            hotkey: ConfirmHotkey {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                label: "^d".to_string(),
+            },
+            short: "delete".to_string(),
+            long: "Delete item".to_string(),
+        }
+    }
 
     pub fn new(
         title: impl Into<String>,
@@ -75,6 +88,60 @@ impl ConfirmPopup {
         on_confirm: impl Fn() + Send + 'static,
         parent: crate::env::WidgetId,
     ) -> Self {
+        Self::new_with_action(
+            title,
+            message,
+            confirm_label,
+            cancel_label,
+            Self::delete_item_action(),
+            on_confirm,
+            parent,
+        )
+    }
+
+    pub fn new_with_action(
+        title: impl Into<String>,
+        message: impl Into<String>,
+        confirm_label: impl Into<String>,
+        cancel_label: impl Into<String>,
+        confirm_action: ConfirmAction,
+        on_confirm: impl Fn() + Send + 'static,
+        parent: crate::env::WidgetId,
+    ) -> Self {
+        let help_entries = vec![
+            help::Entry {
+                keys: Cow::Borrowed("tab/←/→"),
+                short: Cow::Borrowed("move"),
+                long: Cow::Borrowed("Move between actions"),
+                ctrl: None,
+                shift: None,
+                alt: None,
+            },
+            help::Entry {
+                keys: Cow::Borrowed("⏎"),
+                short: Cow::Borrowed("select"),
+                long: Cow::Borrowed("Select action"),
+                ctrl: None,
+                shift: None,
+                alt: None,
+            },
+            help::Entry {
+                keys: Cow::Owned(confirm_action.hotkey.label.clone()),
+                short: Cow::Owned(confirm_action.short.clone()),
+                long: Cow::Owned(confirm_action.long.clone()),
+                ctrl: None,
+                shift: None,
+                alt: None,
+            },
+            help::Entry {
+                keys: Cow::Borrowed("esc"),
+                short: Cow::Borrowed("cancel"),
+                long: Cow::Borrowed("Cancel"),
+                ctrl: None,
+                shift: None,
+                alt: None,
+            },
+        ];
         Self {
             inner: WidgetInner::new::<Self>(parent),
             title: title.into(),
@@ -83,6 +150,8 @@ impl ConfirmPopup {
             cancel_label: cancel_label.into(),
             on_confirm: Box::new(on_confirm),
             selection: Cell::new(Selection::Cancel),
+            confirm_action,
+            help_entries,
         }
     }
 }
@@ -93,7 +162,7 @@ impl crate::widgets::Widget for ConfirmPopup {
     }
 
     fn help(&self) -> Option<&[help::Entry<'_>]> {
-        Some(Self::HELP)
+        Some(self.help_entries.as_slice())
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -183,7 +252,9 @@ impl crate::widgets::Widget for ConfirmPopup {
             return true;
         };
 
-        if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == self.confirm_action.hotkey.code
+            && key.modifiers.contains(self.confirm_action.hotkey.modifiers)
+        {
             (self.on_confirm)();
             ctx.dismiss_popup();
             ctx.invalidate();
