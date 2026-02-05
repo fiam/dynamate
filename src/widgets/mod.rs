@@ -18,6 +18,11 @@ pub use table_picker::TablePickerWidget;
 use crate::env::{AppBus, AppEvent, WidgetCtx, WidgetId};
 use crate::help;
 
+#[derive(Default, Clone)]
+pub struct NavContext {
+    pub back_title: Option<String>,
+}
+
 pub struct WidgetInner {
     id: WidgetId,
     parent: WidgetId,
@@ -82,6 +87,17 @@ pub trait Widget: Send {
     /// Render the widget's content.
     fn render(&self, _frame: &mut Frame, _area: Rect, _theme: &Theme) {}
 
+    /// Render the widget's content with navigation context.
+    fn render_with_nav(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        _nav: &NavContext,
+    ) {
+        self.render(frame, area, theme);
+    }
+
     /// Handle input events. Returns true if the event was handled.
     fn handle_event(&self, _ctx: WidgetCtx, _event: &Event) -> bool {
         false
@@ -89,6 +105,11 @@ pub trait Widget: Send {
 
     /// Optional help to display at the bottom while this widget is active.
     fn help(&self) -> Option<&[help::Entry<'_>]> {
+        None
+    }
+
+    /// Optional navigation title for this widget.
+    fn navigation_title(&self) -> Option<String> {
         None
     }
 

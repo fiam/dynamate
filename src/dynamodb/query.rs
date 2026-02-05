@@ -28,6 +28,62 @@ impl QueryBuilder {
         builder
     }
 
+    pub fn from_query_type(query_type: QueryType) -> Self {
+        let mut builder = Self {
+            query_type,
+            key_condition_expression: None,
+            filter_expression: None,
+            expression_attribute_names: HashMap::new(),
+            expression_attribute_values: HashMap::new(),
+        };
+
+        let mut name_counter = 0;
+        let mut value_counter = 0;
+
+        match &builder.query_type {
+            QueryType::TableQuery {
+                hash_key_condition,
+                range_key_condition,
+            }
+            | QueryType::GlobalSecondaryIndexQuery {
+                hash_key_condition,
+                range_key_condition,
+                ..
+            }
+            | QueryType::LocalSecondaryIndexQuery {
+                hash_key_condition,
+                range_key_condition,
+                ..
+            } => {
+                let mut key_conditions = Vec::new();
+                let hash_condition_str = Self::build_key_condition_string_static(
+                    hash_key_condition,
+                    &mut builder.expression_attribute_names,
+                    &mut builder.expression_attribute_values,
+                    &mut name_counter,
+                    &mut value_counter,
+                );
+                key_conditions.push(hash_condition_str);
+
+                if let Some(range_condition) = range_key_condition {
+                    let range_condition_str = Self::build_key_condition_string_static(
+                        range_condition,
+                        &mut builder.expression_attribute_names,
+                        &mut builder.expression_attribute_values,
+                        &mut name_counter,
+                        &mut value_counter,
+                    );
+                    key_conditions.push(range_condition_str);
+                }
+
+                builder.key_condition_expression = Some(key_conditions.join(" AND "));
+            }
+            QueryType::TableScan => {}
+        }
+
+        builder
+    }
+
     pub fn query_type(&self) -> &QueryType {
         &self.query_type
     }

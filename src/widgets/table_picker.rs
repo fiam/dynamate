@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     prelude::Widget,
     style::Style,
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, HighlightSpacing, List, ListItem, ListState, Paragraph, StatefulWidget},
 };
 use unicode_width::UnicodeWidthStr;
@@ -337,6 +337,10 @@ impl crate::widgets::Widget for TablePickerWidget {
         &self.inner
     }
 
+    fn navigation_title(&self) -> Option<String> {
+        Some("tables".to_string())
+    }
+
     fn start(&self, ctx: crate::env::WidgetCtx) {
         {
             let mut state = self.state.borrow_mut();
@@ -352,6 +356,16 @@ impl crate::widgets::Widget for TablePickerWidget {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        self.render_with_nav(frame, area, theme, &crate::widgets::NavContext::default());
+    }
+
+    fn render_with_nav(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        nav: &crate::widgets::NavContext,
+    ) {
         let mut state = self.state.borrow_mut();
         let filter_active = state.filter.is_active();
         let list_area = if filter_active {
@@ -363,7 +377,17 @@ impl crate::widgets::Widget for TablePickerWidget {
             area
         };
 
-        let title = Line::styled("Tables", Style::default().fg(theme.text()));
+        let title = if let Some(back_title) = nav.back_title.as_ref() {
+            Line::from(vec![
+                Span::styled(
+                    format!("← {back_title} "),
+                    Style::default().fg(theme.text_muted()),
+                ),
+                Span::styled("Tables", Style::default().fg(theme.text())),
+            ])
+        } else {
+            Line::styled("Tables", Style::default().fg(theme.text()))
+        };
         let block = Block::bordered()
             .title_top(title)
             .title_bottom(Line::styled(

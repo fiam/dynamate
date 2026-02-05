@@ -20,6 +20,11 @@ impl Input {
         &self.input
     }
 
+    pub fn set_value(&mut self, value: impl Into<String>) {
+        self.input = value.into();
+        self.character_index = self.input.len();
+    }
+
     pub fn is_active(&self) -> bool {
         self.is_active
     }

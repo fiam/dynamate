@@ -25,13 +25,13 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     prelude::Widget,
     style::Style,
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState},
 };
 use throbber_widgets_tui::{Throbber, ThrobberState};
 use throbber_widgets_tui::symbols::throbber::BRAILLE_ONE;
 
-use super::{input, item_keys, keys_widget, tree};
+use super::{index_picker, input, item_keys, keys_widget, tree};
 use keys_widget::KeysWidget;
 
 use crate::{
@@ -45,16 +45,21 @@ use dynamate::dynamodb::json;
 use dynamate::dynamodb::size::estimate_item_size_bytes;
 use dynamate::dynamodb::{SecondaryIndex, TableInfo};
 use dynamate::{
-    dynamodb::{DynamoDbRequest, Kind, Output, ScanBuilder, execute_page},
+    dynamodb::{
+        DynamoDbRequest, KeyCondition, KeyConditionType, Kind, Output, QueryBuilder, QueryType,
+        ScanBuilder, execute_page,
+    },
     expr::parse_dynamo_expression,
 };
 use humansize::{BINARY, format_size};
+use serde_json;
 use unicode_width::UnicodeWidthStr;
 
 pub struct QueryWidget {
     inner: WidgetInner,
     client: aws_sdk_dynamodb::Client,
     table_name: String,
+    initial_query: Option<ActiveQuery>,
     state: RefCell<QueryState>,
     table_meta: RefCell<Option<TableMeta>>,
     meta_started: Cell<bool>,
@@ -74,6 +79,7 @@ struct QueryState {
     table_state: TableState,
     last_evaluated_key: Option<HashMap<String, AttributeValue>>,
     last_query: String,
+    active_query: ActiveQuery,
     is_loading_more: bool,
     show_tree: bool,
     reopen_tree: Option<usize>,
@@ -102,7 +108,7 @@ struct TableMetaEvent {
 }
 
 struct PutItemEvent {
-    query: String,
+    active_query: ActiveQuery,
     reopen_tree: Option<usize>,
     action: PutAction,
     result: Result<(), String>,
@@ -115,6 +121,10 @@ struct DeleteItemRequest {
 struct DeleteItemEvent {
     key: HashMap<String, AttributeValue>,
     result: Result<(), String>,
+}
+
+struct IndexQueryEvent {
+    target: index_picker::IndexTarget,
 }
 
 struct KeyVisibilityEvent {
@@ -140,6 +150,27 @@ impl PutAction {
         match self {
             PutAction::Create => "Failed to create item",
             PutAction::Update => "Failed to update item",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ActiveQuery {
+    Text(String),
+    Index(index_picker::IndexTarget),
+}
+
+impl Default for ActiveQuery {
+    fn default() -> Self {
+        ActiveQuery::Text(String::new())
+    }
+}
+
+impl ActiveQuery {
+    fn input_value(&self) -> Option<String> {
+        match self {
+            ActiveQuery::Text(query) => Some(query.clone()),
+            ActiveQuery::Index(target) => QueryWidget::format_index_query(target),
         }
     }
 }
@@ -443,15 +474,42 @@ impl crate::widgets::Widget for QueryWidget {
         &self.inner
     }
 
+    fn navigation_title(&self) -> Option<String> {
+        let state = self.state.borrow();
+        if state.show_tree {
+            return Some("item".to_string());
+        }
+        Some(self.table_view_title(&state))
+    }
+
     fn start(&self, ctx: crate::env::WidgetCtx) {
-        self.start_query(None, ctx);
+        if let Some(initial_query) = self.initial_query.clone() {
+            self.restart_query(initial_query, ctx, None);
+        } else {
+            self.start_query(None, ctx);
+        }
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        self.render_with_nav(frame, area, theme, &crate::widgets::NavContext::default());
+    }
+
+    fn render_with_nav(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        nav: &crate::widgets::NavContext,
+    ) {
         let mut state = self.state.borrow_mut();
+        let back_title = if state.show_tree {
+            Some(self.table_view_title(&state))
+        } else {
+            nav.back_title.clone()
+        };
 
         if state.show_tree {
-            self.render_tree(frame, area, theme, &mut state);
+            self.render_tree(frame, area, theme, &mut state, back_title.as_deref());
         } else {
             let query_active = state.input.is_active();
             let filter_active = state.filter.is_active();
@@ -477,7 +535,13 @@ impl crate::widgets::Widget for QueryWidget {
                 idx += 1;
             }
             let results_area = areas[idx];
-            self.render_table(frame, results_area, theme, &mut state);
+            self.render_table(
+                frame,
+                results_area,
+                theme,
+                &mut state,
+                back_title.as_deref(),
+            );
         }
     }
 
@@ -505,6 +569,7 @@ impl crate::widgets::Widget for QueryWidget {
             }
         }
         if let Some(key) = event.as_key_press_event() {
+            let show_tree = self.state.borrow().show_tree;
             match key.code {
                 KeyCode::Tab | KeyCode::BackTab => {
                     self.state.borrow_mut().input.toggle_active()
@@ -600,6 +665,9 @@ impl crate::widgets::Widget for QueryWidget {
                 KeyCode::Char('t') => {
                     let mut state = self.state.borrow_mut();
                     state.show_tree = !state.show_tree;
+                }
+                KeyCode::Char('i') if show_tree => {
+                    self.show_index_picker(ctx.clone());
                 }
                 KeyCode::Char('e')
                     if !input_is_active
@@ -766,11 +834,7 @@ impl crate::widgets::Widget for QueryWidget {
                         kind: ToastKind::Info,
                         duration: Duration::from_secs(3),
                     });
-                    self.start_query_with_reopen(
-                        Some(&put_event.query),
-                        ctx.clone(),
-                        put_event.reopen_tree,
-                    );
+                    self.restart_query(put_event.active_query.clone(), ctx.clone(), put_event.reopen_tree);
                 }
                 Err(err) => {
                     let message = format!("{}: {err}", put_event.action.error_prefix());
@@ -805,6 +869,17 @@ impl crate::widgets::Widget for QueryWidget {
                     ctx.invalidate();
                 }
             }
+        }
+
+        if let Some(index_event) = event.payload::<IndexQueryEvent>() {
+            let widget = Box::new(QueryWidget::new_with_query(
+                self.client.clone(),
+                &self.table_name,
+                self.inner.id(),
+                Some(ActiveQuery::Index(index_event.target.clone())),
+            ));
+            ctx.push_widget(widget);
+            return;
         }
     }
 }
@@ -1006,6 +1081,14 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
+            keys: Cow::Borrowed("i"),
+            short: Cow::Borrowed("index"),
+            long: Cow::Borrowed("Query by index PK"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("e"),
             short: Cow::Borrowed("edit"),
             long: Cow::Borrowed("Edit item (JSON)"),
@@ -1031,6 +1114,15 @@ impl QueryWidget {
         table_name: &str,
         parent: crate::env::WidgetId,
     ) -> Self {
+        Self::new_with_query(client, table_name, parent, None)
+    }
+
+    fn new_with_query(
+        client: aws_sdk_dynamodb::Client,
+        table_name: &str,
+        parent: crate::env::WidgetId,
+        initial_query: Option<ActiveQuery>,
+    ) -> Self {
         let page_size = env_u64("DYNAMATE_PAGE_SIZE")
             .and_then(|value| i32::try_from(value).ok())
             .filter(|value| *value > 0)
@@ -1039,6 +1131,7 @@ impl QueryWidget {
             inner: WidgetInner::new::<Self>(parent),
             client,
             table_name: table_name.to_string(),
+            initial_query,
             state: RefCell::new(QueryState::default()),
             table_meta: RefCell::new(None),
             meta_started: Cell::new(false),
@@ -1086,6 +1179,88 @@ impl QueryWidget {
             self.inner.id(),
         ));
         ctx.set_popup(popup);
+    }
+
+    fn show_index_picker(&self, ctx: crate::env::WidgetCtx) {
+        let targets = match self.index_targets() {
+            Ok(targets) if targets.is_empty() => {
+                ctx.show_toast(Toast {
+                    message: "No indexes available for this item".to_string(),
+                    kind: ToastKind::Info,
+                    duration: Duration::from_secs(3),
+                });
+                return;
+            }
+            Ok(targets) => targets,
+            Err(err) => {
+                self.show_error(ctx.clone(), &err);
+                return;
+            }
+        };
+        let ctx_for_select = ctx.clone();
+        let popup = Box::new(index_picker::IndexPicker::new(
+            targets,
+            move |target| {
+                ctx_for_select.emit_self(IndexQueryEvent { target });
+            },
+            self.inner.id(),
+        ));
+        ctx.set_popup(popup);
+    }
+
+    fn index_targets(&self) -> Result<Vec<index_picker::IndexTarget>, String> {
+        let meta = self.table_meta.borrow();
+        let Some(meta) = meta.as_ref() else {
+            return Err("Table metadata is not available yet".to_string());
+        };
+        let state = self.state.borrow();
+        let selected = state
+            .table_state
+            .selected()
+            .and_then(|idx| state.filtered_indices.get(idx).copied())
+            .ok_or_else(|| "No item selected".to_string())?;
+        let item = state
+            .items
+            .get(selected)
+            .ok_or_else(|| "No item selected".to_string())?;
+        let table_info = TableInfo::from_table_description(&meta.table_desc);
+        let mut targets = Vec::new();
+        if let Some(value) = item.0.get(&table_info.primary_key.hash_key) {
+            targets.push(index_picker::IndexTarget {
+                name: "Table".to_string(),
+                kind: index_picker::IndexKind::Primary,
+                hash_key: table_info.primary_key.hash_key.clone(),
+                hash_value: value.clone(),
+                hash_display: item.value(&table_info.primary_key.hash_key),
+            });
+        }
+        for gsi in table_info.global_secondary_indexes.iter() {
+            if item_matches_index(item, gsi) {
+                if let Some(value) = item.0.get(&gsi.hash_key) {
+                    targets.push(index_picker::IndexTarget {
+                        name: gsi.name.clone(),
+                        kind: index_picker::IndexKind::Global,
+                        hash_key: gsi.hash_key.clone(),
+                        hash_value: value.clone(),
+                        hash_display: item.value(&gsi.hash_key),
+                    });
+                }
+            }
+        }
+        for lsi in table_info.local_secondary_indexes.iter() {
+            if item_matches_index(item, lsi) {
+                if let Some(value) = item.0.get(&lsi.hash_key) {
+                    targets.push(index_picker::IndexTarget {
+                        name: lsi.name.clone(),
+                        kind: index_picker::IndexKind::Local,
+                        hash_key: lsi.hash_key.clone(),
+                        hash_value: value.clone(),
+                        hash_display: item.value(&lsi.hash_key),
+                    });
+                }
+            }
+        }
+        Ok(targets)
     }
 
     fn delete_target(&self) -> Result<DeleteTarget, String> {
@@ -1209,7 +1384,7 @@ impl QueryWidget {
     }
 
     fn load_more(&self, ctx: crate::env::WidgetCtx) {
-        let (query, start_key) = {
+        let (active_query, start_key) = {
             let mut state = self.state.borrow_mut();
             if state.is_loading_more {
                 return;
@@ -1218,15 +1393,38 @@ impl QueryWidget {
                 return;
             };
             state.is_loading_more = true;
-            (state.last_query.clone(), start_key)
+            (state.active_query.clone(), start_key)
         };
 
         let request_id = self.active_request_id();
-        self.start_query_page(query, Some(start_key), true, ctx, request_id);
+        match active_query {
+            ActiveQuery::Text(query) => {
+                self.start_query_page(query, Some(start_key), true, ctx, request_id);
+            }
+            ActiveQuery::Index(target) => {
+                self.start_index_query_page(target, Some(start_key), true, ctx, request_id);
+            }
+        }
     }
 
     fn start_query(&self, query: Option<&str>, ctx: crate::env::WidgetCtx) {
         self.start_query_with_reopen(query, ctx, None);
+    }
+
+    fn restart_query(
+        &self,
+        active_query: ActiveQuery,
+        ctx: crate::env::WidgetCtx,
+        reopen_tree: Option<usize>,
+    ) {
+        match active_query {
+            ActiveQuery::Text(query) => {
+                self.start_query_with_reopen(Some(&query), ctx, reopen_tree);
+            }
+            ActiveQuery::Index(target) => {
+                self.start_index_query(target, ctx, reopen_tree);
+            }
+        }
     }
 
     fn start_query_with_reopen(
@@ -1237,6 +1435,7 @@ impl QueryWidget {
     ) {
         self.maybe_start_meta_fetch(ctx.clone());
         let query = query.unwrap_or("").to_string();
+        let active_query = ActiveQuery::Text(query.clone());
         let request_id = self.bump_request_id();
         tracing::debug!(
             table = %self.table_name,
@@ -1253,7 +1452,11 @@ impl QueryWidget {
             state.query_output = None;
             state.last_evaluated_key = None;
             state.is_loading_more = false;
-            state.last_query = query.clone();
+            state.last_query = active_query.input_value().unwrap_or_default();
+            state.active_query = active_query.clone();
+            if let Some(value) = active_query.input_value() {
+                state.input.set_value(value);
+            }
             state.loading_state = LoadingState::Loading;
             state.show_tree = false;
             state.reopen_tree = reopen_tree;
@@ -1316,6 +1519,121 @@ impl QueryWidget {
                 result,
             });
         });
+    }
+
+    fn start_index_query(
+        &self,
+        target: index_picker::IndexTarget,
+        ctx: crate::env::WidgetCtx,
+        reopen_tree: Option<usize>,
+    ) {
+        self.maybe_start_meta_fetch(ctx.clone());
+        let active_query = ActiveQuery::Index(target.clone());
+        let request_id = self.bump_request_id();
+        tracing::debug!(
+            table = %self.table_name,
+            request_id,
+            index = %target.name,
+            "start_index_query"
+        );
+        {
+            let mut state = self.state.borrow_mut();
+            state.items.clear();
+            state.filtered_indices.clear();
+            state.item_keys.clear();
+            state.table_state = TableState::default();
+            state.query_output = None;
+            state.last_evaluated_key = None;
+            state.is_loading_more = false;
+            state.last_query = active_query.input_value().unwrap_or_default();
+            state.active_query = active_query.clone();
+            if let Some(value) = active_query.input_value() {
+                state.input.set_value(value);
+            }
+            state.loading_state = LoadingState::Loading;
+            state.show_tree = false;
+            state.reopen_tree = reopen_tree;
+            state.scanned_total = 0;
+            state.matched_total = 0;
+            state.is_prefetching = false;
+        }
+        ctx.invalidate();
+        self.start_index_query_page(target, None, false, ctx, request_id);
+    }
+
+    fn start_index_query_page(
+        &self,
+        target: index_picker::IndexTarget,
+        start_key: Option<HashMap<String, AttributeValue>>,
+        append: bool,
+        ctx: crate::env::WidgetCtx,
+        request_id: u64,
+    ) {
+        let client = self.client.clone();
+        let table_name = self.table_name.clone();
+        let page_size = self.page_size;
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let hash_condition = KeyCondition {
+                attribute_name: target.hash_key.clone(),
+                condition: KeyConditionType::Equal(target.hash_value.clone()),
+            };
+            let query_type = match target.kind {
+                index_picker::IndexKind::Primary => QueryType::TableQuery {
+                    hash_key_condition: hash_condition,
+                    range_key_condition: None,
+                },
+                index_picker::IndexKind::Global => QueryType::GlobalSecondaryIndexQuery {
+                    index_name: target.name.clone(),
+                    hash_key_condition: hash_condition,
+                    range_key_condition: None,
+                },
+                index_picker::IndexKind::Local => QueryType::LocalSecondaryIndexQuery {
+                    index_name: target.name.clone(),
+                    hash_key_condition: hash_condition,
+                    range_key_condition: None,
+                },
+            };
+            let request = DynamoDbRequest::Query(Box::new(QueryBuilder::from_query_type(query_type)));
+            let request_start_key = start_key.clone();
+            tracing::trace!(
+                table = %table_name,
+                request_id,
+                append,
+                start_key_present = request_start_key.is_some(),
+                "execute_page_start"
+            );
+            let result = execute_page(
+                &client,
+                &table_name,
+                &request,
+                request_start_key,
+                Some(page_size),
+            )
+            .await
+            .map_err(|e| e.to_string());
+            ctx.emit_self(QueryPageEvent {
+                request_id,
+                append,
+                start_key_present: start_key.is_some(),
+                result,
+            });
+        });
+    }
+
+    fn format_query_value(value: &AttributeValue) -> Option<String> {
+        match value {
+            AttributeValue::S(text) => serde_json::to_string(text).ok(),
+            AttributeValue::N(num) => Some(num.clone()),
+            AttributeValue::Bool(value) => Some(value.to_string()),
+            AttributeValue::Null(_) => Some("null".to_string()),
+            _ => None,
+        }
+    }
+
+    fn format_index_query(target: &index_picker::IndexTarget) -> Option<String> {
+        let value = Self::format_query_value(&target.hash_value)?;
+        Some(format!("{} = {}", target.hash_key, value))
     }
 
     fn bump_request_id(&self) -> u64 {
@@ -1419,6 +1737,7 @@ impl QueryWidget {
         area: Rect,
         theme: &Theme,
         state: &mut QueryState,
+        back_title: Option<&str>,
     ) {
         tracing::trace!(
             table = %self.table_name,
@@ -1532,12 +1851,13 @@ impl QueryWidget {
             ),
         };
 
+        let title_line = self.title_line(title, title_style, theme, back_title);
         let border = match &state.loading_state {
             LoadingState::Error(_) => Style::default().fg(theme.error()),
             _ => Style::default().fg(theme.border()),
         };
         let block = Block::bordered()
-            .title_top(Line::styled(title, title_style))
+            .title_top(title_line)
             .title_bottom(Line::styled(
                 title_bottom,
                 Style::default().fg(theme.text_muted()),
@@ -1605,6 +1925,7 @@ impl QueryWidget {
         area: Rect,
         theme: &Theme,
         state: &mut QueryState,
+        back_title: Option<&str>,
     ) {
         tracing::trace!(
             table = %self.table_name,
@@ -1644,12 +1965,13 @@ impl QueryWidget {
             ),
         };
 
+        let title_line = self.title_line(title, title_style, theme, back_title);
         let border = match &state.loading_state {
             LoadingState::Error(_) => Style::default().fg(theme.error()),
             _ => Style::default().fg(theme.border()),
         };
         let block = Block::bordered()
-            .title_top(Line::styled(title, title_style))
+            .title_top(title_line)
             .title_bottom(Line::styled(
                 title_bottom,
                 Style::default().fg(theme.text_muted()),
@@ -1662,11 +1984,10 @@ impl QueryWidget {
             .filtered_indices
             .get(selected)
             .and_then(|idx| state.items.get(*idx))
-            .map(|item| tree::item_to_lines(&item.0))
-            .unwrap_or_else(|| vec!["No item selected".to_string()]);
+            .map(|item| tree::item_to_lines(&item.0, theme))
+            .unwrap_or_else(|| vec![Line::from("No item selected")]);
 
-        let text = content.join("\n");
-        let paragraph = Paragraph::new(text).block(block);
+        let paragraph = Paragraph::new(content).block(block);
         frame.render_widget(paragraph, area);
         if matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching {
             render_loading_throbber(frame, area, theme, &mut state.throbber);
@@ -1710,8 +2031,27 @@ impl QueryWidget {
         if parts.is_empty() {
             " Item ".to_string()
         } else {
-            format!(" Item: {} ", parts.join(", "))
+            format!(" {} ", parts.join(" · "))
         }
+    }
+
+    fn title_line(
+        &self,
+        title: String,
+        title_style: Style,
+        theme: &Theme,
+        back_title: Option<&str>,
+    ) -> Line<'static> {
+        let Some(back_title) = back_title else {
+            return Line::styled(title, title_style);
+        };
+        Line::from(vec![
+            Span::styled(
+                format!("← {back_title} "),
+                Style::default().fg(theme.text_muted()),
+            ),
+            Span::styled(title, title_style),
+        ])
     }
 
     fn item_view_subtitle(&self, state: &QueryState) -> String {
@@ -1762,8 +2102,22 @@ impl QueryWidget {
         pad(format!("{} ", parts.join(" · ")), 2)
     }
 
+    fn table_view_title(&self, state: &QueryState) -> String {
+        let query = state
+            .active_query
+            .input_value()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if query.is_empty() {
+            self.table_name.clone()
+        } else {
+            query
+        }
+    }
+
     fn edit_selected(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
-        let (item, query, reopen_tree) = {
+        let (item, active_query, reopen_tree) = {
             let state = self.state.borrow();
             let selected = state.table_state.selected();
             let item_index = selected.and_then(|index| state.filtered_indices.get(index).copied());
@@ -1771,7 +2125,7 @@ impl QueryWidget {
                 .and_then(|index| state.items.get(index))
                 .map(|item| item.0.clone());
             let reopen_tree = if state.show_tree { item_index } else { None };
-            (item, state.last_query.clone(), reopen_tree)
+            (item, state.active_query.clone(), reopen_tree)
         };
 
         let Some(item) = item else {
@@ -1823,11 +2177,11 @@ impl QueryWidget {
             }
         };
 
-        self.put_item(updated, query, PutAction::Update, ctx, reopen_tree);
+        self.put_item(updated, active_query, PutAction::Update, ctx, reopen_tree);
     }
 
     fn create_item(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
-        let query = self.state.borrow().last_query.clone();
+        let active_query = self.state.borrow().active_query.clone();
         let initial = match format {
             EditorFormat::Plain => "{}\n".to_string(),
             EditorFormat::DynamoDb => "{}\n".to_string(),
@@ -1859,7 +2213,7 @@ impl QueryWidget {
             }
         };
 
-        self.put_item(updated, query, PutAction::Create, ctx, None);
+        self.put_item(updated, active_query, PutAction::Create, ctx, None);
     }
 
     fn open_editor(&self, initial: &str, ctx: crate::env::WidgetCtx) -> Result<String, String> {
@@ -1911,7 +2265,7 @@ impl QueryWidget {
     fn put_item(
         &self,
         item: HashMap<String, AttributeValue>,
-        query: String,
+        active_query: ActiveQuery,
         action: PutAction,
         ctx: crate::env::WidgetCtx,
         reopen_tree: Option<usize>,
@@ -1929,7 +2283,7 @@ impl QueryWidget {
                 .await;
             let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
             ctx.emit_self(PutItemEvent {
-                query,
+                active_query,
                 reopen_tree,
                 action,
                 result: event_result,

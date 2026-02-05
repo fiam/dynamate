@@ -478,12 +478,19 @@ impl App {
         .centered();
         frame.render_widget(title, title_area);
         if let Some(widget) = self.widgets.last() {
-            widget.render(frame, body_area, &theme);
+            let back_title = self
+                .widgets
+                .iter()
+                .rev()
+                .nth(1)
+                .and_then(|w| w.navigation_title());
+            let nav = widgets::NavContext { back_title };
+            widget.render_with_nav(frame, body_area, &theme, &nav);
         }
         if let Some(popup) = self.popup.as_ref() {
             let popup_area = popup.rect(body_area);
             frame.render_widget(Clear, popup_area);
-            popup.render(frame, popup_area, &theme);
+            popup.render_with_nav(frame, popup_area, &theme, &widgets::NavContext::default());
         }
         if self.popup.is_none()
             && let Some(toast) = self.toast.as_ref()
