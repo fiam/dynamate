@@ -1,4 +1,4 @@
-.PHONY: dynamodb-up dynamodb-down dynamodb-seed dynamodb-local run-local dynamate-local dynamate-local-debug
+.PHONY: dynamodb-up dynamodb-down dynamodb-seed dynamodb-local run-local dynamate-local dynamate-local-debug dynamate-compose
 
 COMPOSE ?= docker compose
 DYNAMO_ENDPOINT ?= http://localhost:8000
@@ -53,3 +53,12 @@ dynamate-local-debug: dynamodb-local
 	AWS_ACCESS_KEY_ID="$(AWS_ACCESS_KEY_ID)" \
 	AWS_SECRET_ACCESS_KEY="$(AWS_SECRET_ACCESS_KEY)" \
 	cargo run $(RELEASE) -- --endpoint-url "$(DYNAMO_ENDPOINT)" --table "$(DYNAMO_TABLE)" $(DYNAMATE_ARGS)
+
+dynamate-compose: dynamodb-local
+	@DYNAMATE_USE_TTYD="$${DYNAMATE_USE_TTYD:-1}" \
+	AWS_REGION="$(AWS_REGION)" \
+	AWS_ACCESS_KEY_ID="$(AWS_ACCESS_KEY_ID)" \
+	AWS_SECRET_ACCESS_KEY="$(AWS_SECRET_ACCESS_KEY)" \
+	DYNAMO_TABLE="$(DYNAMO_TABLE)" \
+	DYNAMO_ENDPOINT="$(DYNAMO_ENDPOINT_DOCKER)" \
+	$(COMPOSE) -f compose.yaml --profile dynamate up --build -d dynamate
