@@ -9,6 +9,7 @@ AWS_ACCESS_KEY_ID ?= local
 AWS_SECRET_ACCESS_KEY ?= local
 SEED_ARGS ?= --skip-if-exists
 DYNAMATE_ARGS ?=
+RELEASE ?=
 
 dynamodb-up:
 	@if [ -z "$$($(COMPOSE) -f compose.yaml ps -q --status=running dynamodb)" ]; then \
@@ -36,13 +37,13 @@ run-local: dynamodb-local
 	@AWS_REGION="$(AWS_REGION)" \
 	AWS_ACCESS_KEY_ID="$(AWS_ACCESS_KEY_ID)" \
 	AWS_SECRET_ACCESS_KEY="$(AWS_SECRET_ACCESS_KEY)" \
-	cargo run -- --endpoint-url "$(DYNAMO_ENDPOINT)" --table "$(DYNAMO_TABLE)" $(DYNAMATE_ARGS)
+	cargo run $(RELEASE) -- --endpoint-url "$(DYNAMO_ENDPOINT)" --table "$(DYNAMO_TABLE)" $(DYNAMATE_ARGS)
 
 dynamate-local:
 	@AWS_REGION="$(AWS_REGION)" \
 	AWS_ACCESS_KEY_ID="$(AWS_ACCESS_KEY_ID)" \
 	AWS_SECRET_ACCESS_KEY="$(AWS_SECRET_ACCESS_KEY)" \
-	cargo run -- --endpoint-url "$(DYNAMO_ENDPOINT)" --table "$(DYNAMO_TABLE)" $(DYNAMATE_ARGS)
+	cargo run $(RELEASE) -- --endpoint-url "$(DYNAMO_ENDPOINT)" --table "$(DYNAMO_TABLE)" $(DYNAMATE_ARGS)
 
 dynamate-local-debug: dynamodb-local
 	@DYNAMATE_DATA="." \
@@ -51,4 +52,4 @@ dynamate-local-debug: dynamodb-local
 	AWS_REGION="$(AWS_REGION)" \
 	AWS_ACCESS_KEY_ID="$(AWS_ACCESS_KEY_ID)" \
 	AWS_SECRET_ACCESS_KEY="$(AWS_SECRET_ACCESS_KEY)" \
-	cargo run -- --endpoint-url "$(DYNAMO_ENDPOINT)" --table "$(DYNAMO_TABLE)" $(DYNAMATE_ARGS)
+	cargo run $(RELEASE) -- --endpoint-url "$(DYNAMO_ENDPOINT)" --table "$(DYNAMO_TABLE)" $(DYNAMATE_ARGS)
