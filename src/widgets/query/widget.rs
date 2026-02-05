@@ -8,6 +8,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
+use aws_sdk_dynamodb::operation::put_item::PutItemError;
+use aws_sdk_dynamodb::operation::RequestId;
 use aws_sdk_dynamodb::types::{
     AttributeValue, KeySchemaElement, KeyType, TableDescription, TimeToLiveStatus,
 };
@@ -102,12 +105,52 @@ struct TableMetaEvent {
 struct PutItemEvent {
     query: String,
     reopen_tree: Option<usize>,
+    action: PutAction,
     result: Result<(), String>,
 }
 
 struct KeyVisibilityEvent {
     name: String,
     hidden: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PutAction {
+    Create,
+    Update,
+}
+
+impl PutAction {
+    fn success_message(&self) -> &'static str {
+        match self {
+            PutAction::Create => "Item created",
+            PutAction::Update => "Item updated",
+        }
+    }
+
+    fn error_prefix(&self) -> &'static str {
+        match self {
+            PutAction::Create => "Failed to create item",
+            PutAction::Update => "Failed to update item",
+        }
+    }
+}
+
+fn format_put_item_error(err: &SdkError<PutItemError>) -> String {
+    if let Some(service_err) = err.as_service_error() {
+        let code = service_err.code().unwrap_or("ServiceError");
+        let message = service_err.message().unwrap_or("").trim();
+        let mut summary = if message.is_empty() {
+            code.to_string()
+        } else {
+            format!("{code}: {message}")
+        };
+        if let Some(request_id) = service_err.meta().request_id() {
+            summary.push_str(&format!(" (request id: {request_id})"));
+        }
+        return summary;
+    }
+    DisplayErrorContext(err).to_string()
 }
 
 
@@ -423,6 +466,16 @@ impl crate::widgets::Widget for QueryWidget {
     }
 
     fn handle_event(&self, ctx: crate::env::WidgetCtx, event: &Event) -> bool {
+        if event.as_key_press_event().is_some() {
+            let mut state = self.state.borrow_mut();
+            if matches!(state.loading_state, LoadingState::Error(_)) {
+                state.loading_state = if state.items.is_empty() {
+                    LoadingState::Idle
+                } else {
+                    LoadingState::Loaded
+                };
+            }
+        }
         let input_is_active = self.state.borrow().input.is_active();
         let filter_active = self.state.borrow().filter.is_active();
         if input_is_active && self.state.borrow_mut().input.handle_event(event) {
@@ -683,6 +736,11 @@ impl crate::widgets::Widget for QueryWidget {
         if let Some(put_event) = event.payload::<PutItemEvent>() {
             match put_event.result.as_ref() {
                 Ok(()) => {
+                    ctx.show_toast(Toast {
+                        message: put_event.action.success_message().to_string(),
+                        kind: ToastKind::Info,
+                        duration: Duration::from_secs(3),
+                    });
                     self.start_query_with_reopen(
                         Some(&put_event.query),
                         ctx.clone(),
@@ -690,8 +748,9 @@ impl crate::widgets::Widget for QueryWidget {
                     );
                 }
                 Err(err) => {
-                    self.set_loading_state(LoadingState::Error(err.clone()));
-                    self.show_error(ctx.clone(), err);
+                    let message = format!("{}: {err}", put_event.action.error_prefix());
+                    self.set_loading_state(LoadingState::Error(message.clone()));
+                    self.show_error(ctx.clone(), &message);
                     ctx.invalidate();
                 }
             }
@@ -1580,7 +1639,7 @@ impl QueryWidget {
             }
         };
 
-        self.put_item(updated, query, ctx, reopen_tree);
+        self.put_item(updated, query, PutAction::Update, ctx, reopen_tree);
     }
 
     fn create_item(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
@@ -1616,7 +1675,7 @@ impl QueryWidget {
             }
         };
 
-        self.put_item(updated, query, ctx, None);
+        self.put_item(updated, query, PutAction::Create, ctx, None);
     }
 
     fn open_editor(&self, initial: &str, ctx: crate::env::WidgetCtx) -> Result<String, String> {
@@ -1669,6 +1728,7 @@ impl QueryWidget {
         &self,
         item: HashMap<String, AttributeValue>,
         query: String,
+        action: PutAction,
         ctx: crate::env::WidgetCtx,
         reopen_tree: Option<usize>,
     ) {
@@ -1683,10 +1743,11 @@ impl QueryWidget {
                 .set_item(Some(item))
                 .send()
                 .await;
-            let event_result = result.map(|_| ()).map_err(|err| err.to_string());
+            let event_result = result.map(|_| ()).map_err(|err| format_put_item_error(&err));
             ctx.emit_self(PutItemEvent {
                 query,
                 reopen_tree,
+                action,
                 result: event_result,
             });
         });
