@@ -297,6 +297,7 @@ impl QueryState {
         !self.filter.value.trim().is_empty()
     }
 
+
     fn apply_filter(&mut self) {
         let needle = self.filter.value.trim().to_lowercase();
         let current_item = self
@@ -393,27 +394,30 @@ impl crate::widgets::Widget for QueryWidget {
         if state.show_tree {
             self.render_tree(frame, area, theme, &mut state);
         } else {
+            let query_active = state.input.is_active();
             let filter_active = state.filter.is_active();
-            let layout = if filter_active {
-                Layout::vertical([
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Fill(1),
-                ])
-            } else {
-                Layout::vertical([Constraint::Length(3), Constraint::Fill(1)])
-            };
-            let (query_area, filter_area, results_area) = if filter_active {
-                let [query_area, filter_area, results_area] = area.layout(&layout);
-                (query_area, Some(filter_area), results_area)
-            } else {
-                let [query_area, results_area] = area.layout(&layout);
-                (query_area, None, results_area)
-            };
-            state.input.render(frame, query_area, theme);
-            if let Some(filter_area) = filter_area {
-                state.filter.render(frame, filter_area, theme);
+            let mut constraints = Vec::new();
+            if query_active {
+                constraints.push(Constraint::Length(3));
             }
+            if filter_active {
+                constraints.push(Constraint::Length(3));
+            }
+            constraints.push(Constraint::Fill(1));
+            let areas = Layout::vertical(constraints).split(area);
+
+            let mut idx = 0;
+            if query_active {
+                let query_area = areas[idx];
+                state.input.render(frame, query_area, theme);
+                idx += 1;
+            }
+            if filter_active {
+                let filter_area = areas[idx];
+                state.filter.render(frame, filter_area, theme);
+                idx += 1;
+            }
+            let results_area = areas[idx];
             self.render_table(frame, results_area, theme, &mut state);
         }
     }
@@ -437,7 +441,8 @@ impl crate::widgets::Widget for QueryWidget {
                     self.state.borrow_mut().input.toggle_active()
                 }
                 KeyCode::Esc if input_is_active => {
-                    self.state.borrow_mut().input.toggle_active()
+                    let mut state = self.state.borrow_mut();
+                    state.input.toggle_active();
                 }
                 KeyCode::Esc if filter_active => {
                     let mut state = self.state.borrow_mut();
@@ -481,6 +486,12 @@ impl crate::widgets::Widget for QueryWidget {
                     let mut state = self.state.borrow_mut();
                     if !state.show_tree {
                         state.filter.set_active(true);
+                    }
+                }
+                KeyCode::Char('q') if !input_is_active && !filter_active => {
+                    let mut state = self.state.borrow_mut();
+                    if !state.show_tree {
+                        state.input.set_active(true);
                     }
                 }
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(ctx.clone()),
@@ -573,8 +584,10 @@ impl crate::widgets::Widget for QueryWidget {
             return Some(Self::HELP_TREE);
         }
         let state = self.state.borrow();
+        if state.input.is_active() {
+            return Some(Self::HELP_QUERY_EDIT);
+        }
         if (matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching)
-            && !state.input.is_active()
             && !state.filter.is_active()
         {
             return Some(Self::HELP_LOADING);
@@ -589,7 +602,8 @@ impl crate::widgets::Widget for QueryWidget {
     }
 
     fn suppress_global_help(&self) -> bool {
-        self.state.borrow().filter.is_active()
+        let state = self.state.borrow();
+        state.filter.is_active() || state.input.is_active()
     }
 
     fn on_self_event(&self, ctx: crate::env::WidgetCtx, event: &crate::env::AppEvent) {
@@ -688,6 +702,14 @@ impl crate::widgets::Widget for QueryWidget {
 impl QueryWidget {
     const HELP_TABLE: &'static [help::Entry<'static>] = &[
         help::Entry {
+            keys: Cow::Borrowed("q"),
+            short: Cow::Borrowed("query"),
+            long: Cow::Borrowed("Query table"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("/"),
             short: Cow::Borrowed("filter"),
             long: Cow::Borrowed("Filter items"),
@@ -754,7 +776,33 @@ impl QueryWidget {
             alt: None,
         },
     ];
+    const HELP_QUERY_EDIT: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("cancel"),
+            long: Cow::Borrowed("Close query input"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("⏎"),
+            short: Cow::Borrowed("apply"),
+            long: Cow::Borrowed("Run query"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+    ];
     const HELP_FILTER_APPLIED: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("q"),
+            short: Cow::Borrowed("query"),
+            long: Cow::Borrowed("Edit query"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
         help::Entry {
             keys: Cow::Borrowed("/"),
             short: Cow::Borrowed("filter"),
@@ -1185,12 +1233,25 @@ impl QueryWidget {
         } else {
             "end"
         };
+        let query_summary = state.last_query.trim();
+        let query_note = if query_summary.is_empty() {
+            None
+        } else {
+            Some(format!("query: {query_summary}"))
+        };
         let approx_total = self
             .table_meta
             .borrow()
             .as_ref()
             .and_then(|meta| meta.table_desc.item_count())
             .map(|count| format!("~{count} items"));
+        let mut footer_suffix = String::new();
+        if let Some(value) = approx_total.as_ref() {
+            footer_suffix.push_str(&format!(" · {value}"));
+        }
+        if let Some(value) = query_note.as_ref() {
+            footer_suffix.push_str(&format!(" · {value}"));
+        }
         let (title, title_bottom, title_style) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => (
                 format!("Results{}", output_info(state.query_output.as_ref())),
@@ -1201,10 +1262,7 @@ impl QueryWidget {
                         first_item,
                         last_item,
                         more_marker,
-                        approx_total
-                            .as_ref()
-                            .map(|value| format!(" · {value}"))
-                            .unwrap_or_default()
+                        footer_suffix.clone()
                     ),
                     2,
                 ),
@@ -1218,10 +1276,7 @@ impl QueryWidget {
                         state.scanned_total,
                         state.matched_total,
                         more_marker,
-                        approx_total
-                            .as_ref()
-                            .map(|value| format!(" · {value}"))
-                            .unwrap_or_default()
+                        footer_suffix
                     ),
                     2,
                 ),
