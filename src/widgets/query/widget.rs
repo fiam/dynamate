@@ -9,7 +9,6 @@ use std::{
 };
 
 use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
-use aws_sdk_dynamodb::operation::put_item::PutItemError;
 use aws_sdk_dynamodb::operation::RequestId;
 use aws_sdk_dynamodb::types::{
     AttributeValue, KeySchemaElement, KeyType, TableDescription, TimeToLiveStatus,
@@ -39,7 +38,7 @@ use crate::{
     env::{Toast, ToastKind},
     help,
     util::pad,
-    widgets::{WidgetInner, error::ErrorPopup, theme::Theme},
+    widgets::{WidgetInner, confirm::ConfirmPopup, error::ErrorPopup, theme::Theme},
 };
 use chrono::{DateTime, Utc};
 use dynamate::dynamodb::json;
@@ -109,6 +108,15 @@ struct PutItemEvent {
     result: Result<(), String>,
 }
 
+struct DeleteItemRequest {
+    key: HashMap<String, AttributeValue>,
+}
+
+struct DeleteItemEvent {
+    key: HashMap<String, AttributeValue>,
+    result: Result<(), String>,
+}
+
 struct KeyVisibilityEvent {
     name: String,
     hidden: bool,
@@ -136,7 +144,15 @@ impl PutAction {
     }
 }
 
-fn format_put_item_error(err: &SdkError<PutItemError>) -> String {
+struct DeleteTarget {
+    key: HashMap<String, AttributeValue>,
+    summary: String,
+}
+
+fn format_sdk_error<E>(err: &SdkError<E>) -> String
+where
+    E: ProvideErrorMetadata + RequestId + std::error::Error + 'static,
+{
     if let Some(service_err) = err.as_service_error() {
         let code = service_err.code().unwrap_or("ServiceError");
         let message = service_err.message().unwrap_or("").trim();
@@ -145,7 +161,7 @@ fn format_put_item_error(err: &SdkError<PutItemError>) -> String {
         } else {
             format!("{code}: {message}")
         };
-        if let Some(request_id) = service_err.meta().request_id() {
+        if let Some(request_id) = service_err.request_id() {
             summary.push_str(&format!(" (request id: {request_id})"));
         }
         return summary;
@@ -607,6 +623,15 @@ impl crate::widgets::Widget for QueryWidget {
                 {
                     self.create_item(EditorFormat::DynamoDb, ctx.clone());
                 }
+                KeyCode::Char('d')
+                    if !input_is_active
+                        && !filter_active
+                        && key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    self.confirm_delete(ctx.clone());
+                }
                 KeyCode::Char('n') => {
                     self.create_item(EditorFormat::Plain, ctx.clone());
                 }
@@ -755,6 +780,32 @@ impl crate::widgets::Widget for QueryWidget {
                 }
             }
         }
+
+        if let Some(delete_event) = event.payload::<DeleteItemRequest>() {
+            self.delete_item(delete_event.key.clone(), ctx);
+            return;
+        }
+
+        if let Some(delete_event) = event.payload::<DeleteItemEvent>() {
+            match delete_event.result.as_ref() {
+                Ok(()) => {
+                    self.set_loading_state(LoadingState::Loaded);
+                    self.remove_item_by_key(&delete_event.key);
+                    ctx.show_toast(Toast {
+                        message: "Item deleted".to_string(),
+                        kind: ToastKind::Info,
+                        duration: Duration::from_secs(3),
+                    });
+                    ctx.invalidate();
+                }
+                Err(err) => {
+                    let message = format!("Failed to delete item: {err}");
+                    self.set_loading_state(LoadingState::Error(message.clone()));
+                    self.show_error(ctx.clone(), &message);
+                    ctx.invalidate();
+                }
+            }
+        }
     }
 }
 
@@ -813,6 +864,14 @@ impl QueryWidget {
                 short: Some(Cow::Borrowed("new (Dynamo JSON)")),
                 long: Some(Cow::Borrowed("New item (Dynamo JSON)")),
             }),
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("^d"),
+            short: Cow::Borrowed("delete"),
+            long: Cow::Borrowed("Delete item"),
+            ctrl: None,
             shift: None,
             alt: None,
         },
@@ -918,6 +977,14 @@ impl QueryWidget {
             shift: None,
             alt: None,
         },
+        help::Entry {
+            keys: Cow::Borrowed("^d"),
+            short: Cow::Borrowed("delete"),
+            long: Cow::Borrowed("Delete item"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
     ];
     const HELP_LOADING: &'static [help::Entry<'static>] = &[
         help::Entry {
@@ -947,6 +1014,14 @@ impl QueryWidget {
                 short: Some(Cow::Borrowed("edit (Dynamo JSON)")),
                 long: Some(Cow::Borrowed("Edit item (Dynamo JSON)")),
             }),
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("^d"),
+            short: Cow::Borrowed("delete"),
+            long: Cow::Borrowed("Delete item"),
+            ctrl: None,
             shift: None,
             alt: None,
         },
@@ -986,6 +1061,115 @@ impl QueryWidget {
                 kind: ToastKind::Error,
                 duration: Duration::from_secs(4),
             });
+        }
+    }
+
+    fn confirm_delete(&self, ctx: crate::env::WidgetCtx) {
+        let target = match self.delete_target() {
+            Ok(target) => target,
+            Err(err) => {
+                self.show_error(ctx.clone(), &err);
+                return;
+            }
+        };
+        let message = target.summary;
+        let key = target.key;
+        let ctx_for_delete = ctx.clone();
+        let popup = Box::new(ConfirmPopup::new(
+            "Delete item",
+            message,
+            "Delete",
+            "cancel",
+            move || {
+                ctx_for_delete.emit_self(DeleteItemRequest { key: key.clone() });
+            },
+            self.inner.id(),
+        ));
+        ctx.set_popup(popup);
+    }
+
+    fn delete_target(&self) -> Result<DeleteTarget, String> {
+        let meta = self.table_meta.borrow();
+        let Some(meta) = meta.as_ref() else {
+            return Err("Table metadata is not available yet".to_string());
+        };
+        let (hash_key, range_key) = extract_hash_range(&meta.table_desc);
+        let Some(hash_key) = hash_key else {
+            return Err("Table is missing a partition key".to_string());
+        };
+        let state = self.state.borrow();
+        let selected = state
+            .table_state
+            .selected()
+            .and_then(|idx| state.filtered_indices.get(idx).copied())
+            .ok_or_else(|| "No item selected".to_string())?;
+        let item = state
+            .items
+            .get(selected)
+            .ok_or_else(|| "No item selected".to_string())?;
+        let hash_value = item
+            .0
+            .get(&hash_key)
+            .ok_or_else(|| format!("Selected item is missing {hash_key}"))?;
+        let mut key = HashMap::new();
+        key.insert(hash_key.clone(), hash_value.clone());
+        let mut lines = vec![format!("{hash_key}={}", item.value(&hash_key))];
+        if let Some(range_key) = range_key {
+            let range_value = item
+                .0
+                .get(&range_key)
+                .ok_or_else(|| format!("Selected item is missing {range_key}"))?;
+            key.insert(range_key.clone(), range_value.clone());
+            lines.push(format!("{range_key}={}", item.value(&range_key)));
+        }
+        Ok(DeleteTarget {
+            key,
+            summary: lines.join("\n"),
+        })
+    }
+
+    fn delete_item(&self, key: HashMap<String, AttributeValue>, ctx: crate::env::WidgetCtx) {
+        self.set_loading_state(LoadingState::Loading);
+        ctx.invalidate();
+        let client = self.client.clone();
+        let table_name = self.table_name.clone();
+        tokio::spawn(async move {
+            let result = client
+                .delete_item()
+                .table_name(&table_name)
+                .set_key(Some(key.clone()))
+                .send()
+                .await;
+            let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
+            ctx.emit_self(DeleteItemEvent {
+                key,
+                result: event_result,
+            });
+        });
+    }
+
+    fn remove_item_by_key(&self, key: &HashMap<String, AttributeValue>) {
+        let (hash_key, range_key) = {
+            let meta = self.table_meta.borrow();
+            let Some(meta) = meta.as_ref() else {
+                return;
+            };
+            extract_hash_range(&meta.table_desc)
+        };
+        let Some(hash_key) = hash_key else {
+            return;
+        };
+        let mut state = self.state.borrow_mut();
+        if let Some(index) = state.items.iter().position(|item| {
+            let hash_matches = item.0.get(&hash_key) == key.get(&hash_key);
+            if let Some(range_key) = range_key.as_ref() {
+                hash_matches && item.0.get(range_key) == key.get(range_key)
+            } else {
+                hash_matches
+            }
+        }) {
+            state.items.remove(index);
+            state.apply_filter();
         }
     }
 
@@ -1743,7 +1927,7 @@ impl QueryWidget {
                 .set_item(Some(item))
                 .send()
                 .await;
-            let event_result = result.map(|_| ()).map_err(|err| format_put_item_error(&err));
+            let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
             ctx.emit_self(PutItemEvent {
                 query,
                 reopen_tree,

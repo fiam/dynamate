@@ -7,6 +7,7 @@ use ratatui::{Frame, layout::Rect};
 use theme::Theme;
 
 pub mod error;
+pub mod confirm;
 mod query;
 mod table_picker;
 pub mod theme;
