@@ -13,6 +13,7 @@ lazy_static! {
             .ok()
             .map(PathBuf::from);
     pub static ref LOG_ENV: String = format!("{}_LOGLEVEL", PROJECT_NAME.clone());
+    pub static ref LOG_STDERR_ENV: String = format!("{}_LOG_STDERR", PROJECT_NAME.clone());
     pub static ref LOG_FILE: String = format!("{}.log", env!("CARGO_PKG_NAME"));
 }
 
@@ -43,19 +44,39 @@ pub fn initialize() -> Result<()> {
                 .unwrap_or_else(|_| format!("{}=info", env!("CARGO_CRATE_NAME"))),
         );
     }
+    let env_filter = tracing_subscriber::filter::EnvFilter::from_default_env();
     let file_subscriber = tracing_subscriber::fmt::layer()
         .with_file(true)
         .with_line_number(true)
         .with_writer(log_file)
         .with_target(false)
         .with_ansi(false)
-        .with_filter(tracing_subscriber::filter::EnvFilter::from_default_env());
-    tracing_subscriber::registry()
+        .with_filter(env_filter.clone());
+    let registry = tracing_subscriber::registry()
         .with(file_subscriber)
-        .with(ErrorLayer::default())
-        .init();
+        .with(ErrorLayer::default());
+    if stderr_logging_enabled() {
+        let stderr_subscriber = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_ansi(true)
+            .with_writer(std::io::stderr)
+            .with_filter(env_filter);
+        registry.with(stderr_subscriber).init();
+    } else {
+        registry.init();
+    }
     tracing::info!("starting");
     Ok(())
+}
+
+fn stderr_logging_enabled() -> bool {
+    let Ok(value) = std::env::var(LOG_STDERR_ENV.clone()) else {
+        return false;
+    };
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 /// Similar to the `std::dbg!` macro, but generates `tracing` events rather

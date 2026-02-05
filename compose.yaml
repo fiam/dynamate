@@ -21,6 +21,28 @@ services:
       - DYNAMO_ENDPOINT=http://dynamodb:8000
     depends_on:
       - dynamodb
+  seed:
+    image: python:3.12-slim
+    profiles:
+      - seed
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - DYNAMO_ENDPOINT=${DYNAMO_ENDPOINT:-http://dynamodb:8000}
+      - DYNAMO_TABLE=${DYNAMO_TABLE:-dyno-music}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-local}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-local}
+      - SEED_ARGS=${SEED_ARGS:---skip-if-exists}
+    depends_on:
+      dynamodb:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        python -m pip install --no-cache-dir -q boto3
+        && python seed.py --endpoint-url "$${DYNAMO_ENDPOINT}" --table "$${DYNAMO_TABLE}" $${SEED_ARGS}
 
 volumes:
   dynamodb-data: {}
