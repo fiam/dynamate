@@ -1,4 +1,6 @@
 /target
+.dynamate.log
+dynamate.log
 *.py
 .claude/
 .vscode/
