@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::cell::RefCell;
 use std::{borrow::Cow, time::Duration};
 
 use aws_sdk_dynamodb::Client;
@@ -20,11 +20,10 @@ use crate::{
     widgets::{QueryWidget, WidgetInner, error::ErrorPopup, theme::Theme},
 };
 
-#[derive(Clone)]
 pub struct TablePickerWidget {
-    inner: Arc<WidgetInner>,
-    client: Arc<Client>,
-    state: Arc<std::sync::RwLock<TablePickerState>>,
+    inner: WidgetInner,
+    client: Client,
+    state: RefCell<TablePickerState>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -131,6 +130,10 @@ struct TablePickerState {
     filtered_tables: Vec<String>,
     list_state: ListState,
     filter: FilterInput,
+}
+
+struct TableListEvent {
+    result: Result<Vec<String>, String>,
 }
 
 impl TablePickerState {
@@ -252,53 +255,20 @@ impl TablePickerWidget {
         },
     ];
 
-    pub fn new(client: Arc<Client>, parent: crate::env::WidgetId) -> Self {
+    pub fn new(client: Client, parent: crate::env::WidgetId) -> Self {
         Self {
-            inner: Arc::new(WidgetInner::new::<Self>(parent)),
+            inner: WidgetInner::new::<Self>(parent),
             client,
-            state: Arc::new(std::sync::RwLock::new(TablePickerState::default())),
+            state: RefCell::new(TablePickerState::default()),
         }
     }
 
-    async fn load(self, ctx: crate::env::WidgetCtx) {
-        self.set_loading_state(LoadingState::Loading);
-        ctx.invalidate();
-
-        let result = self.fetch_tables().await;
-        let mut state = self.state.write().unwrap();
-        match result {
-            Ok(tables) => {
-                state.tables = tables;
-                state.apply_filter();
-                state.loading_state = LoadingState::Loaded;
-            }
-            Err(err) => {
-                state.loading_state = LoadingState::Error(err.clone());
-                let is_empty = state.tables.is_empty();
-                drop(state);
-                if is_empty {
-                    ctx.set_popup(Box::new(ErrorPopup::new("Error", err, self.inner.id())));
-                } else {
-                    ctx.show_toast(Toast {
-                        message: err,
-                        kind: ToastKind::Error,
-                        duration: Duration::from_secs(4),
-                    });
-                }
-                ctx.invalidate();
-                return;
-            }
-        }
-        ctx.invalidate();
-    }
-
-    async fn fetch_tables(&self) -> Result<Vec<String>, String> {
+    async fn fetch_tables(client: Client) -> Result<Vec<String>, String> {
         let mut table_names = Vec::new();
         let mut last_evaluated_table_name = None;
 
         loop {
-            let output = self
-                .client
+            let output = client
                 .list_tables()
                 .set_exclusive_start_table_name(last_evaluated_table_name)
                 .send()
@@ -316,12 +286,8 @@ impl TablePickerWidget {
         Ok(table_names)
     }
 
-    fn set_loading_state(&self, state: LoadingState) {
-        self.state.write().unwrap().loading_state = state;
-    }
-
     fn select_next(&self) {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.borrow_mut();
         let len = state.filtered_tables.len();
         if len == 0 {
             return;
@@ -334,7 +300,7 @@ impl TablePickerWidget {
     }
 
     fn select_previous(&self) {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.borrow_mut();
         let len = state.filtered_tables.len();
         if len == 0 {
             return;
@@ -349,14 +315,13 @@ impl TablePickerWidget {
     fn handle_selection(&self, ctx: crate::env::WidgetCtx) -> bool {
         let selected = {
             self.state
-                .read()
-                .unwrap()
+                .borrow()
                 .selected_table_name()
                 .map(str::to_string)
         };
         if let Some(table_name) = selected {
             let widget = Box::new(QueryWidget::new(
-                self.client.as_ref().clone(),
+                self.client.clone(),
                 &table_name,
                 self.inner.id(),
             ));
@@ -369,16 +334,25 @@ impl TablePickerWidget {
 
 impl crate::widgets::Widget for TablePickerWidget {
     fn inner(&self) -> &WidgetInner {
-        self.inner.as_ref()
+        &self.inner
     }
 
     fn start(&self, ctx: crate::env::WidgetCtx) {
-        let this = self.clone();
-        tokio::task::spawn_local(this.load(ctx));
+        {
+            let mut state = self.state.borrow_mut();
+            state.loading_state = LoadingState::Loading;
+        }
+        ctx.invalidate();
+        let client = self.client.clone();
+        let ctx_clone = ctx.clone();
+        tokio::spawn(async move {
+            let result = Self::fetch_tables(client).await;
+            ctx_clone.emit_self(TableListEvent { result });
+        });
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.borrow_mut();
         let filter_active = state.filter.is_active();
         let list_area = if filter_active {
             let layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]);
@@ -466,11 +440,46 @@ impl crate::widgets::Widget for TablePickerWidget {
         }
     }
 
+    fn on_self_event(&self, ctx: crate::env::WidgetCtx, event: &crate::env::AppEvent) {
+        if let Some(list_event) = event.payload::<TableListEvent>() {
+            let mut state = self.state.borrow_mut();
+            match list_event.result.as_ref() {
+                Ok(tables) => {
+                    state.tables = tables.clone();
+                    state.apply_filter();
+                    state.loading_state = LoadingState::Loaded;
+                    ctx.invalidate();
+                }
+                Err(err) => {
+                    state.loading_state = LoadingState::Error(err.clone());
+                    let is_empty = state.tables.is_empty();
+                    drop(state);
+                    if is_empty {
+                        ctx.set_popup(Box::new(ErrorPopup::new(
+                            "Error",
+                            err.clone(),
+                            self.inner.id(),
+                        )));
+                    } else {
+                        ctx.show_toast(Toast {
+                            message: err.clone(),
+                            kind: ToastKind::Error,
+                            duration: Duration::from_secs(4),
+                        });
+                    }
+                    ctx.invalidate();
+                }
+            }
+        }
+    }
+
     fn handle_event(&self, ctx: crate::env::WidgetCtx, event: &Event) -> bool {
-        let filter_active = self.state.read().unwrap().filter.is_active();
-        let filter_applied = !self.state.read().unwrap().filter.value.is_empty();
+        let (filter_active, filter_applied) = {
+            let state = self.state.borrow();
+            (state.filter.is_active(), !state.filter.value.is_empty())
+        };
         if filter_active {
-            let mut state = self.state.write().unwrap();
+            let mut state = self.state.borrow_mut();
             if state.filter.handle_event(event) {
                 state.apply_filter();
                 return true;
@@ -480,7 +489,7 @@ impl crate::widgets::Widget for TablePickerWidget {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Char('/') => {
-                    let mut state = self.state.write().unwrap();
+                    let mut state = self.state.borrow_mut();
                     state.filter.set_active(true);
                     return true;
                 }
@@ -488,7 +497,7 @@ impl crate::widgets::Widget for TablePickerWidget {
                     return self.handle_selection(ctx);
                 }
                 KeyCode::Esc if !filter_active && filter_applied => {
-                    let mut state = self.state.write().unwrap();
+                    let mut state = self.state.borrow_mut();
                     state.filter.clear();
                     state.apply_filter();
                     return true;
@@ -512,7 +521,7 @@ impl crate::widgets::Widget for TablePickerWidget {
     }
 
     fn help(&self) -> Option<&[help::Entry<'_>]> {
-        let state = self.state.read().unwrap();
+        let state = self.state.borrow();
         let filter_active = state.filter.is_active();
         let filter_applied = !state.filter.value.is_empty();
         if filter_active {
@@ -525,6 +534,6 @@ impl crate::widgets::Widget for TablePickerWidget {
     }
 
     fn suppress_global_help(&self) -> bool {
-        self.state.read().unwrap().filter.is_active()
+        self.state.borrow().filter.is_active()
     }
 }

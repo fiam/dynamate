@@ -1,4 +1,5 @@
 use std::any::type_name;
+use std::cell::RefCell;
 
 use crossterm::event::Event;
 use rand::{Rng, distributions::Alphanumeric};
@@ -20,7 +21,7 @@ pub struct WidgetInner {
     id: WidgetId,
     parent: WidgetId,
     self_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
-    self_rx: std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
+    self_rx: RefCell<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
 }
 
 impl WidgetInner {
@@ -36,7 +37,7 @@ impl WidgetInner {
             id: WidgetId::new(type_name, &suffix),
             parent,
             self_tx,
-            self_rx: std::sync::Mutex::new(self_rx),
+            self_rx: RefCell::new(self_rx),
         }
     }
 
@@ -53,13 +54,14 @@ impl WidgetInner {
     }
 
     pub fn drain_self_events(&self) -> Vec<AppEvent> {
-        let mut rx = self.self_rx.lock().unwrap();
+        let mut rx = self.self_rx.borrow_mut();
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
             events.push(event);
         }
         events
     }
+
 }
 
 fn type_basename(full: &str) -> &str {

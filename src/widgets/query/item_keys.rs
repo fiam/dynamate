@@ -1,117 +1,93 @@
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use aws_sdk_dynamodb::types::{KeySchemaElement, KeyType, TableDescription};
 
-#[derive(Debug, Default)]
-struct Inner {
-    set: HashSet<String>,    // canonical keys (unique)
-    hidden: HashSet<String>, // hidden keys
-    sorted: Vec<String>,     // cached, sorted snapshot
-    visible: Vec<String>,    // visible keys
-}
-
 #[derive(Debug, Default, Clone)]
 pub struct ItemKeys {
-    inner: Arc<RwLock<Inner>>,
-}
-
-/// Read guard that exposes a borrowed slice of the sorted keys (stable Rust).
-pub struct SortedKeysGuard<'a> {
-    guard: RwLockReadGuard<'a, Inner>,
-}
-impl<'a> SortedKeysGuard<'a> {
-    pub fn as_slice(&self) -> &[String] {
-        &self.guard.visible
-    }
-}
-impl<'a> std::ops::Deref for SortedKeysGuard<'a> {
-    type Target = [String];
-    fn deref(&self) -> &Self::Target {
-        &self.guard.sorted
-    }
+    set: HashSet<String>,
+    hidden: HashSet<String>,
+    sorted: Vec<String>,
+    visible: Vec<String>,
 }
 
 impl ItemKeys {
     /// Insert many keys and rebuild the cached order:
     ///  - HASH key first, RANGE key second, others alphabetical.
-    pub fn extend<I>(&self, keys: I, table: &TableDescription)
+    pub fn extend<I>(&mut self, keys: I, table: &TableDescription)
     where
         I: IntoIterator<Item = String>,
     {
-        let mut inner = self.inner.write().unwrap();
-
-        // 1) Insert into the set (deduplicated)
-        inner.set.extend(keys);
-
-        // 2) Rebuild the sorted snapshot from the set
-        let keys: Vec<String> = inner.set.iter().cloned().collect();
-        inner.sorted.clear();
-        inner.sorted.extend(keys);
-
-        // 3) Sort: HASH first, then RANGE, then everything else alphabetically
-        let (hash_name, range_name) = extract_hash_range(table);
-        inner.sorted.sort_by(|a, b| {
-            rank(a, &hash_name, &range_name)
-                .cmp(&rank(b, &hash_name, &range_name))
-                .then_with(|| a.cmp(b)) // alpha tie-break for non-key attrs
-        });
-
-        // 4) Update the visible keys
-        self.update_visible(&mut inner);
+        self.set.extend(keys);
+        self.rebuild_with_schema(table);
     }
 
     /// Insert many keys and rebuild the cached order without table schema info.
     /// This keeps things responsive when DescribeTable is slow or unavailable.
-    pub fn extend_unordered<I>(&self, keys: I)
+    pub fn extend_unordered<I>(&mut self, keys: I)
     where
         I: IntoIterator<Item = String>,
     {
-        let mut inner = self.inner.write().unwrap();
-        inner.set.extend(keys);
-        let mut keys: Vec<String> = inner.set.iter().cloned().collect();
+        self.set.extend(keys);
+        self.rebuild_unordered();
+    }
+
+    /// Rebuild ordering using the table schema (HASH first, RANGE second).
+    pub fn rebuild_with_schema(&mut self, table: &TableDescription) {
+        let mut keys: Vec<String> = self.set.iter().cloned().collect();
+        let (hash_name, range_name) = extract_hash_range(table);
+        keys.sort_by(|a, b| {
+            rank(a, &hash_name, &range_name)
+                .cmp(&rank(b, &hash_name, &range_name))
+                .then_with(|| a.cmp(b))
+        });
+        self.sorted = keys;
+        self.update_visible();
+    }
+
+    /// Rebuild ordering alphabetically (no schema).
+    pub fn rebuild_unordered(&mut self) {
+        let mut keys: Vec<String> = self.set.iter().cloned().collect();
         keys.sort();
-        inner.sorted = keys;
-        self.update_visible(&mut inner);
+        self.sorted = keys;
+        self.update_visible();
     }
 
-    /// Borrow the current sorted view (no clone). Keep guard alive while using the slice.
-    pub fn sorted(&self) -> SortedKeysGuard<'_> {
-        SortedKeysGuard {
-            guard: self.inner.read().unwrap(),
-        }
+    /// Sorted keys including hidden fields.
+    pub fn sorted(&self) -> &[String] {
+        &self.sorted
     }
 
-    pub fn hide(&self, key: &str) {
-        let mut inner = self.inner.write().unwrap();
-        inner.hidden.insert(key.to_string());
-        self.update_visible(&mut inner);
+    /// Sorted keys with hidden fields filtered out.
+    pub fn visible(&self) -> &[String] {
+        &self.visible
     }
 
-    pub fn unhide(&self, key: &str) {
-        let mut inner = self.inner.write().unwrap();
-        inner.hidden.remove(key);
-        self.update_visible(&mut inner);
+    pub fn hide(&mut self, key: &str) {
+        self.hidden.insert(key.to_string());
+        self.update_visible();
+    }
+
+    pub fn unhide(&mut self, key: &str) {
+        self.hidden.remove(key);
+        self.update_visible();
     }
 
     pub fn is_hidden(&self, key: &str) -> bool {
-        let inner = self.inner.read().unwrap();
-        inner.hidden.contains(key)
+        self.hidden.contains(key)
     }
 
-    pub fn clear(&self) {
-        let mut inner = self.inner.write().unwrap();
-        inner.set.clear();
-        inner.hidden.clear();
-        inner.sorted.clear();
-        inner.visible.clear();
+    pub fn clear(&mut self) {
+        self.set.clear();
+        self.hidden.clear();
+        self.sorted.clear();
+        self.visible.clear();
     }
 
-    fn update_visible(&self, inner: &mut Inner) {
-        inner.visible = inner
+    fn update_visible(&mut self) {
+        self.visible = self
             .sorted
             .iter()
-            .filter(|k| !inner.hidden.contains(*k))
+            .filter(|k| !self.hidden.contains(*k))
             .cloned()
             .collect();
     }

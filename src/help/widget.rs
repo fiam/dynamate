@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::cell::RefCell;
 
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use ratatui::{
@@ -17,31 +17,31 @@ use crate::{
 };
 
 pub struct Widget {
-    inner: Arc<WidgetInner>,
+    inner: WidgetInner,
     entries: Vec<Entry<'static>>,
-    modifiers: Arc<RwLock<KeyModifiers>>,
-    mode: Arc<RwLock<ModDisplay>>,
+    modifiers: RefCell<KeyModifiers>,
+    mode: RefCell<ModDisplay>,
 }
 
 impl Widget {
     pub fn new<'a>(
         entries: Vec<&Entry<'a>>,
-        modifiers: Arc<RwLock<KeyModifiers>>,
-        mode: Arc<RwLock<ModDisplay>>,
+        modifiers: KeyModifiers,
+        mode: ModDisplay,
         parent: WidgetId,
     ) -> Self {
         Self {
-            inner: Arc::new(WidgetInner::new::<Self>(parent)),
+            inner: WidgetInner::new::<Self>(parent),
             entries: entries.into_iter().map(|e| e.to_owned_entry()).collect(),
-            modifiers,
-            mode,
+            modifiers: RefCell::new(modifiers),
+            mode: RefCell::new(mode),
         }
     }
 }
 
 impl crate::widgets::Widget for Widget {
     fn inner(&self) -> &WidgetInner {
-        self.inner.as_ref()
+        &self.inner
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -63,8 +63,8 @@ impl crate::widgets::Widget for Widget {
 
         let inner = area.inner(Margin::new(1, 1));
 
-        let modifiers = *self.modifiers.read().unwrap();
-        let mode = *self.mode.read().unwrap();
+        let modifiers = *self.modifiers.borrow();
+        let mode = *self.mode.borrow();
         let visible: Vec<_> = self
             .entries
             .iter()
@@ -116,6 +116,13 @@ impl crate::widgets::Widget for Widget {
             .style(Style::default().fg(theme.text()));
 
         ratatui::widgets::Widget::render(table, inner, buf);
+    }
+
+    fn on_app_event(&self, _ctx: crate::env::WidgetCtx, event: &crate::env::AppEvent) {
+        if let Some(help_event) = event.payload::<crate::env::HelpStateEvent>() {
+            *self.modifiers.borrow_mut() = help_event.modifiers;
+            *self.mode.borrow_mut() = help_event.mode;
+        }
     }
 
     fn handle_event(&self, ctx: crate::env::WidgetCtx, event: &Event) -> bool {

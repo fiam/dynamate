@@ -2,8 +2,10 @@ use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crossterm::event::KeyModifiers;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::help::ModDisplay;
 use crate::widgets::{Popup, Widget};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -57,6 +59,12 @@ pub enum WidgetEvent {
     Created { id: WidgetId, parent: WidgetId },
     Started { id: WidgetId },
     Closed { id: WidgetId },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct HelpStateEvent {
+    pub modifiers: KeyModifiers,
+    pub mode: ModDisplay,
 }
 
 #[allow(dead_code)]

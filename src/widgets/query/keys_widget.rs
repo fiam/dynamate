@@ -1,7 +1,4 @@
-use std::{
-    borrow::Cow,
-    sync::{Arc, RwLock},
-};
+use std::{borrow::Cow, cell::RefCell};
 
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -18,11 +15,10 @@ use crate::{
     widgets::{Popup, WidgetInner, theme},
 };
 
-#[derive(Clone)]
 pub struct KeysWidget {
-    inner: Arc<WidgetInner>,
-    on_event: Arc<dyn Fn(Event) + Send + Sync + 'static>,
-    state: Arc<RwLock<KeysWidgetState>>,
+    inner: WidgetInner,
+    on_event: Box<dyn Fn(Event) + Send + 'static>,
+    state: RefCell<KeysWidgetState>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,7 +76,7 @@ impl KeysWidget {
     ];
     pub fn new(
         keys: &[Key],
-        on_event: impl Fn(Event) + Send + Sync + 'static,
+        on_event: impl Fn(Event) + Send + 'static,
         parent: crate::env::WidgetId,
     ) -> Self {
         let mut state = KeysWidgetState {
@@ -89,14 +85,14 @@ impl KeysWidget {
         };
         state.table_state.select(Some(0));
         Self {
-            inner: Arc::new(WidgetInner::new::<Self>(parent)),
-            state: Arc::new(RwLock::new(state)),
-            on_event: Arc::new(on_event),
+            inner: WidgetInner::new::<Self>(parent),
+            state: RefCell::new(state),
+            on_event: Box::new(on_event),
         }
     }
 
     fn update_all(&self, hidden: bool) {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.borrow_mut();
         for key in state.keys.iter_mut() {
             if key.hidden != hidden {
                 key.hidden = hidden;
@@ -113,7 +109,7 @@ impl KeysWidget {
 
 impl crate::widgets::Widget for KeysWidget {
     fn inner(&self) -> &WidgetInner {
-        self.inner.as_ref()
+        &self.inner
     }
 
     fn help(&self) -> Option<&[help::Entry<'_>]> {
@@ -122,7 +118,7 @@ impl crate::widgets::Widget for KeysWidget {
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &theme::Theme) {
         fill_bg(frame.buffer_mut(), area, theme.panel_bg());
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.borrow_mut();
 
         let block = Block::bordered()
             .title(Line::raw(pad("Show fields", 2)).centered())
@@ -177,13 +173,13 @@ impl crate::widgets::Widget for KeysWidget {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Down => {
-                    self.state.write().unwrap().table_state.scroll_down_by(1);
+                    self.state.borrow_mut().table_state.scroll_down_by(1);
                 }
                 KeyCode::Up => {
-                    self.state.write().unwrap().table_state.scroll_up_by(1);
+                    self.state.borrow_mut().table_state.scroll_up_by(1);
                 }
                 KeyCode::Char(' ') => {
-                    let mut state = self.state.write().unwrap();
+                    let mut state = self.state.borrow_mut();
                     if let Some(selected) = state.table_state.selected()
                         && let Some(key) = state.keys.get_mut(selected)
                     {

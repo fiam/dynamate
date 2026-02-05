@@ -8,6 +8,7 @@ use aws_sdk_dynamodb::{
 
 use super::{DynamoDbRequest, QueryBuilder, QueryType, ScanBuilder};
 
+#[derive(Debug, Clone)]
 pub enum Kind {
     Scan,
     Query,
@@ -15,6 +16,7 @@ pub enum Kind {
     QueryLSI(String), // index_name
 }
 
+#[derive(Debug, Clone)]
 pub struct Output {
     items: Option<Vec<HashMap<String, AttributeValue>>>,
     count: i32,

@@ -59,7 +59,9 @@ mod subcommands;
 mod util;
 mod widgets;
 
-use crate::env::{AppBus, AppBusRx, AppCommand, AppEvent, Toast, ToastKind, WidgetEvent};
+use crate::env::{
+    AppBus, AppBusRx, AppCommand, AppEvent, HelpStateEvent, Toast, ToastKind, WidgetEvent,
+};
 use crate::help::ModDisplay;
 use crate::util::fill_bg;
 use crate::widgets::theme::Theme;
@@ -101,7 +103,7 @@ enum Commands {
     },
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -109,28 +111,23 @@ async fn main() -> Result<()> {
 
     color_eyre::install()?;
     let cli = <Cli as clap::Parser>::parse();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async move {
-            let client = Arc::new(aws::new_client(cli.endpoint_url.as_deref()).await?);
-            aws::validate_connection(&client).await?;
+    let client = Arc::new(aws::new_client(cli.endpoint_url.as_deref()).await?);
+    aws::validate_connection(&client).await?;
 
-            match cli.command {
-                Some(Commands::ListTables { json }) => {
-                    let options = subcommands::list_tables::Options { json };
-                    subcommands::list_tables::command(&client, options).await?;
-                    Ok(())
-                }
-                None => {
-                    logging::initialize()?;
-                    App::default()
-                        .run_tui(client.clone(), cli.table.as_deref())
-                        .await?;
-                    Ok(())
-                }
-            }
-        })
-        .await
+    match cli.command {
+        Some(Commands::ListTables { json }) => {
+            let options = subcommands::list_tables::Options { json };
+            subcommands::list_tables::command(&client, options).await?;
+            Ok(())
+        }
+        None => {
+            logging::initialize()?;
+            App::default()
+                .run_tui(client.clone(), cli.table.as_deref())
+                .await?;
+            Ok(())
+        }
+    }
 }
 
 struct App {
@@ -143,8 +140,8 @@ struct App {
     widgets: Vec<Box<dyn crate::widgets::Widget>>,
     popup: Option<Box<dyn crate::widgets::Popup>>,
     toast: Option<ToastState>,
-    modifiers: Arc<std::sync::RwLock<crossterm::event::KeyModifiers>>,
-    help_mode: Arc<std::sync::RwLock<ModDisplay>>,
+    modifiers: crossterm::event::KeyModifiers,
+    help_mode: ModDisplay,
 }
 
 impl App {
@@ -274,10 +271,8 @@ impl App {
             widgets: Vec::new(),
             popup: None,
             toast: None,
-            modifiers: Arc::new(std::sync::RwLock::new(
-                crossterm::event::KeyModifiers::empty(),
-            )),
-            help_mode: Arc::new(std::sync::RwLock::new(ModDisplay::Both)),
+            modifiers: crossterm::event::KeyModifiers::empty(),
+            help_mode: ModDisplay::Both,
         }
     }
 
@@ -292,10 +287,11 @@ impl App {
 
         let keyboard_support = terminal::supports_keyboard_enhancement().unwrap_or(false);
         if keyboard_support {
-            *app.help_mode.write().unwrap() = ModDisplay::Swap;
+            app.help_mode = ModDisplay::Swap;
         } else {
-            *app.help_mode.write().unwrap() = ModDisplay::Both;
+            app.help_mode = ModDisplay::Both;
         }
+        app.broadcast_help_state();
 
         if keyboard_support {
             let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
@@ -329,7 +325,7 @@ impl App {
                 env::WidgetId::app(),
             )),
             None => Box::new(widgets::TablePickerWidget::new(
-                client,
+                client.as_ref().clone(),
                 env::WidgetId::app(),
             )),
         };
@@ -479,8 +475,8 @@ impl App {
         let buf = frame.buffer_mut();
         fill_bg(buf, area, theme.bg());
         let all_help = self.make_help();
-        let modifiers = *self.modifiers.read().unwrap();
-        let help_mode = *self.help_mode.read().unwrap();
+        let modifiers = self.modifiers;
+        let help_mode = self.help_mode;
         let help_height = help::height(&all_help, frame.area(), modifiers, help_mode);
         let layout = Layout::vertical([
             Constraint::Length(1),
@@ -542,32 +538,32 @@ impl App {
         }
 
         if let Some(key) = event.as_key_event() {
-            let mut modifiers = self.modifiers.write().unwrap();
             let mut updated = false;
             if let KeyCode::Modifier(modifier) = key.code {
                 if let Some(flag) = modifier_flag(modifier) {
                     match key.kind {
                         KeyEventKind::Press | KeyEventKind::Repeat => {
-                            if !modifiers.contains(flag) {
-                                modifiers.insert(flag);
+                            if !self.modifiers.contains(flag) {
+                                self.modifiers.insert(flag);
                                 updated = true;
                             }
                         }
                         KeyEventKind::Release => {
-                            if modifiers.contains(flag) {
-                                modifiers.remove(flag);
+                            if self.modifiers.contains(flag) {
+                                self.modifiers.remove(flag);
                                 updated = true;
                             }
                         }
                     }
                 }
-            } else if *modifiers != key.modifiers {
-                *modifiers = key.modifiers;
+            } else if self.modifiers != key.modifiers {
+                self.modifiers = key.modifiers;
                 updated = true;
             }
 
             if updated {
                 self.should_redraw = true;
+                self.broadcast_help_state();
             }
         }
 
@@ -604,8 +600,8 @@ impl App {
                     }
                     self.popup = Some(Box::new(help::Widget::new(
                         self.make_help(),
-                        self.modifiers.clone(),
-                        self.help_mode.clone(),
+                        self.modifiers,
+                        self.help_mode,
                         self.widgets
                             .last()
                             .map(|w| w.id())
@@ -647,6 +643,14 @@ impl App {
 
     fn make_ctx(&self, widget: &dyn crate::widgets::Widget) -> crate::env::WidgetCtx {
         widget.inner().ctx(self.bus.clone())
+    }
+
+    fn broadcast_help_state(&self) {
+        let event = HelpStateEvent {
+            modifiers: self.modifiers,
+            mode: self.help_mode,
+        };
+        self.bus.broadcast(AppEvent::new(env::WidgetId::app(), event));
     }
 
     fn process_widget_self_events(&mut self) {
