@@ -66,7 +66,7 @@ fn type_basename(full: &str) -> &str {
     full.rsplit("::").next().unwrap_or(full)
 }
 
-pub trait Widget: Send + Sync {
+pub trait Widget: Send {
     fn inner(&self) -> &WidgetInner;
 
     fn id(&self) -> WidgetId {

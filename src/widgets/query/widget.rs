@@ -1,10 +1,11 @@
 use std::{
     borrow::Cow,
+    cell::{Cell, RefCell},
     cmp::{max, min},
     collections::{HashMap, HashSet},
     env, fs,
     process::Command,
-    sync::Arc,
+    sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -27,10 +28,10 @@ use ratatui::{
     text::Line,
     widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState},
 };
-use tokio::sync::OnceCell;
+use throbber_widgets_tui::{Throbber, ThrobberState};
+use throbber_widgets_tui::symbols::throbber::BRAILLE_ONE;
 
 use super::{input, item_keys, keys_widget, tree};
-use item_keys::ItemKeys;
 use keys_widget::KeysWidget;
 
 use crate::{
@@ -50,31 +51,60 @@ use dynamate::{
 use humansize::{BINARY, format_size};
 use unicode_width::UnicodeWidthStr;
 
-#[derive(Clone)]
 pub struct QueryWidget {
-    inner: Arc<WidgetInner>,
-    client: Arc<aws_sdk_dynamodb::Client>,
+    inner: WidgetInner,
+    client: aws_sdk_dynamodb::Client,
     table_name: String,
-    sync_state: Arc<std::sync::RwLock<QuerySyncState>>,
-    table_desc: Arc<OnceCell<Arc<TableDescription>>>,
-    ttl_attr: Arc<OnceCell<Option<String>>>,
+    state: RefCell<QueryState>,
+    table_meta: RefCell<Option<TableMeta>>,
+    meta_started: Cell<bool>,
+    request_seq: Cell<u64>,
+    page_size: i32,
 }
 
 #[derive(Default)]
-struct QuerySyncState {
+struct QueryState {
     input: input::Input,
     filter: FilterInput,
     loading_state: LoadingState,
     query_output: Option<Output>,
     items: Vec<Item>,
     filtered_indices: Vec<usize>,
-    item_keys: Arc<item_keys::ItemKeys>,
+    item_keys: item_keys::ItemKeys,
     table_state: TableState,
     last_evaluated_key: Option<HashMap<String, AttributeValue>>,
     last_query: String,
     is_loading_more: bool,
     show_tree: bool,
     reopen_tree: Option<usize>,
+    scanned_total: i64,
+    matched_total: i64,
+    throbber: ThrobberState,
+    last_render_capacity: usize,
+    is_prefetching: bool,
+}
+
+struct QueryPageEvent {
+    request_id: u64,
+    append: bool,
+    start_key_present: bool,
+    result: Mutex<Option<Result<Output, String>>>,
+}
+
+#[derive(Clone)]
+struct TableMeta {
+    table_desc: TableDescription,
+    ttl_attr: Option<String>,
+}
+
+struct TableMetaEvent {
+    meta: TableMeta,
+}
+
+struct PutItemEvent {
+    query: String,
+    reopen_tree: Option<usize>,
+    result: Result<(), String>,
 }
 
 #[derive(Debug, Default)]
@@ -166,11 +196,14 @@ impl FilterInput {
 }
 
 #[derive(Debug, Clone)]
-struct Item(HashMap<String, AttributeValue>, Arc<ItemKeys>);
+struct Item(HashMap<String, AttributeValue>);
 
 impl Item {
+    const MAX_CELL_LEN: usize = 120;
+
     fn value(&self, key: &str) -> String {
-        self.0
+        let value = self
+            .0
             .get(key)
             .map(|val| {
                 if let Ok(v) = val.as_s() {
@@ -179,19 +212,87 @@ impl Item {
                     v.clone()
                 } else if let Ok(v) = val.as_bool() {
                     v.to_string()
+                } else if let Ok(v) = val.as_null() {
+                    if *v {
+                        "null".to_string()
+                    } else {
+                        "null".to_string()
+                    }
+                } else if let Ok(v) = val.as_b() {
+                    format!("<binary:{}>", v.as_ref().len())
+                } else if let Ok(v) = val.as_ss() {
+                    format!("<ss:{}>", v.len())
+                } else if let Ok(v) = val.as_ns() {
+                    format!("<ns:{}>", v.len())
+                } else if let Ok(v) = val.as_bs() {
+                    format!("<bs:{}>", v.len())
+                } else if let Ok(v) = val.as_l() {
+                    format!("<list:{}>", v.len())
+                } else if let Ok(v) = val.as_m() {
+                    format!("<map:{}>", v.len())
                 } else {
-                    format!("{val:?}")
+                    "<unknown>".to_string()
                 }
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        truncate_cell(value)
     }
 
     fn value_size(&self, key: &str) -> usize {
-        self.value(key).len()
+        let Some(val) = self.0.get(key) else {
+            return 0;
+        };
+        let len = if let Ok(v) = val.as_s() {
+            v.len()
+        } else if let Ok(v) = val.as_n() {
+            v.len()
+        } else if let Ok(v) = val.as_bool() {
+            if *v { 4 } else { 5 }
+        } else if let Ok(_) = val.as_null() {
+            4
+        } else if let Ok(v) = val.as_b() {
+            tag_len("binary", v.as_ref().len())
+        } else if let Ok(v) = val.as_ss() {
+            tag_len("ss", v.len())
+        } else if let Ok(v) = val.as_ns() {
+            tag_len("ns", v.len())
+        } else if let Ok(v) = val.as_bs() {
+            tag_len("bs", v.len())
+        } else if let Ok(v) = val.as_l() {
+            tag_len("list", v.len())
+        } else if let Ok(v) = val.as_m() {
+            tag_len("map", v.len())
+        } else {
+            "<unknown>".len()
+        };
+        len.min(Self::MAX_CELL_LEN)
     }
 }
 
-impl QuerySyncState {
+fn truncate_cell(mut value: String) -> String {
+    if value.len() > Item::MAX_CELL_LEN {
+        let keep = Item::MAX_CELL_LEN.saturating_sub(3);
+        value.truncate(keep);
+        value.push_str("...");
+    }
+    value
+}
+
+fn tag_len(tag: &str, size: usize) -> usize {
+    // "<" + tag + ":" + digits + ">"
+    2 + tag.len() + digits(size)
+}
+
+fn digits(mut value: usize) -> usize {
+    let mut count = 1;
+    while value >= 10 {
+        value /= 10;
+        count += 1;
+    }
+    count
+}
+
+impl QueryState {
     fn filter_applied(&self) -> bool {
         !self.filter.value.trim().is_empty()
     }
@@ -227,10 +328,44 @@ impl QuerySyncState {
                 .position(|idx| *idx == current_item)
         {
             self.table_state.select(Some(new_idx));
+            self.clamp_table_offset();
             return;
         }
 
         self.table_state.select(Some(0));
+        self.clamp_table_offset();
+    }
+
+    fn clamp_table_offset(&mut self) {
+        let total = self.filtered_indices.len();
+        let max_rows = self.last_render_capacity.max(1);
+        if total == 0 {
+            self.table_state.select(None);
+            *self.table_state.offset_mut() = 0;
+            return;
+        }
+        let selected = match self.table_state.selected() {
+            Some(selected) if selected < total => selected,
+            Some(_) | None => {
+                let last = total.saturating_sub(1);
+                self.table_state.select(Some(last));
+                last
+            }
+        };
+        if total <= max_rows {
+            *self.table_state.offset_mut() = 0;
+            return;
+        }
+        let offset = self.table_state.offset();
+        if selected < offset {
+            *self.table_state.offset_mut() = selected;
+            return;
+        }
+        let end = offset.saturating_add(max_rows);
+        if selected >= end {
+            let new_offset = selected + 1 - max_rows;
+            *self.table_state.offset_mut() = new_offset.min(total.saturating_sub(1));
+        }
     }
 }
 
@@ -245,16 +380,15 @@ enum LoadingState {
 
 impl crate::widgets::Widget for QueryWidget {
     fn inner(&self) -> &WidgetInner {
-        self.inner.as_ref()
+        &self.inner
     }
 
     fn start(&self, ctx: crate::env::WidgetCtx) {
-        let this: QueryWidget = self.clone();
-        tokio::spawn(this.load(ctx));
+        self.start_query(None, ctx);
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let mut state = self.sync_state.write().unwrap();
+        let mut state = self.state.borrow_mut();
 
         if state.show_tree {
             self.render_tree(frame, area, theme, &mut state);
@@ -285,13 +419,13 @@ impl crate::widgets::Widget for QueryWidget {
     }
 
     fn handle_event(&self, ctx: crate::env::WidgetCtx, event: &Event) -> bool {
-        let input_is_active = self.sync_state.read().unwrap().input.is_active();
-        let filter_active = self.sync_state.read().unwrap().filter.is_active();
-        if input_is_active && self.sync_state.write().unwrap().input.handle_event(event) {
+        let input_is_active = self.state.borrow().input.is_active();
+        let filter_active = self.state.borrow().filter.is_active();
+        if input_is_active && self.state.borrow_mut().input.handle_event(event) {
             return true;
         }
         if filter_active {
-            let mut state = self.sync_state.write().unwrap();
+            let mut state = self.state.borrow_mut();
             if state.filter.handle_event(event) {
                 state.apply_filter();
                 return true;
@@ -300,21 +434,27 @@ impl crate::widgets::Widget for QueryWidget {
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Tab | KeyCode::BackTab => {
-                    self.sync_state.write().unwrap().input.toggle_active()
+                    self.state.borrow_mut().input.toggle_active()
                 }
                 KeyCode::Esc if input_is_active => {
-                    self.sync_state.write().unwrap().input.toggle_active()
+                    self.state.borrow_mut().input.toggle_active()
                 }
                 KeyCode::Esc if filter_active => {
-                    let mut state = self.sync_state.write().unwrap();
+                    let mut state = self.state.borrow_mut();
                     state.filter.clear();
                     state.filter.set_active(false);
                     state.apply_filter();
                 }
                 KeyCode::Esc => {
-                    let mut state = self.sync_state.write().unwrap();
+                    let mut state = self.state.borrow_mut();
                     if state.show_tree {
                         state.show_tree = false;
+                    } else if matches!(state.loading_state, LoadingState::Loading) {
+                        drop(state);
+                        self.cancel_active_request();
+                    } else if state.is_prefetching {
+                        drop(state);
+                        self.cancel_active_request();
                     } else if state.filter_applied() {
                         state.filter.clear();
                         state.apply_filter();
@@ -325,7 +465,7 @@ impl crate::widgets::Widget for QueryWidget {
                 }
                 KeyCode::Enter if input_is_active => {
                     let query = {
-                        let mut state = self.sync_state.write().unwrap();
+                        let mut state = self.state.borrow_mut();
                         let value = state.input.value().to_string();
                         state.input.toggle_active();
                         value
@@ -333,13 +473,13 @@ impl crate::widgets::Widget for QueryWidget {
                     self.start_query(Some(&query), ctx.clone());
                 }
                 KeyCode::Enter => {
-                    let mut state = self.sync_state.write().unwrap();
+                    let mut state = self.state.borrow_mut();
                     if !state.show_tree {
                         state.show_tree = true;
                     }
                 }
                 KeyCode::Char('/') if !input_is_active && !filter_active => {
-                    let mut state = self.sync_state.write().unwrap();
+                    let mut state = self.state.borrow_mut();
                     if !state.show_tree {
                         state.filter.set_active(true);
                     }
@@ -347,7 +487,7 @@ impl crate::widgets::Widget for QueryWidget {
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(ctx.clone()),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
                 KeyCode::Char('f') => {
-                    let state = self.sync_state.read().unwrap();
+                    let state = self.state.borrow();
                     let keys = state
                         .item_keys
                         .sorted()
@@ -358,7 +498,7 @@ impl crate::widgets::Widget for QueryWidget {
                         })
                         .collect::<Vec<_>>();
                     let item_keys = state.item_keys.clone();
-                    let popup = Arc::new(KeysWidget::new(
+                    let popup = Box::new(KeysWidget::new(
                         &keys,
                         move |ev| match ev {
                             keys_widget::Event::KeyHidden(name) => {
@@ -373,7 +513,7 @@ impl crate::widgets::Widget for QueryWidget {
                     ctx.set_popup(popup);
                 }
                 KeyCode::Char('t') => {
-                    let mut state = self.sync_state.write().unwrap();
+                    let mut state = self.state.borrow_mut();
                     state.show_tree = !state.show_tree;
                 }
                 KeyCode::Char('e')
@@ -423,11 +563,17 @@ impl crate::widgets::Widget for QueryWidget {
     }
 
     fn help(&self) -> Option<&[help::Entry<'_>]> {
-        let show_tree = self.sync_state.read().unwrap().show_tree;
+        let show_tree = self.state.borrow().show_tree;
         if show_tree {
             return Some(Self::HELP_TREE);
         }
-        let state = self.sync_state.read().unwrap();
+        let state = self.state.borrow();
+        if (matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching)
+            && !state.input.is_active()
+            && !state.filter.is_active()
+        {
+            return Some(Self::HELP_LOADING);
+        }
         if state.filter.is_active() {
             Some(Self::HELP_FILTER_EDIT)
         } else if state.filter_applied() {
@@ -438,7 +584,94 @@ impl crate::widgets::Widget for QueryWidget {
     }
 
     fn suppress_global_help(&self) -> bool {
-        self.sync_state.read().unwrap().filter.is_active()
+        self.state.borrow().filter.is_active()
+    }
+
+    fn on_self_event(&self, ctx: crate::env::WidgetCtx, event: &crate::env::AppEvent) {
+        if let Some(page_event) = event.payload::<QueryPageEvent>() {
+            if !self.is_request_active(page_event.request_id) {
+                return;
+            }
+            let result = page_event.result.lock().unwrap().take();
+            let Some(result) = result else {
+                return;
+            };
+            match result {
+                Ok(output) => {
+                    tracing::trace!(
+                        table = %self.table_name,
+                        request_id = page_event.request_id,
+                        "execute_page_ok"
+                    );
+                    let (scanned_total, matched_total) = self.record_query_progress(&output);
+                    let next_key = output.last_evaluated_key().cloned();
+                    tracing::debug!(
+                        table = %self.table_name,
+                        request_id = page_event.request_id,
+                        start_key_present = page_event.start_key_present,
+                        next_key_present = next_key.is_some(),
+                        items = output.items().len(),
+                        scanned = output.scanned_count(),
+                        matched = output.count(),
+                        "query_page"
+                    );
+                    self.process_query_output(output, page_event.append, ctx.clone());
+                    if !page_event.append {
+                        self.set_loading_state(LoadingState::Loaded);
+                    }
+                    {
+                        let mut state = self.state.borrow_mut();
+                        state.is_prefetching = false;
+                    }
+                    ctx.invalidate();
+                    let _ = (scanned_total, matched_total);
+                }
+                Err(err) => {
+                    tracing::error!(
+                        table = %self.table_name,
+                        request_id = page_event.request_id,
+                        error = %err,
+                        "execute_page_error"
+                    );
+                    self.set_loading_state(LoadingState::Error(err.clone()));
+                    self.show_error(ctx.clone(), &err);
+                    let mut state = self.state.borrow_mut();
+                    state.is_loading_more = false;
+                    state.is_prefetching = false;
+                    ctx.invalidate();
+                }
+            }
+            return;
+        }
+
+        if let Some(meta_event) = event.payload::<TableMetaEvent>() {
+            let meta = meta_event.meta.clone();
+            self.table_meta.borrow_mut().replace(meta.clone());
+            let keys = self.state.borrow().item_keys.sorted().as_slice().to_vec();
+            self.state
+                .borrow()
+                .item_keys
+                .extend(keys, &meta.table_desc);
+            return;
+        }
+
+        if let Some(put_event) = event.payload::<PutItemEvent>() {
+            match put_event.result.as_ref() {
+                Ok(()) => {
+                    self.start_query_with_reopen(
+                        Some(&put_event.query),
+                        ctx.clone(),
+                        put_event.reopen_tree,
+                    );
+                }
+                Err(err) => {
+                    self.set_loading_state(LoadingState::Error(err.clone()));
+                    self.show_error(ctx.clone(), err);
+                    ctx.invalidate();
+                }
+            }
+            return;
+        }
     }
 }
 
@@ -569,6 +802,16 @@ impl QueryWidget {
             alt: None,
         },
     ];
+    const HELP_LOADING: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("cancel"),
+            long: Cow::Borrowed("Cancel request"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+    ];
     const HELP_TREE: &'static [help::Entry<'static>] = &[
         help::Entry {
             keys: Cow::Borrowed("j/k/↑/↓"),
@@ -591,34 +834,35 @@ impl QueryWidget {
             alt: None,
         },
     ];
-    const PAGE_SIZE: i32 = 100;
     pub fn new(
-        client: Arc<aws_sdk_dynamodb::Client>,
+        client: aws_sdk_dynamodb::Client,
         table_name: &str,
         parent: crate::env::WidgetId,
     ) -> Self {
+        let page_size = env_u64("DYNAMATE_PAGE_SIZE")
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(100);
         Self {
-            inner: Arc::new(WidgetInner::new::<Self>(parent)),
+            inner: WidgetInner::new::<Self>(parent),
             client,
             table_name: table_name.to_string(),
-            sync_state: Arc::new(std::sync::RwLock::new(QuerySyncState::default())),
-            table_desc: Arc::new(OnceCell::new()),
-            ttl_attr: Arc::new(OnceCell::new()),
+            state: RefCell::new(QueryState::default()),
+            table_meta: RefCell::new(None),
+            meta_started: Cell::new(false),
+            request_seq: Cell::new(0),
+            page_size,
         }
     }
 
-    async fn load(self, ctx: crate::env::WidgetCtx) {
-        self.start_query(None, ctx);
-    }
-
     fn set_loading_state(&self, state: LoadingState) {
-        self.sync_state.write().unwrap().loading_state = state;
+        self.state.borrow_mut().loading_state = state;
     }
 
     fn show_error(&self, ctx: crate::env::WidgetCtx, message: &str) {
-        let is_empty = self.sync_state.read().unwrap().items.is_empty();
+        let is_empty = self.state.borrow().items.is_empty();
         if is_empty {
-            ctx.set_popup(Arc::new(ErrorPopup::new("Error", message, self.inner.id())));
+            ctx.set_popup(Box::new(ErrorPopup::new("Error", message, self.inner.id())));
         } else {
             ctx.show_toast(Toast {
                 message: message.to_string(),
@@ -628,66 +872,14 @@ impl QueryWidget {
         }
     }
 
-    async fn table_description(&self) -> Result<Arc<TableDescription>, String> {
-        let arc_ref = self
-            .table_desc
-            .get_or_try_init(|| async {
-                let out = self
-                    .client
-                    .describe_table()
-                    .table_name(self.table_name.clone())
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-
-                let table = out
-                    .table()
-                    .ok_or_else(|| "DescribeTable: missing table".to_string())?;
-                Ok::<Arc<TableDescription>, String>(Arc::new(table.clone()))
-            })
-            .await?;
-
-        Ok(arc_ref.clone())
-    }
-
-    async fn ttl_attribute_name(&self) -> Option<String> {
-        let result = self
-            .ttl_attr
-            .get_or_try_init(|| async {
-                let output = self
-                    .client
-                    .describe_time_to_live()
-                    .table_name(self.table_name.clone())
-                    .send()
-                    .await;
-                let attr = match output {
-                    Ok(out) => out.time_to_live_description().and_then(|desc| {
-                        let enabled = matches!(
-                            desc.time_to_live_status(),
-                            Some(TimeToLiveStatus::Enabled | TimeToLiveStatus::Enabling)
-                        );
-                        if enabled {
-                            desc.attribute_name().map(|name| name.to_string())
-                        } else {
-                            None
-                        }
-                    }),
-                    Err(_) => None,
-                };
-                Ok::<Option<String>, String>(attr)
-            })
-            .await;
-
-        result.ok().and_then(|name| name.clone())
-    }
-
     fn scroll_down(&self, ctx: crate::env::WidgetCtx) {
         let should_load_more = {
-            let mut state = self.sync_state.write().unwrap();
+            let mut state = self.state.borrow_mut();
             state.table_state.scroll_down_by(1);
             if state.show_tree {
                 false
             } else {
+                state.clamp_table_offset();
                 self.should_load_more(&state)
             }
         };
@@ -698,11 +890,12 @@ impl QueryWidget {
     }
 
     fn scroll_up(&self) {
-        let mut state = self.sync_state.write().unwrap();
+        let mut state = self.state.borrow_mut();
         state.table_state.scroll_up_by(1);
+        state.clamp_table_offset();
     }
 
-    fn should_load_more(&self, state: &QuerySyncState) -> bool {
+    fn should_load_more(&self, state: &QueryState) -> bool {
         if state.is_loading_more || state.last_evaluated_key.is_none() {
             return false;
         }
@@ -716,7 +909,7 @@ impl QueryWidget {
 
     fn load_more(&self, ctx: crate::env::WidgetCtx) {
         let (query, start_key) = {
-            let mut state = self.sync_state.write().unwrap();
+            let mut state = self.state.borrow_mut();
             if state.is_loading_more {
                 return;
             }
@@ -727,20 +920,8 @@ impl QueryWidget {
             (state.last_query.clone(), start_key)
         };
 
-        self.start_query_page(query, Some(start_key), true, ctx);
-    }
-
-    async fn create_request(&self, query: &str) -> Result<DynamoDbRequest, String> {
-        let query = query.trim();
-        if query.is_empty() {
-            return Ok(DynamoDbRequest::Scan(ScanBuilder::new()));
-        }
-        let expr = parse_dynamo_expression(query).map_err(|e| e.to_string())?;
-        let table_desc = self.table_description().await.map_err(|e| e.to_string())?;
-        Ok(DynamoDbRequest::from_expression_and_table(
-            &expr,
-            &table_desc,
-        ))
+        let request_id = self.active_request_id();
+        self.start_query_page(query, Some(start_key), true, ctx, request_id);
     }
 
     fn start_query(&self, query: Option<&str>, ctx: crate::env::WidgetCtx) {
@@ -753,9 +934,17 @@ impl QueryWidget {
         ctx: crate::env::WidgetCtx,
         reopen_tree: Option<usize>,
     ) {
+        self.maybe_start_meta_fetch(ctx.clone());
         let query = query.unwrap_or("").to_string();
+        let request_id = self.bump_request_id();
+        tracing::debug!(
+            table = %self.table_name,
+            request_id,
+            query = %query,
+            "start_query"
+        );
         {
-            let mut state = self.sync_state.write().unwrap();
+            let mut state = self.state.borrow_mut();
             state.items.clear();
             state.filtered_indices.clear();
             state.item_keys.clear();
@@ -767,13 +956,12 @@ impl QueryWidget {
             state.loading_state = LoadingState::Loading;
             state.show_tree = false;
             state.reopen_tree = reopen_tree;
+            state.scanned_total = 0;
+            state.matched_total = 0;
+            state.is_prefetching = false;
         }
         ctx.invalidate();
-        let this: QueryWidget = self.clone();
-        tokio::spawn(async move {
-            let _ = this.ttl_attribute_name().await;
-        });
-        self.start_query_page(query, None, false, ctx);
+        self.start_query_page(query, None, false, ctx, request_id);
     }
 
     fn start_query_page(
@@ -782,59 +970,119 @@ impl QueryWidget {
         start_key: Option<HashMap<String, AttributeValue>>,
         append: bool,
         ctx: crate::env::WidgetCtx,
+        request_id: u64,
     ) {
-        let this: QueryWidget = self.clone();
-        tokio::spawn(async move {
-            match this.create_request(&query).await {
+        let client = self.client.clone();
+        let table_name = self.table_name.clone();
+        let page_size = self.page_size;
+        let cached_meta = self.table_meta.borrow().clone();
+        let ctx_clone = ctx.clone();
+        tokio::task::spawn_local(async move {
+            let request_result = create_request_from_query(
+                &query,
+                cached_meta,
+                client.clone(),
+                table_name.clone(),
+                ctx_clone.clone(),
+            )
+            .await;
+            let result = match request_result {
                 Ok(request) => {
-                    match execute_page(
-                        this.client.clone(),
-                        &this.table_name,
+                    let request_start_key = start_key.clone();
+                    tracing::trace!(
+                        table = %table_name,
+                        request_id,
+                        append,
+                        start_key_present = request_start_key.is_some(),
+                        "execute_page_start"
+                    );
+                    execute_page(
+                        &client,
+                        &table_name,
                         &request,
-                        start_key,
-                        Some(Self::PAGE_SIZE),
+                        request_start_key,
+                        Some(page_size),
                     )
                     .await
-                    {
-                        Ok(query_output) => {
-                            this.process_query_output(query_output, append).await;
-                            if !append {
-                                this.set_loading_state(LoadingState::Loaded);
-                            }
-                        }
-                        Err(e) => {
-                            let message = e.to_string();
-                            this.set_loading_state(LoadingState::Error(message.clone()));
-                            this.show_error(ctx.clone(), &message);
-                        }
-                    };
+                    .map_err(|e| e.to_string())
                 }
-                Err(e) => {
-                    this.set_loading_state(LoadingState::Error(e.clone()));
-                    this.show_error(ctx.clone(), &e);
-                }
-            }
-            ctx.invalidate();
+                Err(e) => Err(e),
+            };
+            ctx.emit_self(QueryPageEvent {
+                request_id,
+                append,
+                start_key_present: start_key.is_some(),
+                result: Mutex::new(Some(result)),
+            });
         });
     }
 
-    async fn process_query_output(&self, output: Output, append: bool) {
+    fn bump_request_id(&self) -> u64 {
+        let next = self.request_seq.get() + 1;
+        self.request_seq.set(next);
+        next
+    }
+
+    fn active_request_id(&self) -> u64 {
+        self.request_seq.get()
+    }
+
+    fn is_request_active(&self, request_id: u64) -> bool {
+        self.active_request_id() == request_id
+    }
+
+    fn cancel_active_request(&self) {
+        self.bump_request_id();
+        let mut state = self.state.borrow_mut();
+        state.is_loading_more = false;
+        state.is_prefetching = false;
+        if matches!(state.loading_state, LoadingState::Loading) {
+            state.loading_state = LoadingState::Loaded;
+        }
+    }
+
+    fn maybe_start_meta_fetch(&self, ctx: crate::env::WidgetCtx) {
+        if self.meta_started.get() {
+            return;
+        }
+        self.meta_started.set(true);
+        let client = self.client.clone();
+        let table_name = self.table_name.clone();
+        tokio::task::spawn_local(async move {
+            if let Ok(meta) = fetch_table_meta(client, table_name).await {
+                ctx.emit_self(TableMetaEvent { meta });
+            }
+        });
+    }
+
+    fn record_query_progress(&self, output: &Output) -> (i64, i64) {
+        let mut state = self.state.borrow_mut();
+        state.scanned_total += output.scanned_count() as i64;
+        state.matched_total += output.count() as i64;
+        (state.scanned_total, state.matched_total)
+    }
+
+    fn process_query_output(&self, output: Output, append: bool, ctx: crate::env::WidgetCtx) {
         let mut item_keys = HashSet::new();
-        let shared_item_keys = self.sync_state.read().unwrap().item_keys.clone();
+        let shared_item_keys = self.state.borrow().item_keys.clone();
 
         let items = output.items();
         let new_items: Vec<Item> = items
             .iter()
             .map(|item| {
                 item_keys.extend(item.keys().cloned());
-                Item(item.clone(), shared_item_keys.clone())
+                Item(item.clone())
             })
             .collect();
 
         let keys_for_update: Vec<String> = item_keys.into_iter().collect();
-        let table_desc = self.table_desc.get().cloned();
+        let table_desc = self
+            .table_meta
+            .borrow()
+            .as_ref()
+            .map(|meta| meta.table_desc.clone());
 
-        let mut state = self.sync_state.write().unwrap();
+        let mut state = self.state.borrow_mut();
         if !append {
             state.items.clear();
         }
@@ -863,11 +1111,14 @@ impl QueryWidget {
             shared_item_keys.extend(keys_for_update, &table_desc);
         } else {
             shared_item_keys.extend_unordered(keys_for_update.clone());
-            let this: QueryWidget = self.clone();
             let shared_item_keys = shared_item_keys.clone();
-            tokio::spawn(async move {
-                if let Ok(table_desc) = this.table_description().await {
-                    shared_item_keys.extend(keys_for_update, &table_desc);
+            let client = self.client.clone();
+            let table_name = self.table_name.clone();
+            let ctx = ctx.clone();
+            tokio::task::spawn_local(async move {
+                if let Ok(meta) = fetch_table_meta(client, table_name).await {
+                    shared_item_keys.extend(keys_for_update, &meta.table_desc);
+                    ctx.emit_self(TableMetaEvent { meta });
                 }
             });
         }
@@ -878,24 +1129,51 @@ impl QueryWidget {
         frame: &mut Frame,
         area: Rect,
         theme: &Theme,
-        state: &mut QuerySyncState,
+        state: &mut QueryState,
     ) {
+        tracing::trace!(
+            table = %self.table_name,
+            area_width = area.width,
+            area_height = area.height,
+            items = state.items.len(),
+            filtered = state.filtered_indices.len(),
+            offset = state.table_state.offset(),
+            loading = ?state.loading_state,
+            "render_table"
+        );
+        // maximum rows is the area height, minus 2 for the the top and bottom borders,
+        // minus 1 for the header
+        let max_rows = (area.height - 2 - 1) as usize;
+        state.last_render_capacity = max_rows;
+        state.clamp_table_offset();
+        let total = state.filtered_indices.len();
+        let (first_item, last_item) = if total == 0 {
+            (0, 0)
+        } else {
+            let first_item = state.table_state.offset() + 1;
+            let last_item = min(first_item + max_rows, total);
+            (first_item, last_item)
+        };
+
         let keys_view = state.item_keys.sorted();
-        let header = Row::new(
-            keys_view
-                .as_slice()
-                .iter()
-                .map(|key| Line::from(key.clone())),
-        )
+        let keys: Vec<String> = keys_view.as_slice().to_vec();
+        let header = Row::new(keys.iter().map(|key| Line::from(key.clone())))
         .style(Style::new().bold());
 
-        let items = &state.items;
-        let widths: Vec<Constraint> = keys_view
-            .as_slice()
+        let visible_indices = if total == 0 {
+            &[][..]
+        } else {
+            let start = state.table_state.offset();
+            let end = start.saturating_add(max_rows).min(total);
+            &state.filtered_indices[start..end]
+        };
+
+        let widths: Vec<Constraint> = keys
             .iter()
             .map(|key| {
-                let max_value = items
+                let max_value = visible_indices
                     .iter()
+                    .filter_map(|idx| state.items.get(*idx))
                     .map(|item| item.value_size(key))
                     .max()
                     .unwrap_or(0);
@@ -906,31 +1184,52 @@ impl QueryWidget {
 
         drop(keys_view);
 
-        // maximum rows is the area height, minus 2 for the the top and bottom borders,
-        // minus 1 for the header
-        let max_rows = (area.height - 2 - 1) as usize;
-        let total = state.filtered_indices.len();
-        let (first_item, last_item) = if total == 0 {
-            (0, 0)
-        } else {
-            let first_item = state.table_state.offset() + 1;
-            let last_item = min(first_item + max_rows, total);
-            (first_item, last_item)
-        };
-
         // a block with a right aligned title with the loading state on the right
+        let more_marker = if state.last_evaluated_key.is_some() {
+            "more"
+        } else {
+            "end"
+        };
+        let approx_total = self
+            .table_meta
+            .borrow()
+            .as_ref()
+            .and_then(|meta| meta.table_desc.item_count())
+            .map(|count| format!("~{count} items"));
         let (title, title_bottom, title_style) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => (
                 format!("Results{}", output_info(state.query_output.as_ref())),
                 pad(
-                    format!("{} results, showing {}-{}", total, first_item, last_item),
+                    format!(
+                        "{} results, showing {}-{} · {}{}",
+                        total,
+                        first_item,
+                        last_item,
+                        more_marker,
+                        approx_total
+                            .as_ref()
+                            .map(|value| format!(" · {value}"))
+                            .unwrap_or_default()
+                    ),
                     2,
                 ),
                 Style::default().fg(theme.text()),
             ),
             LoadingState::Loading => (
                 "Loading".to_string(),
-                "".to_string(),
+                pad(
+                    format!(
+                        "scanned {} · matched {} · {}{}",
+                        state.scanned_total,
+                        state.matched_total,
+                        more_marker,
+                        approx_total
+                            .as_ref()
+                            .map(|value| format!(" · {value}"))
+                            .unwrap_or_default()
+                    ),
+                    2,
+                ),
                 Style::default().fg(theme.warning()),
             ),
             LoadingState::Error(_) => (
@@ -957,12 +1256,16 @@ impl QueryWidget {
             state.table_state.select(Some(0));
         }
 
-        let filtered_items: Vec<&Item> = state
-            .filtered_indices
+        let rows: Vec<Row> = visible_indices
             .iter()
             .filter_map(|idx| state.items.get(*idx))
+            .map(|item| {
+                let values = keys.iter().map(|key| item.value(key));
+                Row::new(values)
+            })
             .collect();
-        let table = Table::new(filtered_items, widths)
+        let visible_len = rows.len();
+        let table = Table::new(rows, widths)
             .block(block)
             .header(header)
             .highlight_spacing(HighlightSpacing::Always)
@@ -973,7 +1276,16 @@ impl QueryWidget {
                     .fg(theme.selection_fg()),
             );
 
-        StatefulWidget::render(table, area, frame.buffer_mut(), &mut state.table_state);
+        let selected_global = state.table_state.selected();
+        let selected_visible = selected_global
+            .and_then(|selected| selected.checked_sub(state.table_state.offset()))
+            .filter(|selected| *selected < visible_len);
+        let mut render_state = TableState::default();
+        render_state.select(selected_visible);
+        StatefulWidget::render(table, area, frame.buffer_mut(), &mut render_state);
+        if matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching {
+            render_loading_throbber(frame, area, theme, &mut state.throbber);
+        }
 
         let filter_value = state.filter.value.trim();
         if !filter_value.is_empty() {
@@ -999,8 +1311,22 @@ impl QueryWidget {
         frame: &mut Frame,
         area: Rect,
         theme: &Theme,
-        state: &mut QuerySyncState,
+        state: &mut QueryState,
     ) {
+        tracing::trace!(
+            table = %self.table_name,
+            area_width = area.width,
+            area_height = area.height,
+            items = state.items.len(),
+            filtered = state.filtered_indices.len(),
+            loading = ?state.loading_state,
+            "render_tree"
+        );
+        let more_marker = if state.last_evaluated_key.is_some() {
+            "more"
+        } else {
+            "end"
+        };
         let (title, title_bottom, title_style) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => (
                 self.item_view_title(state),
@@ -1009,7 +1335,13 @@ impl QueryWidget {
             ),
             LoadingState::Loading => (
                 "Loading".to_string(),
-                "".to_string(),
+                pad(
+                    format!(
+                        "scanned {} · matched {} · {}",
+                        state.scanned_total, state.matched_total, more_marker
+                    ),
+                    2,
+                ),
                 Style::default().fg(theme.warning()),
             ),
             LoadingState::Error(_) => (
@@ -1043,13 +1375,17 @@ impl QueryWidget {
         let text = content.join("\n");
         let paragraph = Paragraph::new(text).block(block);
         frame.render_widget(paragraph, area);
+        if matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching {
+            render_loading_throbber(frame, area, theme, &mut state.throbber);
+        }
     }
 
-    fn item_view_title(&self, state: &QuerySyncState) -> String {
-        let Some(table_desc) = self.table_desc.get() else {
+    fn item_view_title(&self, state: &QueryState) -> String {
+        let meta_ref = self.table_meta.borrow();
+        let Some(meta) = meta_ref.as_ref() else {
             return " Item ".to_string();
         };
-        let (hash_key, range_key) = extract_hash_range(table_desc);
+        let (hash_key, range_key) = extract_hash_range(&meta.table_desc);
 
         let selected = state.table_state.selected().unwrap_or(0);
         let Some(item) = state
@@ -1085,7 +1421,7 @@ impl QueryWidget {
         }
     }
 
-    fn item_view_subtitle(&self, state: &QuerySyncState) -> String {
+    fn item_view_subtitle(&self, state: &QueryState) -> String {
         let selected = state.table_state.selected().unwrap_or(0);
         let Some(item) = state
             .filtered_indices
@@ -1098,15 +1434,20 @@ impl QueryWidget {
         let size = format_size(bytes as u64, BINARY);
         let mut parts = vec![format!("~{}", size)];
 
-        if let Some(ttl_attr) = self.ttl_attr.get().and_then(|name| name.as_ref())
+        if let Some(ttl_attr) = self
+            .table_meta
+            .borrow()
+            .as_ref()
+            .and_then(|meta| meta.ttl_attr.as_ref())
             && let Some(ttl_value) = item.0.get(ttl_attr)
             && let Some(formatted) = format_ttl_value(ttl_value)
         {
             parts.push(format!("ttl: {formatted}"));
         }
 
-        if let Some(table_desc) = self.table_desc.get() {
-            let table_info = TableInfo::from_table_description(table_desc);
+        let meta_ref = self.table_meta.borrow();
+        if let Some(meta) = meta_ref.as_ref() {
+            let table_info = TableInfo::from_table_description(&meta.table_desc);
             let gsi_count = table_info
                 .global_secondary_indexes
                 .iter()
@@ -1130,7 +1471,7 @@ impl QueryWidget {
 
     fn edit_selected(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
         let (item, query, reopen_tree) = {
-            let state = self.sync_state.read().unwrap();
+            let state = self.state.borrow();
             let selected = state.table_state.selected();
             let item_index = selected.and_then(|index| state.filtered_indices.get(index).copied());
             let item = item_index
@@ -1193,7 +1534,7 @@ impl QueryWidget {
     }
 
     fn create_item(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
-        let query = self.sync_state.read().unwrap().last_query.clone();
+        let query = self.state.borrow().last_query.clone();
         let initial = match format {
             EditorFormat::Plain => "{}\n".to_string(),
             EditorFormat::DynamoDb => "{}\n".to_string(),
@@ -1292,47 +1633,111 @@ impl QueryWidget {
         ctx: crate::env::WidgetCtx,
         reopen_tree: Option<usize>,
     ) {
-        let this: QueryWidget = self.clone();
-        tokio::spawn(async move {
-            this.set_loading_state(LoadingState::Loading);
-            ctx.invalidate();
-            let result = this
-                .client
+        self.set_loading_state(LoadingState::Loading);
+        ctx.invalidate();
+        let client = self.client.clone();
+        let table_name = self.table_name.clone();
+        tokio::task::spawn_local(async move {
+            let result = client
                 .put_item()
-                .table_name(&this.table_name)
+                .table_name(&table_name)
                 .set_item(Some(item))
                 .send()
                 .await;
-            match result {
-                Ok(_) => {
-                    this.start_query_with_reopen(Some(&query), ctx.clone(), reopen_tree);
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    this.set_loading_state(LoadingState::Error(message.clone()));
-                    this.show_error(ctx.clone(), &message);
-                    ctx.invalidate();
-                }
-            }
+            let event_result = result.map(|_| ()).map_err(|err| err.to_string());
+            ctx.emit_self(PutItemEvent {
+                query,
+                reopen_tree,
+                result: event_result,
+            });
         });
     }
+}
+
+async fn create_request_from_query(
+    query: &str,
+    cached_meta: Option<TableMeta>,
+    client: aws_sdk_dynamodb::Client,
+    table_name: String,
+    ctx: crate::env::WidgetCtx,
+) -> Result<DynamoDbRequest, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(DynamoDbRequest::Scan(ScanBuilder::new()));
+    }
+    let table_desc = match cached_meta {
+        Some(meta) => meta.table_desc,
+        None => {
+            let meta = fetch_table_meta(client, table_name).await?;
+            let desc = meta.table_desc.clone();
+            ctx.emit_self(TableMetaEvent { meta });
+            desc
+        }
+    };
+    let expr = parse_dynamo_expression(query).map_err(|e| e.to_string())?;
+    Ok(DynamoDbRequest::from_expression_and_table(
+        &expr,
+        &table_desc,
+    ))
+}
+
+async fn fetch_table_description(
+    client: aws_sdk_dynamodb::Client,
+    table_name: String,
+) -> Result<TableDescription, String> {
+    let out = client
+        .describe_table()
+        .table_name(&table_name)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let table = out
+        .table()
+        .ok_or_else(|| "DescribeTable: missing table".to_string())?;
+    Ok(table.clone())
+}
+
+async fn fetch_ttl_attribute(
+    client: aws_sdk_dynamodb::Client,
+    table_name: String,
+) -> Option<String> {
+    let output = client
+        .describe_time_to_live()
+        .table_name(&table_name)
+        .send()
+        .await;
+    match output {
+        Ok(out) => out.time_to_live_description().and_then(|desc| {
+            let enabled = matches!(
+                desc.time_to_live_status(),
+                Some(TimeToLiveStatus::Enabled | TimeToLiveStatus::Enabling)
+            );
+            if enabled {
+                desc.attribute_name().map(|name| name.to_string())
+            } else {
+                None
+            }
+        }),
+        Err(_) => None,
+    }
+}
+
+async fn fetch_table_meta(
+    client: aws_sdk_dynamodb::Client,
+    table_name: String,
+) -> Result<TableMeta, String> {
+    let table_desc = fetch_table_description(client.clone(), table_name.clone()).await?;
+    let ttl_attr = fetch_ttl_attribute(client, table_name).await;
+    Ok(TableMeta {
+        table_desc,
+        ttl_attr,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
 enum EditorFormat {
     Plain,
     DynamoDb,
-}
-
-impl<'a> From<&Item> for Row<'a> {
-    fn from(item: &Item) -> Self {
-        let mut parts = Vec::new();
-        let view = item.1.sorted();
-        for key in view.as_slice() {
-            parts.push(item.value(key));
-        }
-        Row::new(parts)
-    }
 }
 
 fn extract_hash_range(table: &TableDescription) -> (Option<String>, Option<String>) {
@@ -1351,6 +1756,10 @@ fn extract_hash_range(table: &TableDescription) -> (Option<String>, Option<Strin
         }
     }
     (hash, range)
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    env::var(name).ok().and_then(|value| value.parse::<u64>().ok())
 }
 
 fn item_matches_index(item: &Item, index: &SecondaryIndex) -> bool {
@@ -1394,6 +1803,23 @@ fn format_ttl_value(value: &AttributeValue) -> Option<String> {
     let time = UNIX_EPOCH + Duration::from_secs(ts as u64);
     let dt: DateTime<Utc> = time.into();
     Some(dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
+}
+fn render_loading_throbber(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    state: &mut ThrobberState,
+) {
+    if area.width < 4 {
+        return;
+    }
+    state.calc_next();
+    let rect = Rect::new(area.x + area.width.saturating_sub(4), area.y, 3, 1);
+    let throbber = Throbber::default()
+        .throbber_set(BRAILLE_ONE)
+        .style(Style::default().fg(theme.text_muted()))
+        .throbber_style(Style::default().fg(theme.warning()));
+    frame.render_stateful_widget(throbber, rect, state);
 }
 
 fn output_info(output: Option<&Output>) -> String {

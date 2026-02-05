@@ -277,7 +277,7 @@ impl TablePickerWidget {
                 let is_empty = state.tables.is_empty();
                 drop(state);
                 if is_empty {
-                    ctx.set_popup(Arc::new(ErrorPopup::new("Error", err, self.inner.id())));
+                    ctx.set_popup(Box::new(ErrorPopup::new("Error", err, self.inner.id())));
                 } else {
                     ctx.show_toast(Toast {
                         message: err,
@@ -355,8 +355,8 @@ impl TablePickerWidget {
                 .map(str::to_string)
         };
         if let Some(table_name) = selected {
-            let widget = Arc::new(QueryWidget::new(
-                self.client.clone(),
+            let widget = Box::new(QueryWidget::new(
+                self.client.as_ref().clone(),
                 &table_name,
                 self.inner.id(),
             ));
@@ -374,7 +374,7 @@ impl crate::widgets::Widget for TablePickerWidget {
 
     fn start(&self, ctx: crate::env::WidgetCtx) {
         let this = self.clone();
-        tokio::spawn(this.load(ctx));
+        tokio::task::spawn_local(this.load(ctx));
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {

@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use color_eyre::Result;
 use crossterm::event::{
     Event, EventStream, KeyCode, KeyEventKind, KeyboardEnhancementFlags, ModifierKeyCode,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags, poll, read,
 };
 use crossterm::terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -101,7 +101,7 @@ enum Commands {
     },
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -109,23 +109,28 @@ async fn main() -> Result<()> {
 
     color_eyre::install()?;
     let cli = <Cli as clap::Parser>::parse();
-    let client = Arc::new(aws::new_client(cli.endpoint_url.as_deref()).await?);
-    aws::validate_connection(&client).await?;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let client = Arc::new(aws::new_client(cli.endpoint_url.as_deref()).await?);
+            aws::validate_connection(&client).await?;
 
-    match cli.command {
-        Some(Commands::ListTables { json }) => {
-            let options = subcommands::list_tables::Options { json };
-            subcommands::list_tables::command(&client, options).await?;
-            Ok(())
-        }
-        None => {
-            logging::initialize()?;
-            App::default()
-                .run_tui(client.clone(), cli.table.as_deref())
-                .await?;
-            Ok(())
-        }
-    }
+            match cli.command {
+                Some(Commands::ListTables { json }) => {
+                    let options = subcommands::list_tables::Options { json };
+                    subcommands::list_tables::command(&client, options).await?;
+                    Ok(())
+                }
+                None => {
+                    logging::initialize()?;
+                    App::default()
+                        .run_tui(client.clone(), cli.table.as_deref())
+                        .await?;
+                    Ok(())
+                }
+            }
+        })
+        .await
 }
 
 struct App {
@@ -134,8 +139,9 @@ struct App {
     event_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     should_quit: bool,
     should_redraw: bool,
-    widgets: Vec<Arc<dyn crate::widgets::Widget>>,
-    popup: Option<Arc<dyn crate::widgets::Popup>>,
+    input_grace_until: Option<Instant>,
+    widgets: Vec<Box<dyn crate::widgets::Widget>>,
+    popup: Option<Box<dyn crate::widgets::Popup>>,
     toast: Option<ToastState>,
     modifiers: Arc<std::sync::RwLock<crossterm::event::KeyModifiers>>,
     help_mode: Arc<std::sync::RwLock<ModDisplay>>,
@@ -264,6 +270,7 @@ impl App {
             event_rx,
             should_quit: false,
             should_redraw: true,
+            input_grace_until: None,
             widgets: Vec::new(),
             popup: None,
             toast: None,
@@ -279,7 +286,10 @@ impl App {
         client: Arc<aws_sdk_dynamodb::Client>,
         table_name: Option<&str>,
     ) -> Result<()> {
-        let app = self;
+        let mut app = self;
+        let terminal = ratatui::init();
+        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+
         let keyboard_support = terminal::supports_keyboard_enhancement().unwrap_or(false);
         if keyboard_support {
             *app.help_mode.write().unwrap() = ModDisplay::Swap;
@@ -287,14 +297,14 @@ impl App {
             *app.help_mode.write().unwrap() = ModDisplay::Both;
         }
 
-        let terminal = ratatui::init();
-        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
-
         if keyboard_support {
             let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
             let _ = crossterm::execute!(std::io::stdout(), PushKeyboardEnhancementFlags(flags));
         }
+        drain_pending_input()?;
+        app.input_grace_until = Some(Instant::now() + Duration::from_millis(250));
 
         let app_result = app.run(terminal, client, table_name).await;
         crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
@@ -311,13 +321,14 @@ impl App {
         client: Arc<aws_sdk_dynamodb::Client>,
         table_name: Option<&str>,
     ) -> Result<()> {
-        let widget: Arc<dyn crate::widgets::Widget> = match table_name {
-            Some(name) => Arc::new(widgets::QueryWidget::new(
-                client,
+        let event_driven_render = env_flag("DYNAMATE_EVENT_DRIVEN_RENDER");
+        let widget: Box<dyn crate::widgets::Widget> = match table_name {
+            Some(name) => Box::new(widgets::QueryWidget::new(
+                client.as_ref().clone(),
                 name,
                 env::WidgetId::app(),
             )),
-            None => Arc::new(widgets::TablePickerWidget::new(
+            None => Box::new(widgets::TablePickerWidget::new(
                 client,
                 env::WidgetId::app(),
             )),
@@ -344,7 +355,12 @@ impl App {
                     _ = interval.tick() => {
                         self.prune_toast();
                         self.process_widget_self_events();
-                        terminal.draw(|frame| self.render(frame))?;
+                        if !event_driven_render {
+                            terminal.draw(|frame| self.render(frame))?;
+                        } else if self.should_redraw {
+                            terminal.draw(|frame| self.render(frame))?;
+                            self.should_redraw = false;
+                        }
                         // if self.should_redraw {
                         //     terminal.draw(|frame| self.render(frame))?;
                         //     self.should_redraw = false;
@@ -390,7 +406,12 @@ impl App {
                     _ = interval.tick() => {
                         self.prune_toast();
                         self.process_widget_self_events();
-                        terminal.draw(|frame| self.render(frame))?;
+                        if !event_driven_render {
+                            terminal.draw(|frame| self.render(frame))?;
+                        } else if self.should_redraw {
+                            terminal.draw(|frame| self.render(frame))?;
+                            self.should_redraw = false;
+                        }
                         // if self.should_redraw {
                         //     terminal.draw(|frame| self.render(frame))?;
                         //     self.should_redraw = false;
@@ -510,6 +531,15 @@ impl App {
             self.should_quit = true;
             return true;
         }
+        if let Some(until) = self.input_grace_until {
+            if Instant::now() < until {
+                if event.as_key_event().is_some() {
+                    return false;
+                }
+            } else {
+                self.input_grace_until = None;
+            }
+        }
 
         if let Some(key) = event.as_key_event() {
             let mut modifiers = self.modifiers.write().unwrap();
@@ -572,7 +602,7 @@ impl App {
                     {
                         return true;
                     }
-                    self.popup = Some(Arc::new(help::Widget::new(
+                    self.popup = Some(Box::new(help::Widget::new(
                         self.make_help(),
                         self.modifiers.clone(),
                         self.help_mode.clone(),
@@ -764,6 +794,25 @@ impl App {
             self.toast = None;
             self.should_redraw = true;
         }
+    }
+}
+
+fn drain_pending_input() -> Result<()> {
+    let mut drained = 0;
+    while poll(Duration::from_millis(0))? {
+        let _ = read()?;
+        drained += 1;
+        if drained > 256 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn env_flag(name: &str) -> bool {
+    match std::env::var(name) {
+        Ok(value) => matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"),
+        Err(_) => false,
     }
 }
 

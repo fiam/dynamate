@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use aws_sdk_dynamodb::{
     Client, Error,
@@ -51,7 +51,7 @@ impl Output {
 }
 
 pub async fn execute(
-    client: Arc<Client>,
+    client: &Client,
     table_name: &str,
     db_request: &DynamoDbRequest,
 ) -> Result<Output, Error> {
@@ -59,7 +59,7 @@ pub async fn execute(
 }
 
 pub async fn execute_page(
-    client: Arc<Client>,
+    client: &Client,
     table_name: &str,
     db_request: &DynamoDbRequest,
     start_key: Option<HashMap<String, AttributeValue>>,
@@ -112,7 +112,7 @@ pub async fn execute_page(
 }
 
 async fn execute_scan(
-    client: Arc<Client>,
+    client: &Client,
     table_name: &str,
     builder: &ScanBuilder,
     start_key: Option<HashMap<String, AttributeValue>>,
@@ -155,7 +155,7 @@ async fn execute_scan(
 }
 
 async fn execute_query(
-    client: Arc<Client>,
+    client: &Client,
     table_name: &str,
     builder: &QueryBuilder,
     start_key: Option<HashMap<String, AttributeValue>>,

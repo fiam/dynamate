@@ -26,9 +26,9 @@ impl WidgetId {
 pub enum AppCommand {
     Invalidate,
     ForceRedraw,
-    PushWidget(Arc<dyn Widget>),
+    PushWidget(Box<dyn Widget>),
     PopWidget,
-    SetPopup(Arc<dyn Popup>),
+    SetPopup(Box<dyn Popup>),
     DismissPopup,
     ShowToast(Toast),
 }
@@ -132,7 +132,7 @@ impl WidgetCtx {
         self.bus.command(AppCommand::ForceRedraw);
     }
 
-    pub fn push_widget(&self, widget: Arc<dyn Widget>) {
+    pub fn push_widget(&self, widget: Box<dyn Widget>) {
         self.bus.command(AppCommand::PushWidget(widget));
     }
 
@@ -140,7 +140,7 @@ impl WidgetCtx {
         self.bus.command(AppCommand::PopWidget);
     }
 
-    pub fn set_popup(&self, popup: Arc<dyn Popup>) {
+    pub fn set_popup(&self, popup: Box<dyn Popup>) {
         self.bus.command(AppCommand::SetPopup(popup));
     }
 
