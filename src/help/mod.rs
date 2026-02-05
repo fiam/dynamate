@@ -98,7 +98,11 @@ impl<'a> Entry<'a> {
         }
     }
 
-    pub fn display_entries(&self, modifiers: KeyModifiers, mode: ModDisplay) -> Vec<DisplayEntry<'a>> {
+    pub fn display_entries(
+        &self,
+        modifiers: KeyModifiers,
+        mode: ModDisplay,
+    ) -> Vec<DisplayEntry<'a>> {
         match mode {
             ModDisplay::Swap => vec![self.display_swap(modifiers)],
             ModDisplay::Both => self.display_both(),

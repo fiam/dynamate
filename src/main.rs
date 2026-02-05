@@ -431,8 +431,17 @@ impl App {
         } else {
             None
         };
+        let popup_declares_esc = self.popup.as_ref().is_some_and(|popup| {
+            popup
+                .help()
+                .is_some_and(|entries| entries.iter().any(entry_declares_esc))
+        });
         let app_help = if self.popup.is_some() {
-            App::HELP_WITH_POPUP
+            if popup_declares_esc {
+                App::HELP_WITHOUT_POPUP_NO_ESC
+            } else {
+                App::HELP_WITH_POPUP
+            }
         } else if self
             .widgets
             .last()
