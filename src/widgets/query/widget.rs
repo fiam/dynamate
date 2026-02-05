@@ -1795,12 +1795,6 @@ impl QueryWidget {
         } else {
             "end"
         };
-        let query_summary = state.last_query.trim();
-        let query_note = if query_summary.is_empty() {
-            None
-        } else {
-            Some(format!("query: {query_summary}"))
-        };
         let approx_total = self
             .table_meta
             .borrow()
@@ -1811,7 +1805,7 @@ impl QueryWidget {
         if let Some(value) = approx_total.as_ref() {
             footer_suffix.push_str(&format!(" · {value}"));
         }
-        if let Some(value) = query_note.as_ref() {
+        if let Some(value) = query_footer_label(state.query_output.as_ref(), &state.active_query) {
             footer_suffix.push_str(&format!(" · {value}"));
         }
         let (title, title_bottom, title_style) = match &state.loading_state {
@@ -2471,5 +2465,201 @@ fn output_info(output: Option<&Output>) -> String {
             format!(" (Query LSI: {})", index_name)
         }
         None => "".to_string(),
+    }
+}
+
+fn query_footer_label(output: Option<&Output>, active_query: &ActiveQuery) -> Option<String> {
+    let (prefix, allow_query) = match output.map(|o| o.kind()) {
+        Some(Kind::Scan) => ("scan".to_string(), true),
+        Some(Kind::Query) => ("query".to_string(), true),
+        Some(Kind::QueryGSI(index_name)) => (format!("query@{index_name}"), true),
+        Some(Kind::QueryLSI(index_name)) => (format!("query@{index_name}"), true),
+        None => return None,
+    };
+    let query = if allow_query {
+        normalized_query(active_query)
+    } else {
+        None
+    };
+    match query {
+        Some(text) if !text.is_empty() => Some(format!("{prefix} {text}")),
+        _ => Some(prefix),
+    }
+}
+
+fn normalized_query(active_query: &ActiveQuery) -> Option<String> {
+    let raw = active_query.input_value()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match parse_dynamo_expression(trimmed) {
+        Ok(expr) => Some(format_query_summary(&expr)),
+        Err(_) => Some(trimmed.to_string()),
+    }
+}
+
+fn format_query_summary(expr: &dynamate::expr::DynamoExpression) -> String {
+    if !contains_or_or_not(expr) {
+        let mut parts = Vec::new();
+        collect_and_parts(expr, &mut parts);
+        return parts
+            .into_iter()
+            .map(format_expr_compact)
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    format_expr(expr, 0)
+}
+
+fn contains_or_or_not(expr: &dynamate::expr::DynamoExpression) -> bool {
+    use dynamate::expr::DynamoExpression::*;
+    match expr {
+        Or(left, right) => contains_or_or_not(left) || contains_or_or_not(right) || true,
+        Not(inner) => contains_or_or_not(inner) || true,
+        And(left, right) => contains_or_or_not(left) || contains_or_or_not(right),
+        Parentheses(inner) => contains_or_or_not(inner),
+        Comparison { .. } | Between { .. } | In { .. } | Function { .. } => false,
+    }
+}
+
+fn collect_and_parts<'a>(
+    expr: &'a dynamate::expr::DynamoExpression,
+    parts: &mut Vec<&'a dynamate::expr::DynamoExpression>,
+) {
+    use dynamate::expr::DynamoExpression::*;
+    match expr {
+        And(left, right) => {
+            collect_and_parts(left, parts);
+            collect_and_parts(right, parts);
+        }
+        Parentheses(inner) => collect_and_parts(inner, parts),
+        _ => parts.push(expr),
+    }
+}
+
+fn format_expr(expr: &dynamate::expr::DynamoExpression, parent_prec: u8) -> String {
+    use dynamate::expr::DynamoExpression::*;
+    let my_prec = match expr {
+        Or(_, _) => 1,
+        And(_, _) => 2,
+        Not(_) => 3,
+        _ => 4,
+    };
+    let rendered = match expr {
+        Comparison { left, operator, right } => {
+            format!("{}{}{}", format_operand(left), format_comparator(operator), format_operand(right))
+        }
+        Between { operand, lower, upper } => {
+            format!(
+                "{} BETWEEN {} AND {}",
+                format_operand(operand),
+                format_operand(lower),
+                format_operand(upper)
+            )
+        }
+        In { operand, values } => {
+            let values = values.iter().map(format_operand).collect::<Vec<_>>().join(", ");
+            format!("{} IN ({values})", format_operand(operand))
+        }
+        Function { name, args } => {
+            let args = args.iter().map(format_operand).collect::<Vec<_>>().join(", ");
+            format!("{}({})", format_function_name(name), args)
+        }
+        And(left, right) => {
+            format!("{} AND {}", format_expr(left, my_prec), format_expr(right, my_prec))
+        }
+        Or(left, right) => {
+            format!("{} OR {}", format_expr(left, my_prec), format_expr(right, my_prec))
+        }
+        Not(inner) => format!("NOT {}", format_expr(inner, my_prec)),
+        Parentheses(inner) => format!("({})", format_expr(inner, 0)),
+    };
+    if my_prec < parent_prec {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
+}
+
+fn format_expr_compact(expr: &dynamate::expr::DynamoExpression) -> String {
+    use dynamate::expr::DynamoExpression::*;
+    match expr {
+        Comparison { left, operator, right } => {
+            format!("{}{}{}", format_operand(left), format_comparator(operator), format_operand(right))
+        }
+        Between { operand, lower, upper } => {
+            format!(
+                "{} BETWEEN {} AND {}",
+                format_operand(operand),
+                format_operand(lower),
+                format_operand(upper)
+            )
+        }
+        In { operand, values } => {
+            let values = values.iter().map(format_operand).collect::<Vec<_>>().join(", ");
+            format!("{} IN ({values})", format_operand(operand))
+        }
+        Function { name, args } => {
+            let args = args.iter().map(format_operand).collect::<Vec<_>>().join(", ");
+            format!("{}({})", format_function_name(name), args)
+        }
+        Parentheses(inner) => format!("({})", format_expr(inner, 0)),
+        And(_, _) | Or(_, _) | Not(_) => format_expr(expr, 0),
+    }
+}
+
+fn format_operand(operand: &dynamate::expr::Operand) -> String {
+    use dynamate::expr::Operand;
+    match operand {
+        Operand::Path(path) => format_path(path),
+        Operand::Value(value) => format_string(value),
+        Operand::Number(num) => format_number(*num),
+        Operand::Boolean(value) => value.to_string(),
+        Operand::Null => "null".to_string(),
+    }
+}
+
+fn format_comparator(comp: &dynamate::expr::Comparator) -> &'static str {
+    use dynamate::expr::Comparator::*;
+    match comp {
+        Equal => "=",
+        NotEqual => "!=",
+        Less => "<",
+        LessOrEqual => "<=",
+        Greater => ">",
+        GreaterOrEqual => ">=",
+    }
+}
+
+fn format_function_name(name: &dynamate::expr::FunctionName) -> &'static str {
+    use dynamate::expr::FunctionName::*;
+    match name {
+        AttributeExists => "attribute_exists",
+        AttributeNotExists => "attribute_not_exists",
+        AttributeType => "attribute_type",
+        BeginsWith => "begins_with",
+        Contains => "contains",
+        Size => "size",
+    }
+}
+
+fn format_path(path: &str) -> String {
+    if path.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        path.to_string()
+    } else {
+        format!("`{}`", path)
+    }
+}
+
+fn format_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| format!("\"{}\"", value))
+}
+
+fn format_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{:.0}", value)
+    } else {
+        value.to_string()
     }
 }
