@@ -2,5 +2,6 @@
 .dynamate.log
 dynamate.log
 *.py
+!docker/seed.py
 .claude/
 .vscode/

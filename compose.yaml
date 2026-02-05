@@ -41,7 +41,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - >-
-        uv run --script seed.py --endpoint-url "$${DYNAMO_ENDPOINT}" --table "$${DYNAMO_TABLE}" $${SEED_ARGS}
+        uv run --script docker/seed.py --endpoint-url "$${DYNAMO_ENDPOINT}" --table "$${DYNAMO_TABLE}" $${SEED_ARGS}
 
   dynamate:
     build:
