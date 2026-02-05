@@ -34,10 +34,8 @@ use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEventKind, KeyboardEnhancementFlags, ModifierKeyCode,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags, poll, read,
+    Event, EventStream, KeyCode, KeyEventKind, ModifierKeyCode, poll, read,
 };
-use crossterm::terminal;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::Line;
@@ -54,6 +52,7 @@ use dynamate::aws;
 
 mod env;
 mod help;
+mod input;
 mod logging;
 mod subcommands;
 mod util;
@@ -285,28 +284,12 @@ impl App {
         let terminal = ratatui::init();
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
 
-        let keyboard_support = terminal::supports_keyboard_enhancement().unwrap_or(false);
-        if keyboard_support {
-            app.help_mode = ModDisplay::Swap;
-        } else {
-            app.help_mode = ModDisplay::Both;
-        }
-        app.broadcast_help_state();
-
-        if keyboard_support {
-            let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
-            let _ = crossterm::execute!(std::io::stdout(), PushKeyboardEnhancementFlags(flags));
-        }
+        app.help_mode = ModDisplay::Swap;
         drain_pending_input()?;
         app.input_grace_until = Some(Instant::now() + Duration::from_millis(250));
 
         let app_result = app.run(terminal, client, table_name).await;
         crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
-        if keyboard_support {
-            let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
-        }
         ratatui::restore();
         app_result
     }
@@ -351,6 +334,7 @@ impl App {
                     _ = interval.tick() => {
                         self.prune_toast();
                         self.process_widget_self_events();
+                        self.update_help_modifiers();
                         if !event_driven_render {
                             terminal.draw(|frame| self.render(frame))?;
                         } else if self.should_redraw {
@@ -402,6 +386,7 @@ impl App {
                     _ = interval.tick() => {
                         self.prune_toast();
                         self.process_widget_self_events();
+                        self.update_help_modifiers();
                         if !event_driven_render {
                             terminal.draw(|frame| self.render(frame))?;
                         } else if self.should_redraw {
@@ -601,7 +586,7 @@ impl App {
                     self.popup = Some(Box::new(help::Widget::new(
                         self.make_help(),
                         self.modifiers,
-                        self.help_mode,
+                        ModDisplay::Both,
                         self.widgets
                             .last()
                             .map(|w| w.id())
@@ -645,10 +630,18 @@ impl App {
         widget.inner().ctx(self.bus.clone())
     }
 
+    fn update_help_modifiers(&mut self) {
+        let polled = input::poll_modifiers(self.modifiers);
+        if polled != self.modifiers {
+            self.modifiers = polled;
+            self.should_redraw = true;
+            self.broadcast_help_state();
+        }
+    }
+
     fn broadcast_help_state(&self) {
         let event = HelpStateEvent {
             modifiers: self.modifiers,
-            mode: self.help_mode,
         };
         self.bus.broadcast(AppEvent::new(env::WidgetId::app(), event));
     }

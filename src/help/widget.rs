@@ -68,13 +68,8 @@ impl crate::widgets::Widget for Widget {
         let visible: Vec<_> = self
             .entries
             .iter()
-            .filter_map(|entry| {
-                let display = entry.display(modifiers, mode);
-                if display.keys.is_empty() {
-                    return None;
-                }
-                Some(display)
-            })
+            .flat_map(|entry| entry.display_entries(modifiers, mode))
+            .filter(|display| !display.keys.is_empty())
             .collect();
 
         let rows: Vec<_> = visible
@@ -121,7 +116,6 @@ impl crate::widgets::Widget for Widget {
     fn on_app_event(&self, _ctx: crate::env::WidgetCtx, event: &crate::env::AppEvent) {
         if let Some(help_event) = event.payload::<crate::env::HelpStateEvent>() {
             *self.modifiers.borrow_mut() = help_event.modifiers;
-            *self.mode.borrow_mut() = help_event.mode;
         }
     }
 

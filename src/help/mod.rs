@@ -35,6 +35,7 @@ pub struct Variant<'a> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModDisplay {
+    #[allow(dead_code)]
     Swap,
     Both,
 }
@@ -97,111 +98,68 @@ impl<'a> Entry<'a> {
         }
     }
 
-    pub fn display(&self, modifiers: KeyModifiers, mode: ModDisplay) -> DisplayEntry<'a> {
+    pub fn display_entries(&self, modifiers: KeyModifiers, mode: ModDisplay) -> Vec<DisplayEntry<'a>> {
         match mode {
-            ModDisplay::Swap => self.display_swap(modifiers),
+            ModDisplay::Swap => vec![self.display_swap(modifiers)],
             ModDisplay::Both => self.display_both(),
         }
     }
 
     fn display_swap(&self, modifiers: KeyModifiers) -> DisplayEntry<'a> {
-        let mut keys = self.keys.as_ref();
-        let mut short = self.short.as_ref();
-        let mut long = self.long.as_ref();
-
         if modifiers.contains(KeyModifiers::CONTROL) {
             if let Some(variant) = self.ctrl.as_ref() {
-                if let Some(value) = variant.keys.as_ref() {
-                    keys = value.as_ref();
-                }
-                if let Some(value) = variant.short.as_ref() {
-                    short = value.as_ref();
-                }
-                if let Some(value) = variant.long.as_ref() {
-                    long = value.as_ref();
-                }
+                return self.make_display_entry(Some(variant));
             }
         } else if modifiers.contains(KeyModifiers::SHIFT) {
             if let Some(variant) = self.shift.as_ref() {
-                if let Some(value) = variant.keys.as_ref() {
-                    keys = value.as_ref();
-                }
-                if let Some(value) = variant.short.as_ref() {
-                    short = value.as_ref();
-                }
-                if let Some(value) = variant.long.as_ref() {
-                    long = value.as_ref();
-                }
+                return self.make_display_entry(Some(variant));
             }
         } else if modifiers.contains(KeyModifiers::ALT)
             && let Some(variant) = self.alt.as_ref()
         {
-            if let Some(value) = variant.keys.as_ref() {
-                keys = value.as_ref();
-            }
-            if let Some(value) = variant.short.as_ref() {
-                short = value.as_ref();
-            }
-            if let Some(value) = variant.long.as_ref() {
-                long = value.as_ref();
-            }
+            return self.make_display_entry(Some(variant));
         }
+
+        self.make_display_entry(None)
+    }
+
+    fn display_both(&self) -> Vec<DisplayEntry<'a>> {
+        let mut entries = Vec::new();
+        entries.push(self.make_display_entry(None));
+        if let Some(variant) = self.ctrl.as_ref() {
+            entries.push(self.make_display_entry(Some(variant)));
+        }
+        if let Some(variant) = self.shift.as_ref() {
+            entries.push(self.make_display_entry(Some(variant)));
+        }
+        if let Some(variant) = self.alt.as_ref() {
+            entries.push(self.make_display_entry(Some(variant)));
+        }
+        entries
+    }
+
+    fn make_display_entry(&self, variant: Option<&Variant<'a>>) -> DisplayEntry<'a> {
+        let base_keys = self.keys.as_ref();
+        let base_short = self.short.as_ref();
+        let base_long = self.long.as_ref();
+
+        let keys = variant
+            .and_then(|v| v.keys.as_ref())
+            .map(|v| v.as_ref())
+            .unwrap_or(base_keys);
+        let short = variant
+            .and_then(|v| v.short.as_ref())
+            .map(|v| v.as_ref())
+            .unwrap_or(base_short);
+        let long = variant
+            .and_then(|v| v.long.as_ref())
+            .map(|v| v.as_ref())
+            .unwrap_or(base_long);
 
         DisplayEntry {
             keys: Cow::Owned(keys.to_string()),
             short: Cow::Owned(short.to_string()),
             long: Cow::Owned(long.to_string()),
-        }
-    }
-
-    fn display_both(&self) -> DisplayEntry<'a> {
-        let variant = self
-            .ctrl
-            .as_ref()
-            .or(self.shift.as_ref())
-            .or(self.alt.as_ref());
-
-        let base_keys = self.keys.as_ref();
-        let base_short = self.short.as_ref();
-        let base_long = self.long.as_ref();
-
-        let (mut keys, mut short, mut long) = (
-            base_keys.to_string(),
-            base_short.to_string(),
-            base_long.to_string(),
-        );
-
-        if let Some(variant) = variant {
-            if let Some(vk) = variant.keys.as_ref() {
-                let vk = vk.as_ref();
-                keys = if keys.is_empty() {
-                    vk.to_string()
-                } else {
-                    format!("{keys}/{vk}")
-                };
-            }
-            if let Some(vs) = variant.short.as_ref() {
-                let vs = vs.as_ref();
-                short = if short.is_empty() {
-                    vs.to_string()
-                } else {
-                    format!("{short} / {vs}")
-                };
-            }
-            if let Some(vl) = variant.long.as_ref() {
-                let vl = vl.as_ref();
-                long = if long.is_empty() {
-                    vl.to_string()
-                } else {
-                    format!("{long} / {vl}")
-                };
-            }
-        }
-
-        DisplayEntry {
-            keys: Cow::Owned(keys),
-            short: Cow::Owned(short),
-            long: Cow::Owned(long),
         }
     }
 }
@@ -214,8 +172,8 @@ fn make_spans<'a>(
 ) -> Vec<Span<'a>> {
     let mut spans: Vec<_> = entries
         .iter()
-        .filter_map(|entry| {
-            let display = entry.display(modifiers, mode);
+        .flat_map(|entry| entry.display_entries(modifiers, mode))
+        .filter_map(|display| {
             if display.keys.is_empty() {
                 return None;
             }
