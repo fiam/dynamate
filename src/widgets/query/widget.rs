@@ -569,7 +569,6 @@ impl crate::widgets::Widget for QueryWidget {
             }
         }
         if let Some(key) = event.as_key_press_event() {
-            let show_tree = self.state.borrow().show_tree;
             match key.code {
                 KeyCode::Tab | KeyCode::BackTab => {
                     self.state.borrow_mut().input.toggle_active()
@@ -666,7 +665,7 @@ impl crate::widgets::Widget for QueryWidget {
                     let mut state = self.state.borrow_mut();
                     state.show_tree = !state.show_tree;
                 }
-                KeyCode::Char('i') if show_tree => {
+                KeyCode::Char('i') if !input_is_active && !filter_active => {
                     self.show_index_picker(ctx.clone());
                 }
                 KeyCode::Char('e')
@@ -919,6 +918,14 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
+            keys: Cow::Borrowed("i"),
+            short: Cow::Borrowed("indexes"),
+            long: Cow::Borrowed("Query by index PK"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("e"),
             short: Cow::Borrowed("edit"),
             long: Cow::Borrowed("Edit item (JSON)"),
@@ -1029,6 +1036,14 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
+            keys: Cow::Borrowed("i"),
+            short: Cow::Borrowed("indexes"),
+            long: Cow::Borrowed("Query by index PK"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("e"),
             short: Cow::Borrowed("edit"),
             long: Cow::Borrowed("Edit item (JSON)"),
@@ -1082,7 +1097,7 @@ impl QueryWidget {
         },
         help::Entry {
             keys: Cow::Borrowed("i"),
-            short: Cow::Borrowed("index"),
+            short: Cow::Borrowed("indexes"),
             long: Cow::Borrowed("Query by index PK"),
             ctrl: None,
             shift: None,
@@ -1978,7 +1993,7 @@ impl QueryWidget {
             .filtered_indices
             .get(selected)
             .and_then(|idx| state.items.get(*idx))
-            .map(|item| tree::item_to_lines(&item.0, theme))
+            .map(|item| tree::item_to_lines(&item.0, theme, Some(state.item_keys.sorted())))
             .unwrap_or_else(|| vec![Line::from("No item selected")]);
 
         let paragraph = Paragraph::new(content).block(block);

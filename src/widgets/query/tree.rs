@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use aws_sdk_dynamodb::types::AttributeValue;
 use ratatui::{
     style::{Modifier, Style},
@@ -12,6 +14,7 @@ use crate::widgets::theme::Theme;
 pub fn item_to_lines(
     item: &std::collections::HashMap<String, AttributeValue>,
     theme: &Theme,
+    key_order: Option<&[String]>,
 ) -> Vec<Line<'static>> {
     let value = match json::to_json(item) {
         Ok(value) => value,
@@ -21,14 +24,20 @@ pub fn item_to_lines(
     };
 
     let mut lines = Vec::new();
-    render_value(&value, 0, theme, &mut lines);
+    render_value(&value, 0, theme, &mut lines, key_order);
     if lines.is_empty() {
         lines.push(Line::from("(empty item)"));
     }
     lines
 }
 
-fn render_value(value: &Value, indent: usize, theme: &Theme, lines: &mut Vec<Line<'static>>) {
+fn render_value(
+    value: &Value,
+    indent: usize,
+    theme: &Theme,
+    lines: &mut Vec<Line<'static>>,
+    key_order: Option<&[String]>,
+) {
     match value {
         Value::Object(map) => {
             if map.is_empty() {
@@ -39,10 +48,30 @@ fn render_value(value: &Value, indent: usize, theme: &Theme, lines: &mut Vec<Lin
                 return;
             }
 
-            let mut keys: Vec<_> = map.keys().collect();
-            keys.sort();
+            let mut keys: Vec<&str> = Vec::new();
+            if let Some(order) = key_order {
+                let mut seen = HashSet::new();
+                for key in order {
+                    if map.contains_key(key) {
+                        keys.push(key.as_str());
+                        seen.insert(key.as_str());
+                    }
+                }
+                let mut remaining: Vec<&str> = map
+                    .keys()
+                    .map(|key| key.as_str())
+                    .filter(|key| !seen.contains(key))
+                    .collect();
+                remaining.sort();
+                keys.extend(remaining);
+            } else {
+                let mut sorted: Vec<&str> = map.keys().map(|key| key.as_str()).collect();
+                sorted.sort();
+                keys = sorted;
+            }
+
             for key in keys {
-                let child = &map[key];
+                let child = map.get(key).expect("key exists in map");
                 if is_scalar(child) {
                     let line = Line::from(vec![
                         indent_span(indent, theme),
@@ -68,7 +97,7 @@ fn render_value(value: &Value, indent: usize, theme: &Theme, lines: &mut Vec<Lin
                         Span::styled(":", Style::default().fg(theme.text_muted())),
                     ]);
                     lines.push(line);
-                    render_value(child, indent + 2, theme, lines);
+                    render_value(child, indent + 2, theme, lines, None);
                 }
             }
         }
@@ -95,7 +124,7 @@ fn render_value(value: &Value, indent: usize, theme: &Theme, lines: &mut Vec<Lin
                         Span::styled("-", Style::default().fg(theme.text_muted())),
                     ]);
                     lines.push(line);
-                    render_value(value, indent + 2, theme, lines);
+                    render_value(value, indent + 2, theme, lines, None);
                 }
             }
         }

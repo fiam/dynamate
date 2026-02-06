@@ -121,7 +121,7 @@ impl crate::widgets::Widget for IndexPicker {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .title(Line::styled(
-                "Index items",
+                "Indexes",
                 Style::default()
                     .fg(theme.accent())
                     .add_modifier(Modifier::BOLD),
