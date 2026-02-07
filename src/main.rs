@@ -625,18 +625,18 @@ impl App {
             }
         }
 
+        if let Some(popup) = self.popup.as_ref()
+            && popup.handle_event(self.make_ctx(popup.as_ref()), event)
+        {
+            return true;
+        }
+
         if let Some(key) = event.as_key_press_event()
             && matches!(key.code, KeyCode::Esc)
             && self.popup.is_some()
         {
             self.popup = None;
             self.should_redraw = true;
-            return true;
-        }
-
-        if let Some(popup) = self.popup.as_ref()
-            && popup.handle_event(self.make_ctx(popup.as_ref()), event)
-        {
             return true;
         }
 

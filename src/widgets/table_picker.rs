@@ -28,6 +28,7 @@ use crate::{
         QueryWidget,
         WidgetInner,
         confirm::{ConfirmAction, ConfirmPopup},
+        create_table::{CreateTablePopup, TableCreatedEvent},
         error::ErrorPopup,
         theme::Theme,
     },
@@ -328,6 +329,18 @@ impl TablePickerWidget {
             short: Cow::Borrowed(""),
             long: Cow::Borrowed(""),
             ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^n")),
+                short: Some(Cow::Borrowed("new")),
+                long: Some(Cow::Borrowed("Create table")),
+            }),
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
                 keys: Some(Cow::Borrowed("^r")),
                 short: Some(Cow::Borrowed("refresh")),
                 long: Some(Cow::Borrowed("Refresh tables")),
@@ -408,6 +421,18 @@ impl TablePickerWidget {
             short: Cow::Borrowed("move"),
             long: Cow::Borrowed("Move selection"),
             ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^n")),
+                short: Some(Cow::Borrowed("new")),
+                long: Some(Cow::Borrowed("Create table")),
+            }),
             shift: None,
             alt: None,
         },
@@ -735,6 +760,11 @@ impl TablePickerWidget {
                 result,
             });
         });
+    }
+
+    fn show_create_table(&self, ctx: crate::env::WidgetCtx) {
+        let popup = Box::new(CreateTablePopup::new(self.client.clone(), self.inner.id()));
+        ctx.set_popup(popup);
     }
 }
 
@@ -1082,10 +1112,21 @@ impl crate::widgets::Widget for TablePickerWidget {
                     self.confirm_table_action(ctx, TableAction::Purge);
                     return true;
                 }
+                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.show_create_table(ctx);
+                    return true;
+                }
                 _ => {}
             }
         }
         false
+    }
+
+    fn on_app_event(&self, ctx: crate::env::WidgetCtx, event: &crate::env::AppEvent) {
+        if let Some(created) = event.payload::<TableCreatedEvent>() {
+            tracing::debug!(table = %created.table_name, "table_created");
+            self.reload_tables(ctx);
+        }
     }
 
     fn help(&self) -> Option<&[help::Entry<'_>]> {

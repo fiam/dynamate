@@ -1,5 +1,6 @@
 pub mod executor;
 pub mod debug;
+pub mod create_table;
 pub mod json;
 pub mod query;
 pub mod request_builder;
@@ -8,6 +9,9 @@ pub mod size;
 pub mod table_analyzer;
 
 pub use debug::send_dynamo_request;
+pub use create_table::{
+    AttributeType, CreateTableSpec, GsiSpec, IndexProjection, KeySpec, LsiSpec, create_table,
+};
 pub use executor::*;
 pub use json::*;
 pub use query::*;

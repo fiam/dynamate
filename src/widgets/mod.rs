@@ -8,6 +8,7 @@ use theme::Theme;
 
 pub mod error;
 pub mod confirm;
+pub mod create_table;
 mod query;
 mod table_picker;
 pub mod theme;
