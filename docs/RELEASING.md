@@ -69,6 +69,7 @@ No extra secret is needed for GHCR publishing. Docker publishing uses `GITHUB_TO
 ## Artifacts produced
 
 - `dynamate-aarch64-apple-darwin.tar.gz`
+- `dynamate-aarch64-unknown-linux-gnu.tar.gz`
 - `dynamate-x86_64-apple-darwin.tar.gz`
 - `dynamate-x86_64-unknown-linux-gnu.tar.gz`
 - `dynamate-x86_64-pc-windows-msvc.zip`
