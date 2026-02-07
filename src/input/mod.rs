@@ -72,7 +72,7 @@ mod platform {
     const VK_MENU: i32 = 0x12;
 
     #[link(name = "user32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetAsyncKeyState(vkey: i32) -> i16;
     }
 

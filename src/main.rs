@@ -23,7 +23,6 @@
 //! [Ratatui]: https://github.com/ratatui/ratatui
 //! [examples]: https://github.com/ratatui/ratatui/blob/main/examples
 //! [examples readme]: https://github.com/ratatui/ratatui/blob/main/examples/README.md
-use std::backtrace::Backtrace;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -45,6 +44,8 @@ use throbber_widgets_tui::{Throbber, ThrobberState};
 use tokio_stream::StreamExt;
 use unicode_width::UnicodeWidthStr;
 
+#[cfg(unix)]
+use std::backtrace::Backtrace;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -347,6 +348,7 @@ impl App {
         let mut sigint = signal(SignalKind::interrupt())?;
         #[cfg(unix)]
         let mut sigterm = signal(SignalKind::terminate())?;
+        #[cfg(unix)]
         let mut sigquit = signal(SignalKind::quit())?;
 
         #[cfg(unix)]
