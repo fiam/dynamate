@@ -1,3 +1,5 @@
+use std::env;
+
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 pub fn fill_bg(buf: &mut Buffer, area: Rect, color: Color) {
@@ -19,4 +21,11 @@ pub fn pad<S: AsRef<str>>(s: S, pad: usize) -> String {
         out.push(' ');
     }
     out
+}
+
+pub fn env_flag(name: &str) -> bool {
+    match env::var(name) {
+        Ok(value) => matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"),
+        Err(_) => false,
+    }
 }

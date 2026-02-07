@@ -37,7 +37,7 @@ use keys_widget::KeysWidget;
 use crate::{
     env::{Toast, ToastKind},
     help,
-    util::pad,
+    util::{env_flag, pad},
     widgets::{WidgetInner, confirm::ConfirmPopup, error::ErrorPopup, theme::Theme},
 };
 use chrono::{DateTime, Utc};
@@ -2291,6 +2291,7 @@ impl QueryWidget {
         let editor = env::var("EDITOR").map_err(|_| "EDITOR is not set".to_string())?;
         let temp_path = self.temp_path();
         fs::write(&temp_path, initial).map_err(|err| err.to_string())?;
+        let restore_mouse_capture = env_flag("DYNAMATE_MOUSE_CAPTURE");
 
         disable_raw_mode().map_err(|err| err.to_string())?;
         crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
@@ -2306,11 +2307,14 @@ impl QueryWidget {
         crossterm::execute!(
             std::io::stdout(),
             EnterAlternateScreen,
-            EnableMouseCapture,
             Clear(ClearType::All),
             MoveTo(0, 0)
         )
         .map_err(|err| err.to_string())?;
+        if restore_mouse_capture {
+            crossterm::execute!(std::io::stdout(), EnableMouseCapture)
+                .map_err(|err| err.to_string())?;
+        }
         enable_raw_mode().map_err(|err| err.to_string())?;
         ctx.force_redraw();
 

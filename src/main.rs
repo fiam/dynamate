@@ -58,7 +58,7 @@ use crate::env::{
     AppBus, AppBusRx, AppCommand, AppEvent, HelpStateEvent, Toast, ToastKind, WidgetEvent,
 };
 use crate::help::ModDisplay;
-use crate::util::fill_bg;
+use crate::util::{env_flag, fill_bg};
 use crate::widgets::theme::Theme;
 
 #[derive(clap::Parser)]
@@ -278,10 +278,15 @@ impl App {
     ) -> Result<()> {
         let mut app = self;
         let terminal = ratatui::init();
-        crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+        // Mouse capture disables terminal selection, so keep it opt-in for copy/paste.
+        if env_flag("DYNAMATE_MOUSE_CAPTURE") {
+            crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+        }
 
         app.help_mode = ModDisplay::Swap;
         drain_pending_input()?;
+        // Some terminals emit buffered key events or modifier transitions during init.
+        // Give a short grace period so those don't trigger actions at startup.
         app.input_grace_until = Some(Instant::now() + Duration::from_millis(250));
 
         let app_result = app.run(terminal, client, table_name).await;
@@ -815,13 +820,6 @@ fn drain_pending_input() -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn env_flag(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(value) => matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"),
-        Err(_) => false,
-    }
 }
 
 #[derive(Debug, Clone)]

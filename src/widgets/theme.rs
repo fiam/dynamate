@@ -1,6 +1,12 @@
-use std::{env, sync::OnceLock};
+use std::{env, sync::OnceLock, time::Duration};
 
 use ratatui::style::Color;
+
+const LUMA_THRESHOLD: f32 = 0.6;
+// Some terminals report noisy or transient luma right after startup; take a few
+// samples and use the median to avoid a single bad read flipping the theme.
+const LUMA_SAMPLES: usize = 5;
+const LUMA_SAMPLE_DELAY: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Copy)]
 pub struct Theme {
@@ -32,8 +38,8 @@ impl Theme {
                 }
             }
 
-            if let Ok(luma) = terminal_light::luma()
-                && luma > 0.6
+            if let Some(luma) = detect_terminal_luma()
+                && luma > LUMA_THRESHOLD
             {
                 return Self::light();
             }
@@ -128,5 +134,54 @@ impl Theme {
 
     pub fn error(&self) -> Color {
         self.error
+    }
+}
+
+fn detect_terminal_luma() -> Option<f32> {
+    let mut samples = Vec::with_capacity(LUMA_SAMPLES);
+    for attempt in 0..LUMA_SAMPLES {
+        if let Ok(luma) = terminal_light::luma()
+            && luma.is_finite()
+        {
+            samples.push(luma);
+        }
+        if attempt + 1 < LUMA_SAMPLES {
+            std::thread::sleep(LUMA_SAMPLE_DELAY);
+        }
+    }
+
+    if samples.is_empty() {
+        return None;
+    }
+
+    Some(median_luma(&mut samples))
+}
+
+fn median_luma(samples: &mut [f32]) -> f32 {
+    samples.sort_by(|a, b| a.total_cmp(b));
+    let mid = samples.len() / 2;
+    if samples.len().is_multiple_of(2) {
+        (samples[mid - 1] + samples[mid]) / 2.0
+    } else {
+        samples[mid]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::median_luma;
+
+    #[test]
+    fn median_luma_odd() {
+        let mut samples = [0.9_f32, 0.4_f32, 0.2_f32];
+        let median = median_luma(&mut samples);
+        assert!((median - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn median_luma_even() {
+        let mut samples = [0.2_f32, 0.8_f32, 0.4_f32, 0.6_f32];
+        let median = median_luma(&mut samples);
+        assert!((median - 0.5).abs() < 1e-6);
     }
 }
