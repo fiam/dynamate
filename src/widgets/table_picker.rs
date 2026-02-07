@@ -619,6 +619,7 @@ impl TablePickerWidget {
                 message: message.to_string(),
                 kind: ToastKind::Error,
                 duration: Duration::from_secs(4),
+                action: None,
             });
         }
     }
@@ -923,6 +924,7 @@ impl crate::widgets::Widget for TablePickerWidget {
                             ),
                             kind: ToastKind::Warning,
                             duration: Duration::from_secs(4),
+                            action: None,
                         });
                     }
                     ctx.invalidate();
@@ -942,6 +944,7 @@ impl crate::widgets::Widget for TablePickerWidget {
                             message: err.clone(),
                             kind: ToastKind::Error,
                             duration: Duration::from_secs(4),
+                            action: None,
                         });
                     }
                     ctx.invalidate();
@@ -967,6 +970,7 @@ impl crate::widgets::Widget for TablePickerWidget {
                         message: format!("Table {} deleted", result.table_name),
                         kind: ToastKind::Info,
                         duration: Duration::from_secs(3),
+                        action: None,
                     });
                     self.reload_tables(ctx);
                 }
@@ -990,6 +994,7 @@ impl crate::widgets::Widget for TablePickerWidget {
                         message: format!("Purged {count} items"),
                         kind: ToastKind::Info,
                         duration: Duration::from_secs(3),
+                        action: None,
                     });
                     self.reload_tables(ctx);
                 }

@@ -118,6 +118,11 @@ pub trait Widget: Send {
         false
     }
 
+    /// Whether Esc should cancel an export in progress while this widget is active.
+    fn esc_cancels_export(&self) -> bool {
+        false
+    }
+
     /// Whether global help should be suppressed (e.g., when capturing text input).
     fn suppress_global_help(&self) -> bool {
         false

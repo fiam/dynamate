@@ -4,7 +4,9 @@ use std::{
     cmp::{max, min},
     collections::{HashMap, HashSet},
     env, fs,
+    path::{Path, PathBuf},
     process::Command,
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -29,14 +31,22 @@ use ratatui::{
     widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState},
 };
 
-use super::{index_picker, input, item_keys, keys_widget, tree};
+use super::{
+    export_popup::{ExportMode, ExportPopup},
+    index_picker, input, item_keys, keys_widget, tree,
+};
 use keys_widget::KeysWidget;
 
 use crate::{
-    env::{Toast, ToastKind},
+    env::{Toast, ToastAction, ToastKind},
     help,
-    util::{env_flag, pad},
-    widgets::{WidgetInner, confirm::ConfirmPopup, error::ErrorPopup, theme::Theme},
+    util::{abbreviate_home, env_flag, pad},
+    widgets::{
+        WidgetInner,
+        confirm::{ConfirmAction, ConfirmPopup},
+        error::ErrorPopup,
+        theme::Theme,
+    },
 };
 use chrono::{DateTime, Utc};
 use dynamate::dynamodb::json;
@@ -61,6 +71,7 @@ pub struct QueryWidget {
     table_meta: RefCell<Option<TableMeta>>,
     meta_started: Cell<bool>,
     request_seq: Cell<u64>,
+    export_seq: Cell<u64>,
     page_size: i32,
 }
 
@@ -84,6 +95,8 @@ struct QueryState {
     matched_total: i64,
     last_render_capacity: usize,
     is_prefetching: bool,
+    export_id: Option<u64>,
+    export_cancel: Option<Arc<AtomicBool>>,
 }
 
 struct QueryPageEvent {
@@ -126,6 +139,28 @@ struct IndexQueryEvent {
 struct KeyVisibilityEvent {
     name: String,
     hidden: bool,
+}
+
+struct ExportRequest {
+    mode: ExportMode,
+    path: PathBuf,
+    fetch_all: bool,
+    overwrite_confirmed: bool,
+}
+
+struct ExportEvent {
+    result: Result<ExportOutcome, String>,
+}
+
+struct ExportProgressEvent {
+    export_id: u64,
+    count: usize,
+}
+
+struct ExportOutcome {
+    mode: ExportMode,
+    path: PathBuf,
+    count: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -398,7 +433,7 @@ impl QueryState {
                 .items
                 .iter()
                 .enumerate()
-                .filter(|(_, item)| item_matches_filter(item, &needle))
+                .filter(|(_, item)| item_matches_filter(&item.0, &needle))
                 .map(|(idx, _)| idx)
                 .collect();
         }
@@ -481,6 +516,14 @@ impl crate::widgets::Widget for QueryWidget {
     fn is_loading(&self) -> bool {
         let state = self.state.borrow();
         matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching
+    }
+
+    fn esc_cancels_export(&self) -> bool {
+        let state = self.state.borrow();
+        state.is_prefetching
+            && !state.show_tree
+            && !state.input.is_active()
+            && !state.filter.is_active()
     }
 
     fn start(&self, ctx: crate::env::WidgetCtx) {
@@ -588,9 +631,10 @@ impl crate::widgets::Widget for QueryWidget {
                     let mut state = self.state.borrow_mut();
                     if state.show_tree {
                         state.show_tree = false;
-                    } else if matches!(state.loading_state, LoadingState::Loading)
-                        || state.is_prefetching
-                    {
+                    } else if state.is_prefetching {
+                        drop(state);
+                        self.request_export_cancel(ctx.clone(), true);
+                    } else if matches!(state.loading_state, LoadingState::Loading) {
                         drop(state);
                         self.cancel_active_request();
                     } else if state.filter_applied() {
@@ -664,6 +708,13 @@ impl crate::widgets::Widget for QueryWidget {
                     ));
                     ctx.set_popup(popup);
                 }
+                KeyCode::Char('x') if !input_is_active && !filter_active => {
+                    if self.state.borrow().show_tree {
+                        self.show_export_popup(ExportMode::Item, ctx.clone());
+                    } else {
+                        self.show_export_popup(ExportMode::Results, ctx.clone());
+                    }
+                }
                 KeyCode::Char('t') => {
                     let mut state = self.state.borrow_mut();
                     state.show_tree = !state.show_tree;
@@ -735,9 +786,7 @@ impl crate::widgets::Widget for QueryWidget {
         if state.input.is_active() {
             return Some(Self::HELP_QUERY_EDIT);
         }
-        if (matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching)
-            && !state.filter.is_active()
-        {
+        if matches!(state.loading_state, LoadingState::Loading) && !state.filter.is_active() {
             return Some(Self::HELP_LOADING);
         }
         if state.filter.is_active() {
@@ -828,6 +877,112 @@ impl crate::widgets::Widget for QueryWidget {
             return;
         }
 
+        if let Some(export_request) = event.payload::<ExportRequest>() {
+            if !export_request.overwrite_confirmed && export_request.path.exists() {
+                let filename = export_request
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| export_request.path.display().to_string());
+                let message = format!("{filename} already exists");
+                let ctx_for_confirm = ctx.clone();
+                let confirm_action = ConfirmAction::new(
+                    KeyCode::Char('o'),
+                    KeyModifiers::CONTROL,
+                    "^o",
+                    "overwrite",
+                    "Overwrite file",
+                );
+                let mode = export_request.mode;
+                let fetch_all = export_request.fetch_all;
+                let path = export_request.path.clone();
+                let popup = Box::new(ConfirmPopup::new_with_action(
+                    "Overwrite?",
+                    message,
+                    "Overwrite",
+                    "cancel",
+                    confirm_action,
+                    move || {
+                        ctx_for_confirm.emit_self(ExportRequest {
+                            mode,
+                            path: path.clone(),
+                            fetch_all,
+                            overwrite_confirmed: true,
+                        });
+                    },
+                    self.inner.id(),
+                ));
+                ctx.set_popup(popup);
+                return;
+            }
+            self.start_export(
+                export_request.mode,
+                export_request.path.clone(),
+                export_request.fetch_all,
+                ctx,
+            );
+            return;
+        }
+
+        if let Some(export_event) = event.payload::<ExportEvent>() {
+            {
+                let mut state = self.state.borrow_mut();
+                state.is_prefetching = false;
+                state.export_id = None;
+                state.export_cancel = None;
+            }
+            match export_event.result.as_ref() {
+                Ok(outcome) => {
+                    let display_path = abbreviate_home(&outcome.path);
+                    let message = match outcome.mode {
+                        ExportMode::Item => format!("Exported to {display_path}"),
+                        ExportMode::Results => {
+                            format!(
+                                "Exported {} items to {}",
+                                outcome.count,
+                                display_path
+                            )
+                        }
+                    };
+                    ctx.show_toast(Toast {
+                        message,
+                        kind: ToastKind::Info,
+                        duration: Duration::from_secs(4),
+                        action: Some(ToastAction::copy_path('c', outcome.path.display().to_string())),
+                    });
+                }
+                Err(err) => {
+                    if err == "Export canceled" {
+                        ctx.show_toast(Toast {
+                            message: "Export canceled".to_string(),
+                            kind: ToastKind::Info,
+                            duration: Duration::from_secs(2),
+                            action: None,
+                        });
+                    } else {
+                        self.show_error(ctx.clone(), err);
+                        ctx.invalidate();
+                    }
+                }
+            }
+            return;
+        }
+
+        if let Some(progress) = event.payload::<ExportProgressEvent>() {
+            let should_update = {
+                let state = self.state.borrow();
+                state.export_id == Some(progress.export_id)
+                    && !state
+                        .export_cancel
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            };
+            if should_update {
+                self.show_export_progress_toast(ctx, progress.count);
+            }
+            return;
+        }
+
         if let Some(put_event) = event.payload::<PutItemEvent>() {
             match put_event.result.as_ref() {
                 Ok(()) => {
@@ -835,6 +990,7 @@ impl crate::widgets::Widget for QueryWidget {
                         message: put_event.action.success_message().to_string(),
                         kind: ToastKind::Info,
                         duration: Duration::from_secs(3),
+                        action: None,
                     });
                     self.restart_query(put_event.active_query.clone(), ctx.clone(), put_event.reopen_tree);
                 }
@@ -861,6 +1017,7 @@ impl crate::widgets::Widget for QueryWidget {
                         message: "Item deleted".to_string(),
                         kind: ToastKind::Info,
                         duration: Duration::from_secs(3),
+                        action: None,
                     });
                     ctx.invalidate();
                 }
@@ -912,6 +1069,14 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
+            keys: Cow::Borrowed("x"),
+            short: Cow::Borrowed("export"),
+            long: Cow::Borrowed("Export"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("⏎"),
             short: Cow::Borrowed("view"),
             long: Cow::Borrowed("View selected item"),
@@ -952,10 +1117,14 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
-            keys: Cow::Borrowed("^d"),
-            short: Cow::Borrowed("delete"),
-            long: Cow::Borrowed("Delete item"),
-            ctrl: None,
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^d")),
+                short: Some(Cow::Borrowed("delete")),
+                long: Some(Cow::Borrowed("Delete item")),
+            }),
             shift: None,
             alt: None,
         },
@@ -1030,6 +1199,14 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
+            keys: Cow::Borrowed("x"),
+            short: Cow::Borrowed("export"),
+            long: Cow::Borrowed("Export"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("⏎"),
             short: Cow::Borrowed("view"),
             long: Cow::Borrowed("View selected item"),
@@ -1041,6 +1218,14 @@ impl QueryWidget {
             keys: Cow::Borrowed("i"),
             short: Cow::Borrowed("indexes"),
             long: Cow::Borrowed("Query by index PK"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("x"),
+            short: Cow::Borrowed("export"),
+            long: Cow::Borrowed("Export"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -1098,6 +1283,14 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
+            keys: Cow::Borrowed("x"),
+            short: Cow::Borrowed("export"),
+            long: Cow::Borrowed("Export"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("i"),
             short: Cow::Borrowed("indexes"),
             long: Cow::Borrowed("Query by index PK"),
@@ -1118,9 +1311,21 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
-            keys: Cow::Borrowed("^d"),
-            short: Cow::Borrowed("delete"),
-            long: Cow::Borrowed("Delete item"),
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^d")),
+                short: Some(Cow::Borrowed("delete")),
+                long: Some(Cow::Borrowed("Delete item")),
+            }),
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("back"),
+            long: Cow::Borrowed("Back to results"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -1153,6 +1358,7 @@ impl QueryWidget {
             table_meta: RefCell::new(None),
             meta_started: Cell::new(false),
             request_seq: Cell::new(0),
+            export_seq: Cell::new(0),
             page_size,
         }
     }
@@ -1170,6 +1376,7 @@ impl QueryWidget {
                 message: message.to_string(),
                 kind: ToastKind::Error,
                 duration: Duration::from_secs(4),
+                action: None,
             });
         }
     }
@@ -1205,6 +1412,7 @@ impl QueryWidget {
                     message: "No indexes available for this item".to_string(),
                     kind: ToastKind::Info,
                     duration: Duration::from_secs(3),
+                    action: None,
                 });
                 return;
             }
@@ -1223,6 +1431,249 @@ impl QueryWidget {
             self.inner.id(),
         ));
         ctx.set_popup(popup);
+    }
+
+    fn show_export_popup(&self, mode: ExportMode, ctx: crate::env::WidgetCtx) {
+        if matches!(mode, ExportMode::Item) && self.selected_item().is_err() {
+            self.show_error(ctx.clone(), "No item selected");
+            return;
+        }
+        let path = self.export_path(mode);
+        let fetch_all = false;
+        let ctx_for_confirm = ctx.clone();
+        let popup = Box::new(ExportPopup::new(
+            mode,
+            path,
+            fetch_all,
+            move |path, fetch_all| {
+                ctx_for_confirm.emit_self(ExportRequest {
+                    mode,
+                    path,
+                    fetch_all,
+                    overwrite_confirmed: false,
+                });
+            },
+            self.inner.id(),
+        ));
+        ctx.set_popup(popup);
+    }
+
+    fn show_export_progress_toast(
+        &self,
+        ctx: crate::env::WidgetCtx,
+        count: usize,
+    ) {
+        let message = format!(
+            "Exporting... {} item{}",
+            count,
+            if count == 1 { "" } else { "s" }
+        );
+        ctx.show_toast(Toast {
+            message,
+            kind: ToastKind::Info,
+            duration: Duration::from_secs(3600),
+            action: None,
+        });
+    }
+
+    fn start_export(
+        &self,
+        mode: ExportMode,
+        path: PathBuf,
+        fetch_all: bool,
+        ctx: crate::env::WidgetCtx,
+    ) {
+        let busy = {
+            let state = self.state.borrow();
+            matches!(state.loading_state, LoadingState::Loading) || state.is_loading_more
+        };
+        if busy {
+            self.show_error(
+                ctx.clone(),
+                "Query is still loading; wait for it to finish before exporting.",
+            );
+            return;
+        }
+
+        match mode {
+            ExportMode::Item => {
+                let item = match self.selected_item() {
+                    Ok(item) => item,
+                    Err(err) => {
+                        self.show_error(ctx.clone(), &err);
+                        return;
+                    }
+                };
+                self.spawn_export_task(mode, path, ctx, move |path| {
+                    export_item_to_path(&item, &path)
+                });
+            }
+            ExportMode::Results => {
+                let items = {
+                    let state = self.state.borrow();
+                    state
+                        .filtered_indices
+                        .iter()
+                        .filter_map(|idx| state.items.get(*idx))
+                        .map(|item| item.0.clone())
+                        .collect::<Vec<_>>()
+                };
+                if !fetch_all {
+                    self.spawn_export_task(mode, path, ctx, move |path| {
+                        export_results_to_path(&items, &path)
+                    });
+                    return;
+                }
+                let (active_query, start_key, filter, items) = {
+                    let state = self.state.borrow();
+                    let filter_value = state.filter.value.trim().to_lowercase();
+                    let filter = if filter_value.is_empty() {
+                        None
+                    } else {
+                        Some(filter_value)
+                    };
+                    let items = if let Some(needle) = filter.as_deref() {
+                        state
+                            .items
+                            .iter()
+                            .filter(|item| item_matches_filter(&item.0, needle))
+                            .map(|item| item.0.clone())
+                            .collect::<Vec<_>>()
+                    } else {
+                        state.items.iter().map(|item| item.0.clone()).collect()
+                    };
+                    (
+                        state.active_query.clone(),
+                        state.last_evaluated_key.clone(),
+                        filter,
+                        items,
+                    )
+                };
+                let Some(start_key) = start_key else {
+                    self.spawn_export_task(mode, path, ctx, move |path| {
+                        export_results_to_path(&items, &path)
+                    });
+                    return;
+                };
+                let initial_count = items.len();
+                let export_id = self.next_export_id();
+                let cancel = Arc::new(AtomicBool::new(false));
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.is_prefetching = true;
+                    state.export_id = Some(export_id);
+                    state.export_cancel = Some(cancel.clone());
+                }
+                self.show_export_progress_toast(ctx.clone(), initial_count);
+                let client = self.client.clone();
+                let table_name = self.table_name.clone();
+                let cached_meta = self.table_meta.borrow().clone();
+                let ctx_for_export = ctx.clone();
+                let request = ExportResultsRequest {
+                    items,
+                    filter,
+                    start_key,
+                    active_query,
+                    cached_meta,
+                    client,
+                    table_name,
+                    ctx: ctx_for_export.clone(),
+                    path: path.clone(),
+                    cancel,
+                    export_id,
+                };
+                tokio::spawn(async move {
+                    let result = export_results_full(request)
+                        .await
+                        .map(|count| ExportOutcome { mode, path, count });
+                    ctx_for_export.emit_self(ExportEvent { result });
+                });
+            }
+        }
+    }
+
+    fn spawn_export_task<F>(
+        &self,
+        mode: ExportMode,
+        path: PathBuf,
+        ctx: crate::env::WidgetCtx,
+        task: F,
+    ) where
+        F: FnOnce(PathBuf) -> Result<usize, String> + Send + 'static,
+    {
+        let ctx_for_export = ctx.clone();
+        tokio::spawn(async move {
+            let result = task(path.clone()).map(|count| ExportOutcome {
+                mode,
+                path,
+                count,
+            });
+            ctx_for_export.emit_self(ExportEvent { result });
+        });
+    }
+
+    fn selected_item(&self) -> Result<HashMap<String, AttributeValue>, String> {
+        let state = self.state.borrow();
+        let selected = state.table_state.selected();
+        let item_index = selected.and_then(|index| state.filtered_indices.get(index).copied());
+        let item = item_index
+            .and_then(|index| state.items.get(index))
+            .map(|item| item.0.clone());
+        item.ok_or_else(|| "No item selected".to_string())
+    }
+
+    fn export_path(&self, mode: ExportMode) -> PathBuf {
+        let base = export_base_dir();
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        match mode {
+            ExportMode::Item => {
+                let item = self.selected_item().ok();
+                if let Some(item) = item
+                    && let Some(name) = self.item_export_file_name(&item)
+                {
+                    return base.join(name);
+                }
+                base.join(export_file_name(&self.table_name, mode, timestamp))
+            }
+            ExportMode::Results => {
+                let query = {
+                    let state = self.state.borrow();
+                    normalized_query(&state.active_query)
+                };
+                base.join(export_results_file_name(
+                    &self.table_name,
+                    query.as_deref(),
+                    timestamp,
+                ))
+            }
+        }
+    }
+
+    fn item_export_file_name(
+        &self,
+        item: &HashMap<String, AttributeValue>,
+    ) -> Option<String> {
+        let meta = self.table_meta.borrow();
+        let meta = meta.as_ref()?;
+        let table_info = TableInfo::from_table_description(&meta.table_desc);
+        let pk_name = table_info.primary_key.hash_key.as_str();
+        let pk_value = item.get(pk_name)?;
+        let pk_component = sanitize_filename_component(pk_name, "pk");
+        let pk_value_component =
+            sanitize_filename_component(&attribute_value_for_filename(pk_value), "value");
+        let mut name = format!("{pk_component}_{pk_value_component}");
+        if let Some(sk_name) = table_info.primary_key.range_key.as_deref()
+            && let Some(sk_value) = item.get(sk_name)
+        {
+            let sk_component = sanitize_filename_component(sk_name, "sk");
+            let sk_value_component =
+                sanitize_filename_component(&attribute_value_for_filename(sk_value), "value");
+            name.push_str(&format!("-{sk_component}_{sk_value_component}"));
+        }
+        Some(format!("{name}.json"))
     }
 
     fn index_targets(&self) -> Result<Vec<index_picker::IndexTarget>, String> {
@@ -1664,27 +2115,7 @@ impl QueryWidget {
         let page_size = self.page_size;
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            let hash_condition = KeyCondition {
-                attribute_name: target.hash_key.clone(),
-                condition: KeyConditionType::Equal(target.hash_value.clone()),
-            };
-            let query_type = match target.kind {
-                index_picker::IndexKind::Primary => QueryType::TableQuery {
-                    hash_key_condition: hash_condition,
-                    range_key_condition: None,
-                },
-                index_picker::IndexKind::Global => QueryType::GlobalSecondaryIndexQuery {
-                    index_name: target.name.clone(),
-                    hash_key_condition: hash_condition,
-                    range_key_condition: None,
-                },
-                index_picker::IndexKind::Local => QueryType::LocalSecondaryIndexQuery {
-                    index_name: target.name.clone(),
-                    hash_key_condition: hash_condition,
-                    range_key_condition: None,
-                },
-            };
-            let request = DynamoDbRequest::Query(Box::new(QueryBuilder::from_query_type(query_type)));
+            let request = request_for_index_target(&target);
             let request_start_key = start_key.clone();
             tracing::trace!(
                 table = %table_name,
@@ -1732,6 +2163,12 @@ impl QueryWidget {
         next
     }
 
+    fn next_export_id(&self) -> u64 {
+        let next = self.export_seq.get().saturating_add(1);
+        self.export_seq.set(next);
+        next
+    }
+
     fn active_request_id(&self) -> u64 {
         self.request_seq.get()
     }
@@ -1747,6 +2184,24 @@ impl QueryWidget {
         state.is_prefetching = false;
         if matches!(state.loading_state, LoadingState::Loading) {
             state.loading_state = LoadingState::Loaded;
+        }
+    }
+
+    fn request_export_cancel(&self, ctx: crate::env::WidgetCtx, show_toast: bool) {
+        let cancel = {
+            let state = self.state.borrow();
+            state.export_cancel.clone()
+        };
+        let Some(cancel) = cancel else {
+            return;
+        };
+        if !cancel.swap(true, Ordering::Relaxed) && show_toast {
+            ctx.show_toast(Toast {
+                message: "Canceling export...".to_string(),
+                kind: ToastKind::Info,
+                duration: Duration::from_secs(2),
+                action: None,
+            });
         }
     }
 
@@ -2241,6 +2696,7 @@ impl QueryWidget {
                 message: "Item unchanged".to_string(),
                 kind: ToastKind::Info,
                 duration: Duration::from_secs(3),
+                action: None,
             });
             return;
         }
@@ -2376,6 +2832,30 @@ impl QueryWidget {
     }
 }
 
+fn request_for_index_target(target: &index_picker::IndexTarget) -> DynamoDbRequest {
+    let hash_condition = KeyCondition {
+        attribute_name: target.hash_key.clone(),
+        condition: KeyConditionType::Equal(target.hash_value.clone()),
+    };
+    let query_type = match target.kind {
+        index_picker::IndexKind::Primary => QueryType::TableQuery {
+            hash_key_condition: hash_condition,
+            range_key_condition: None,
+        },
+        index_picker::IndexKind::Global => QueryType::GlobalSecondaryIndexQuery {
+            index_name: target.name.clone(),
+            hash_key_condition: hash_condition,
+            range_key_condition: None,
+        },
+        index_picker::IndexKind::Local => QueryType::LocalSecondaryIndexQuery {
+            index_name: target.name.clone(),
+            hash_key_condition: hash_condition,
+            range_key_condition: None,
+        },
+    };
+    DynamoDbRequest::Query(Box::new(QueryBuilder::from_query_type(query_type)))
+}
+
 async fn create_request_from_query(
     query: &str,
     cached_meta: Option<TableMeta>,
@@ -2498,8 +2978,8 @@ fn item_matches_index(item: &Item, index: &SecondaryIndex) -> bool {
     }
 }
 
-fn item_matches_filter(item: &Item, needle: &str) -> bool {
-    for (key, value) in &item.0 {
+fn item_matches_filter(item: &HashMap<String, AttributeValue>, needle: &str) -> bool {
+    for (key, value) in item {
         if key.to_lowercase().contains(needle) {
             return true;
         }
@@ -2529,6 +3009,253 @@ fn format_ttl_value(value: &AttributeValue) -> Option<String> {
     let time = UNIX_EPOCH + Duration::from_secs(ts as u64);
     let dt: DateTime<Utc> = time.into();
     Some(dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
+}
+
+struct ExportResultsRequest {
+    items: Vec<HashMap<String, AttributeValue>>,
+    filter: Option<String>,
+    start_key: HashMap<String, AttributeValue>,
+    active_query: ActiveQuery,
+    cached_meta: Option<TableMeta>,
+    client: aws_sdk_dynamodb::Client,
+    table_name: String,
+    ctx: crate::env::WidgetCtx,
+    path: PathBuf,
+    cancel: Arc<AtomicBool>,
+    export_id: u64,
+}
+
+async fn export_results_full(request: ExportResultsRequest) -> Result<usize, String> {
+    let ExportResultsRequest {
+        mut items,
+        filter,
+        start_key,
+        active_query,
+        cached_meta,
+        client,
+        table_name,
+        ctx,
+        path,
+        cancel,
+        export_id,
+    } = request;
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Export canceled".to_string());
+    }
+
+    let request = match active_query {
+        ActiveQuery::Text(query) => {
+            create_request_from_query(
+                &query,
+                cached_meta,
+                client.clone(),
+                table_name.clone(),
+                ctx.clone(),
+            )
+            .await?
+        }
+        ActiveQuery::Index(target) => request_for_index_target(&target),
+    };
+
+    let mut next_key = Some(start_key);
+    while let Some(start_key) = next_key {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Export canceled".to_string());
+        }
+        let output = execute_page(
+            &client,
+            &table_name,
+            &request,
+            Some(start_key),
+            None,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        for item in output.items() {
+            let keep = filter
+                .as_deref()
+                .map(|needle| item_matches_filter(item, needle))
+                .unwrap_or(true);
+            if keep {
+                items.push(item.clone());
+            }
+        }
+        ctx.emit_self(ExportProgressEvent {
+            export_id,
+            count: items.len(),
+        });
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Export canceled".to_string());
+        }
+        next_key = output.last_evaluated_key().cloned();
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Export canceled".to_string());
+    }
+    export_results_to_path(&items, &path)
+}
+
+fn export_item_to_path(
+    item: &HashMap<String, AttributeValue>,
+    path: &Path,
+) -> Result<usize, String> {
+    let value = json::to_json(item).map_err(|err| err.to_string())?;
+    write_json_to_path(path, &value)?;
+    Ok(1)
+}
+
+fn export_results_to_path(
+    items: &[HashMap<String, AttributeValue>],
+    path: &Path,
+) -> Result<usize, String> {
+    let values = items_to_json_values(items)?;
+    write_json_to_path(path, &serde_json::Value::Array(values))?;
+    Ok(items.len())
+}
+
+fn items_to_json_values(
+    items: &[HashMap<String, AttributeValue>],
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut values = Vec::with_capacity(items.len());
+    for (idx, item) in items.iter().enumerate() {
+        let value = json::to_json(item)
+            .map_err(|err| format!("Failed to convert item {}: {err}", idx + 1))?;
+        values.push(value);
+    }
+    Ok(values)
+}
+
+fn write_json_to_path(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Failed to create export directory: {err}"))?;
+    }
+    let payload =
+        serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
+    fs::write(path, payload).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn export_base_dir() -> PathBuf {
+    match env::current_dir() {
+        Ok(dir) => dir,
+        Err(_) => env::temp_dir(),
+    }
+}
+
+fn export_file_name(table_name: &str, mode: ExportMode, timestamp_ms: u128) -> String {
+    let table = sanitize_export_component(table_name);
+    let label = match mode {
+        ExportMode::Item => "item",
+        ExportMode::Results => "results",
+    };
+    format!(
+        "dynamate-export-{}-{}-{}.json",
+        table,
+        label,
+        timestamp_ms
+    )
+}
+
+fn export_results_file_name(
+    table_name: &str,
+    query: Option<&str>,
+    timestamp_ms: u128,
+) -> String {
+    let table = sanitize_export_component(table_name);
+    let query = query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(sanitize_query_component);
+    match query {
+        Some(query) => format!("{table}-{query}_{timestamp_ms}.json"),
+        None => format!("{table}_{timestamp_ms}.json"),
+    }
+}
+
+fn attribute_value_for_filename(value: &AttributeValue) -> String {
+    if let Ok(v) = value.as_s() {
+        v.clone()
+    } else if let Ok(v) = value.as_n() {
+        v.clone()
+    } else if let Ok(v) = value.as_bool() {
+        v.to_string()
+    } else if value.as_null().is_ok() {
+        "null".to_string()
+    } else if let Ok(v) = value.as_b() {
+        format!("binary{}", v.as_ref().len())
+    } else if let Ok(v) = value.as_ss() {
+        format!("ss{}", v.len())
+    } else if let Ok(v) = value.as_ns() {
+        format!("ns{}", v.len())
+    } else if let Ok(v) = value.as_bs() {
+        format!("bs{}", v.len())
+    } else if let Ok(v) = value.as_l() {
+        format!("list{}", v.len())
+    } else if let Ok(v) = value.as_m() {
+        format!("map{}", v.len())
+    } else {
+        "value".to_string()
+    }
+}
+
+fn sanitize_filename_component(raw: &str, fallback: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn sanitize_export_component(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        "table".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn sanitize_query_component(raw: &str) -> Option<String> {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches('_');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn output_info(output: Option<&Output>) -> String {
@@ -2737,5 +3464,57 @@ fn format_number(value: f64) -> String {
         format!("{:.0}", value)
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_export_component_rewrites_invalid_chars() {
+        assert_eq!(sanitize_export_component("My Table"), "my_table");
+        assert_eq!(sanitize_export_component("Table/Name"), "table_name");
+        assert_eq!(sanitize_export_component("___"), "table");
+    }
+
+    #[test]
+    fn sanitize_filename_component_preserves_safe_chars() {
+        assert_eq!(
+            sanitize_filename_component("PK-Name_01", "fallback"),
+            "PK-Name_01"
+        );
+        assert_eq!(
+            sanitize_filename_component("Value/With Spaces", "fallback"),
+            "Value_With_Spaces"
+        );
+        assert_eq!(
+            sanitize_filename_component("___", "fallback"),
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn export_file_name_is_stable() {
+        let name = export_file_name("My Table", ExportMode::Results, 12345);
+        assert_eq!(name, "dynamate-export-my_table-results-12345.json");
+    }
+
+    #[test]
+    fn export_results_file_name_includes_query() {
+        let name = export_results_file_name("My Table", Some("status = Active"), 12345);
+        assert_eq!(name, "my_table-status___active_12345.json");
+    }
+
+    #[test]
+    fn export_results_file_name_without_query() {
+        let name = export_results_file_name("My Table", None, 12345);
+        assert_eq!(name, "my_table_12345.json");
+    }
+
+    #[test]
+    fn export_results_file_name_ignores_empty_query() {
+        let name = export_results_file_name("My Table", Some("!!!"), 12345);
+        assert_eq!(name, "my_table_12345.json");
     }
 }

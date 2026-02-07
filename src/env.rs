@@ -74,10 +74,42 @@ pub enum ToastKind {
 }
 
 #[derive(Debug, Clone)]
+pub enum ToastAction {
+    CopyPath {
+        key: char,
+        label: String,
+        value: String,
+    },
+}
+
+impl ToastAction {
+    pub fn copy_path(key: char, value: impl Into<String>) -> Self {
+        Self::CopyPath {
+            key,
+            label: "copy".to_string(),
+            value: value.into(),
+        }
+    }
+
+    pub fn key(&self) -> char {
+        match self {
+            ToastAction::CopyPath { key, .. } => *key,
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            ToastAction::CopyPath { label, .. } => label.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Toast {
     pub message: String,
     pub kind: ToastKind,
     pub duration: Duration,
+    pub action: Option<ToastAction>,
 }
 
 #[derive(Clone)]

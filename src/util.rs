@@ -1,4 +1,6 @@
-use std::env;
+use std::{env, path::Path};
+
+use directories::BaseDirs;
 
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
@@ -27,5 +29,21 @@ pub fn env_flag(name: &str) -> bool {
     match env::var(name) {
         Ok(value) => matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"),
         Err(_) => false,
+    }
+}
+
+pub fn abbreviate_home(path: &Path) -> String {
+    let Some(base_dirs) = BaseDirs::new() else {
+        return path.display().to_string();
+    };
+    let home = base_dirs.home_dir();
+    if let Ok(rest) = path.strip_prefix(home) {
+        if rest.as_os_str().is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{}", rest.display())
+        }
+    } else {
+        path.display().to_string()
     }
 }

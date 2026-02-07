@@ -25,12 +25,14 @@
 //! [examples readme]: https://github.com/ratatui/ratatui/blob/main/examples/README.md
 use std::backtrace::Backtrace;
 use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEventKind, ModifierKeyCode, poll, read,
+    Event, EventStream, KeyCode, KeyEventKind, ModifierKeyCode, MouseButton, MouseEventKind,
+    poll, read,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style, Stylize};
@@ -57,7 +59,8 @@ mod util;
 mod widgets;
 
 use crate::env::{
-    AppBus, AppBusRx, AppCommand, AppEvent, HelpStateEvent, Toast, ToastKind, WidgetEvent,
+    AppBus, AppBusRx, AppCommand, AppEvent, HelpStateEvent, Toast, ToastAction,
+    ToastKind, WidgetEvent,
 };
 use crate::help::ModDisplay;
 use crate::util::{env_flag, fill_bg};
@@ -98,6 +101,7 @@ enum Commands {
         #[arg(short, long)]
         json: bool,
     },
+    CreateTable(subcommands::create_table::Args),
 }
 
 #[tokio::main]
@@ -115,6 +119,10 @@ async fn main() -> Result<()> {
         Some(Commands::ListTables { json }) => {
             let options = subcommands::list_tables::Options { json };
             subcommands::list_tables::command(&client, options).await?;
+            Ok(())
+        }
+        Some(Commands::CreateTable(args)) => {
+            subcommands::create_table::command(&client, args).await?;
             Ok(())
         }
         None => {
@@ -137,10 +145,13 @@ struct App {
     widgets: Vec<Box<dyn crate::widgets::Widget>>,
     popup: Option<Box<dyn crate::widgets::Popup>>,
     toast: Option<ToastState>,
+    toast_rect: Cell<Option<Rect>>,
     modifiers: crossterm::event::KeyModifiers,
     help_mode: ModDisplay,
     loading_throbber: ThrobberState,
     last_throbber_tick: Option<Instant>,
+    toast_throbber: RefCell<ThrobberState>,
+    last_toast_throbber_tick: Cell<Option<Instant>>,
 }
 
 impl App {
@@ -271,10 +282,13 @@ impl App {
             widgets: Vec::new(),
             popup: None,
             toast: None,
+            toast_rect: Cell::new(None),
             modifiers: crossterm::event::KeyModifiers::empty(),
             help_mode: ModDisplay::Both,
             loading_throbber: ThrobberState::default(),
             last_throbber_tick: None,
+            toast_throbber: RefCell::new(ThrobberState::default()),
+            last_toast_throbber_tick: Cell::new(None),
         }
     }
 
@@ -343,6 +357,9 @@ impl App {
                         self.prune_toast();
                         self.process_widget_self_events();
                         self.update_help_modifiers();
+                        if event_driven_render && self.toast_needs_tick() {
+                            self.should_redraw = true;
+                        }
                         if !event_driven_render {
                             terminal.draw(|frame| self.render(frame))?;
                         } else if self.should_redraw {
@@ -395,6 +412,9 @@ impl App {
                         self.prune_toast();
                         self.process_widget_self_events();
                         self.update_help_modifiers();
+                        if event_driven_render && self.toast_needs_tick() {
+                            self.should_redraw = true;
+                        }
                         if !event_driven_render {
                             terminal.draw(|frame| self.render(frame))?;
                         } else if self.should_redraw {
@@ -444,6 +464,7 @@ impl App {
                 .help()
                 .is_some_and(|entries| entries.iter().any(entry_declares_esc))
         });
+        let export_cancel_active = self.export_cancel_active();
         let app_help = if self.popup.is_some() {
             if popup_declares_esc {
                 App::HELP_WITHOUT_POPUP_NO_ESC
@@ -456,18 +477,32 @@ impl App {
             .is_some_and(|w| w.suppress_global_help())
         {
             &[]
-        } else if self.widget_declares_esc() {
+        } else if export_cancel_active || self.widget_declares_esc() {
             App::HELP_WITHOUT_POPUP_NO_ESC
         } else if self.widgets.len() > 1 {
             App::HELP_WITHOUT_POPUP_BACK
         } else {
             App::HELP_WITHOUT_POPUP_EXIT
         };
-        [help, Some(app_help)]
+        let entries: Vec<&help::Entry<'_>> = [help, Some(app_help)]
             .into_iter()
             .flatten()
             .flatten()
-            .collect()
+            .collect();
+        if entries.len() <= 1 {
+            return entries;
+        }
+        let mut ordered = Vec::with_capacity(entries.len());
+        let mut esc_entries = Vec::new();
+        for entry in entries {
+            if entry_declares_esc(entry) {
+                esc_entries.push(entry);
+            } else {
+                ordered.push(entry);
+            }
+        }
+        ordered.extend(esc_entries);
+        ordered
     }
 
     fn render(&mut self, frame: &mut Frame) {
@@ -476,6 +511,7 @@ impl App {
         let area = frame.area();
         let buf = frame.buffer_mut();
         fill_bg(buf, area, theme.bg());
+        self.toast_rect.set(None);
         let loading_line = self
             .widgets
             .last()
@@ -610,6 +646,35 @@ impl App {
             return true;
         }
 
+        if let Some(mouse) = event.as_mouse_event()
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some(rect) = self.toast_rect.get()
+            && let Some(action) = self.toast.as_ref().and_then(|toast| toast.action.clone())
+        {
+            let within_x = mouse.column >= rect.x
+                && mouse.column < rect.x.saturating_add(rect.width);
+            let within_y = mouse.row >= rect.y
+                && mouse.row < rect.y.saturating_add(rect.height);
+            if within_x && within_y {
+                self.handle_toast_action(&action);
+                return true;
+            }
+        }
+
+        if let Some(key) = event.as_key_press_event() {
+            let action = self.toast.as_ref().and_then(|toast| toast.action.clone());
+            if let Some(action) = action
+                && matches!(
+                    key.modifiers,
+                    crossterm::event::KeyModifiers::NONE | crossterm::event::KeyModifiers::SHIFT
+                )
+                && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&action.key()))
+            {
+                self.handle_toast_action(&action);
+                return true;
+            }
+        }
+
         if let Some(key) = event.as_key_press_event() {
             match key.code {
                 KeyCode::Char('h') => {
@@ -638,6 +703,8 @@ impl App {
                         return false;
                     } else if self.toast.is_some() {
                         self.toast = None;
+                        self.toast_rect.set(None);
+                        self.last_toast_throbber_tick.set(None);
                         self.should_redraw = true;
                     } else if self.widgets.len() > 1 {
                         self.widgets.pop();
@@ -776,6 +843,14 @@ impl App {
             }
             AppCommand::ShowToast(toast) => {
                 self.toast = Some(ToastState::from(toast));
+                self.last_toast_throbber_tick.set(None);
+                if self
+                    .toast
+                    .as_ref()
+                    .is_some_and(|toast| is_export_progress_toast(&toast.message))
+                {
+                    *self.toast_throbber.borrow_mut() = ThrobberState::default();
+                }
                 self.should_redraw = true;
             }
             AppCommand::Invalidate => {
@@ -796,7 +871,21 @@ impl App {
         toast: &ToastState,
     ) {
         let message = toast.message.as_str();
-        let text_width = message.width() as u16;
+        let show_throbber = is_export_progress_toast(message);
+        let show_cancel = self.export_cancel_active();
+        let action_label = toast.action.as_ref().map(|action| {
+            format!("[{}] {}", action.key(), action.label())
+        });
+        let mut full_message = if let Some(label) = action_label.as_ref() {
+            format!("{message}  {label}")
+        } else {
+            message.to_string()
+        };
+        if show_cancel {
+            full_message = format!("{full_message}  [esc] cancel");
+        }
+        let throbber_width = if show_throbber { 2 } else { 0 };
+        let text_width = full_message.width() as u16 + throbber_width;
         let width = (text_width + 6)
             .min(body_area.width.saturating_sub(2))
             .max(20);
@@ -804,6 +893,7 @@ impl App {
         let x = body_area.x + body_area.width.saturating_sub(width + 1);
         let y = footer_area.y.saturating_sub(height + 1);
         let area = Rect::new(x, y, width, height);
+        self.toast_rect.set(Some(area));
 
         let color = match toast.kind {
             ToastKind::Info => theme.accent(),
@@ -814,7 +904,115 @@ impl App {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(color))
             .style(Style::default().bg(theme.panel_bg()).fg(theme.text()));
-        let text = Line::styled(message, Style::default().fg(theme.text()));
+        let text = if let Some(action) = toast.action.as_ref() {
+            let mut spans = Vec::new();
+            if show_throbber {
+                spans.push(self.toast_throbber_span(theme));
+                spans.push(Span::raw(" "));
+            }
+            if let Some(parts) = parse_export_complete(message) {
+                match parts {
+                    ExportCompleteParts::Item { path } => {
+                        spans.push(Span::styled(
+                            "Exported to ",
+                            Style::default().fg(theme.text()),
+                        ));
+                        spans.push(Span::styled(
+                            path,
+                            Style::default().fg(theme.text_muted()),
+                        ));
+                    }
+                    ExportCompleteParts::Results { count, items, path } => {
+                        spans.push(Span::styled(
+                            "Exported ",
+                            Style::default().fg(theme.text()),
+                        ));
+                        spans.push(Span::styled(
+                            count,
+                            Style::default()
+                                .fg(theme.text())
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        spans.push(Span::styled(
+                            format!(" {items} to "),
+                            Style::default().fg(theme.text()),
+                        ));
+                        spans.push(Span::styled(
+                            path,
+                            Style::default().fg(theme.text_muted()),
+                        ));
+                    }
+                }
+            } else if let Some((count, suffix)) = parse_export_progress(message) {
+                spans.push(Span::styled(
+                    "Exporting...",
+                    Style::default().fg(theme.text()),
+                ));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    count,
+                    Style::default().fg(theme.text_muted()),
+                ));
+                spans.push(Span::styled(
+                    suffix,
+                    Style::default().fg(theme.text_muted()),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    message,
+                    Style::default().fg(theme.text()),
+                ));
+            }
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("[{}]", action.key()),
+                Style::default()
+                    .fg(theme.accent())
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                action.label().to_string(),
+                Style::default().fg(theme.text()),
+            ));
+            Line::from(spans)
+        } else if let Some((count, suffix)) = parse_export_progress(message) {
+            let mut spans = Vec::new();
+            if show_throbber {
+                spans.push(self.toast_throbber_span(theme));
+                spans.push(Span::raw(" "));
+            }
+            spans.push(Span::styled(
+                "Exporting...",
+                Style::default().fg(theme.text()),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                count,
+                Style::default().fg(theme.text_muted()),
+            ));
+            spans.push(Span::styled(
+                suffix,
+                Style::default().fg(theme.text_muted()),
+            ));
+            if show_cancel {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    "[esc]",
+                    Style::default()
+                        .fg(theme.accent())
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    "cancel",
+                    Style::default().fg(theme.text()),
+                ));
+            }
+            Line::from(spans)
+        } else {
+            Line::styled(message, Style::default().fg(theme.text()))
+        };
         frame.render_widget(Clear, area);
         frame.render_widget(block, area);
         let text_area = Rect::new(area.x + 2, area.y + 1, area.width - 4, 1);
@@ -845,14 +1043,97 @@ impl App {
         ])
     }
 
+    fn toast_needs_tick(&self) -> bool {
+        let has_throbber = self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| is_export_progress_toast(&toast.message));
+        if !has_throbber {
+            return false;
+        }
+        let now = Instant::now();
+        self.last_toast_throbber_tick
+            .get()
+            .map(|last| now.duration_since(last) >= Self::LOADING_THROBBER_TICK)
+            .unwrap_or(true)
+    }
+
+    fn export_cancel_active(&self) -> bool {
+        self.toast
+            .as_ref()
+            .is_some_and(|toast| is_export_progress_toast(&toast.message))
+            && self
+                .widgets
+                .last()
+                .is_some_and(|widget| widget.esc_cancels_export())
+    }
+
+    fn toast_throbber_span(&self, theme: &Theme) -> Span<'static> {
+        let now = Instant::now();
+        let should_tick = self
+            .last_toast_throbber_tick
+            .get()
+            .map(|last| now.duration_since(last) >= Self::LOADING_THROBBER_TICK)
+            .unwrap_or(true);
+        if should_tick {
+            self.toast_throbber.borrow_mut().calc_next();
+            self.last_toast_throbber_tick.set(Some(now));
+        }
+        let style = Style::default()
+            .fg(theme.accent())
+            .add_modifier(Modifier::BOLD);
+        let throbber = Throbber::default()
+            .throbber_set(BRAILLE_SIX)
+            .style(style)
+            .throbber_style(style);
+        let state = self.toast_throbber.borrow();
+        throbber.to_symbol_span(&state)
+    }
+
     fn prune_toast(&mut self) {
         if let Some(toast) = self.toast.as_ref()
             && toast.expires_at <= Instant::now()
         {
             self.toast = None;
+            self.toast_rect.set(None);
+            self.last_toast_throbber_tick.set(None);
             self.should_redraw = true;
         }
     }
+
+    fn handle_toast_action(&mut self, action: &ToastAction) {
+        match action {
+            ToastAction::CopyPath { value, .. } => {
+                match copy_to_clipboard(value) {
+                    Ok(()) => {
+                        self.toast = Some(ToastState::from(Toast {
+                            message: "Path copied to clipboard".to_string(),
+                            kind: ToastKind::Info,
+                            duration: Duration::from_secs(2),
+                            action: None,
+                        }));
+                        self.should_redraw = true;
+                    }
+                    Err(err) => {
+                        self.toast = Some(ToastState::from(Toast {
+                            message: format!("Failed to copy path: {err}"),
+                            kind: ToastKind::Error,
+                            duration: Duration::from_secs(3),
+                            action: None,
+                        }));
+                        self.should_redraw = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|err| err.to_string())?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|err| err.to_string())
 }
 
 fn drain_pending_input() -> Result<()> {
@@ -872,6 +1153,7 @@ struct ToastState {
     message: String,
     kind: ToastKind,
     expires_at: Instant,
+    action: Option<ToastAction>,
 }
 
 impl ToastState {
@@ -880,6 +1162,7 @@ impl ToastState {
             message: toast.message,
             kind: toast.kind,
             expires_at: Instant::now() + toast.duration,
+            action: toast.action,
         }
     }
 }
@@ -914,4 +1197,48 @@ fn entry_declares_esc(entry: &help::Entry<'_>) -> bool {
         }
     }
     false
+}
+
+fn is_export_progress_toast(message: &str) -> bool {
+    parse_export_progress(message).is_some()
+}
+
+enum ExportCompleteParts {
+    Item { path: String },
+    Results { count: String, items: String, path: String },
+}
+
+fn parse_export_complete(message: &str) -> Option<ExportCompleteParts> {
+    if let Some(path) = message.strip_prefix("Exported to ") {
+        return Some(ExportCompleteParts::Item {
+            path: path.to_string(),
+        });
+    }
+    let rest = message.strip_prefix("Exported ")?;
+    if let Some((count, path)) = rest.split_once(" items to ") {
+        return Some(ExportCompleteParts::Results {
+            count: count.to_string(),
+            items: "items".to_string(),
+            path: path.to_string(),
+        });
+    }
+    if let Some((count, path)) = rest.split_once(" item to ") {
+        return Some(ExportCompleteParts::Results {
+            count: count.to_string(),
+            items: "item".to_string(),
+            path: path.to_string(),
+        });
+    }
+    None
+}
+
+fn parse_export_progress(message: &str) -> Option<(String, String)> {
+    let rest = message.strip_prefix("Exporting... ")?;
+    if let Some(count) = rest.strip_suffix(" items") {
+        return Some((count.to_string(), " items".to_string()));
+    }
+    if let Some(count) = rest.strip_suffix(" item") {
+        return Some((count.to_string(), " item".to_string()));
+    }
+    None
 }

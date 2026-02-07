@@ -25,6 +25,7 @@ Example (DynamoDB Local):
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from typing import List, Optional
 from decimal import Decimal
 import random
@@ -34,6 +35,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 
@@ -54,12 +56,19 @@ def parse_args():
         help="Skip seeding if the table already exists (ignored with --recreate)",
     )
     # Sizes
-    p.add_argument("--artists", type=int, default=60)
-    p.add_argument("--albums-per-artist", type=int, default=6)
-    p.add_argument("--tracks-per-album", type=int, default=12)
-    p.add_argument("--customers", type=int, default=200)
+    p.add_argument("--artists", type=int, default=200)
+    p.add_argument("--albums-per-artist", type=int, default=5)
+    p.add_argument("--tracks-per-album", type=int, default=20)
+    p.add_argument("--customers", type=int, default=2500)
     p.add_argument("--invoices-per-customer", type=int, default=5)
-    p.add_argument("--lines-per-invoice", type=int, default=6)
+    p.add_argument("--lines-per-invoice", type=int, default=5)
+    p.add_argument("--workers", type=int, default=8, help="Concurrent batch write workers")
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=25,
+        help="Items per batch write request (max 25)",
+    )
     return p.parse_args()
 
 
@@ -217,7 +226,23 @@ def wait_deleted(dynamo, table_name: str, timeout_s: int = 60) -> None:
 
 # ---------- Seeding ----------
 
-def seed_data(table, sizes):
+def write_batch(client, table_name: str, items: List[dict]) -> None:
+    request_items = {
+        table_name: [{"PutRequest": {"Item": item}} for item in items]
+    }
+    backoff = 0.05
+    for _ in range(8):
+        resp = client.batch_write_item(RequestItems=request_items)
+        unprocessed = resp.get("UnprocessedItems", {})
+        if not unprocessed or not unprocessed.get(table_name):
+            return
+        request_items = {table_name: unprocessed[table_name]}
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 2.0)
+    raise RuntimeError("Failed to write batch after retries")
+
+
+def iter_items(sizes):
     """
     Inserts items in a single-table layout:
 
@@ -239,114 +264,128 @@ def seed_data(table, sizes):
     album_ids = []
     track_ids = []
 
-    with table.batch_writer(overwrite_by_pkeys=["PK", "SK"]) as b:
-        # Artists / Albums / Tracks
-        for _ in range(artists_ct):
-            artist_id = rand_id("ARTIST")
-            artist_ids.append(artist_id)
+    # Artists / Albums / Tracks
+    for _ in range(artists_ct):
+        artist_id = rand_id("ARTIST")
+        artist_ids.append(artist_id)
+        item = {
+            "PK": artist_id,
+            "SK": artist_id,
+            "type": "Artist",
+            "name": random.choice(ARTIST_NAMES),
+            "city": random.choice(CITIES),
+            "formed": random.randint(1970, 2020),
+            "members": random.sample(INSTRUMENTS, k=random.randint(2, 4)),
+        }
+        artist_lsi = f"PROFILE#{item['name']}"
+        add_index_keys(item, "Artist", item["PK"], item["SK"], artist_lsi)
+        yield item
+        for _ in range(albums_per_artist):
+            album_id = rand_id("ALBUM")
+            album_ids.append(album_id)
             item = {
                 "PK": artist_id,
-                "SK": artist_id,
-                "type": "Artist",
-                "name": random.choice(ARTIST_NAMES),
-                "city": random.choice(CITIES),
-                "formed": random.randint(1970, 2020),
-                "members": random.sample(INSTRUMENTS, k=random.randint(2, 4)),
+                "SK": album_id,
+                "type": "Album",
+                "album_id": album_id,
+                "title": rand_title(),
+                "year": random.randint(1995, 2024),
+                "genre": random.choice(GENRES),
             }
-            artist_lsi = f"PROFILE#{item['name']}"
-            add_index_keys(item, "Artist", item["PK"], item["SK"], artist_lsi)
-            b.put_item(Item=item)
-            for _ in range(albums_per_artist):
-                album_id = rand_id("ALBUM")
-                album_ids.append(album_id)
+            album_lsi = f"ALBUM#{item['year']:04d}#{album_id}"
+            add_index_keys(item, "Album", item["PK"], item["SK"], album_lsi)
+            yield item
+            for _ in range(tracks_per_album):
+                track_id = rand_id("TRACK")
+                track_ids.append(track_id)
                 item = {
-                    "PK": artist_id,
-                    "SK": album_id,
-                    "type": "Album",
-                    "album_id": album_id,
-                    "title": rand_title(),
-                    "year": random.randint(1995, 2024),
-                    "genre": random.choice(GENRES),
+                    "PK": album_id,
+                    "SK": track_id,
+                    "type": "Track",
+                    "track_id": track_id,
+                    "name": rand_track_name(),
+                    "milliseconds": random.randint(90_000, 360_000),
+                    "bytes": random.randint(512_000, 8_000_000),
+                    "unit_price": Decimal(str(round(random.uniform(0.49, 1.99), 2))),
                 }
-                album_lsi = f"ALBUM#{item['year']:04d}#{album_id}"
-                add_index_keys(item, "Album", item["PK"], item["SK"], album_lsi)
-                b.put_item(Item=item)
-                for t in range(tracks_per_album):
-                    track_id = rand_id("TRACK")
-                    track_ids.append(track_id)
-                    item = {
-                        "PK": album_id,
-                        "SK": track_id,
-                        "type": "Track",
-                        "track_id": track_id,
-                        "name": rand_track_name(),
-                        "milliseconds": random.randint(90_000, 360_000),
-                        "bytes": random.randint(512_000, 8_000_000),
-                        "unit_price": Decimal(str(round(random.uniform(0.49, 1.99), 2))),
-                    }
-                    track_lsi = f"TRACK#{item['name']}#{track_id}"
-                    add_index_keys(item, "Track", item["PK"], item["SK"], track_lsi)
-                    b.put_item(Item=item)
+                track_lsi = f"TRACK#{item['name']}#{track_id}"
+                add_index_keys(item, "Track", item["PK"], item["SK"], track_lsi)
+                yield item
 
-        # Customers / Invoices / InvoiceLines
-        for _ in range(customers_ct):
-            cust_id = rand_id("CUSTOMER")
-            name = rand_name()
+    # Customers / Invoices / InvoiceLines
+    for _ in range(customers_ct):
+        cust_id = rand_id("CUSTOMER")
+        name = rand_name()
+        item = {
+            "PK": cust_id,
+            "SK": "PROFILE",
+            "type": "Customer",
+            "name": name,
+            "email": rand_email(name),
+            "city": random.choice(CITIES),
+        }
+        customer_lsi = f"PROFILE#{name}"
+        add_index_keys(item, "Customer", item["PK"], item["SK"], customer_lsi)
+        yield item
+
+        for _ in range(invoices_per_cust):
+            inv_id = rand_id("INVOICE")
+            dt = datetime.now(timezone.utc) - timedelta(days=random.randint(0, 365))
+            ts = int(dt.timestamp())
+            invoice_lsi = f"INVOICE#{ts:010d}#{inv_id}"
+            total = 0.0
+            for line_ix in range(1, lines_per_invoice + 1):
+                trk = random.choice(track_ids) if track_ids else rand_id("TRACK")
+                price = round(random.uniform(0.49, 1.99), 2)
+                qty = random.randint(1, 3)
+                total += price * qty
+                price_cents = int(round(price * 100))
+                item = {
+                    "PK": inv_id,
+                    "SK": f"LINE#{line_ix}",
+                    "type": "InvoiceLine",
+                    "track_id": trk,
+                    "unit_price": Decimal(str(price)),
+                    "quantity": Decimal(str(qty)),
+                }
+                line_lsi = f"PRICE#{price_cents:05d}#LINE#{line_ix:03d}"
+                add_index_keys(item, "InvoiceLine", item["PK"], item["SK"], line_lsi)
+                yield item
             item = {
                 "PK": cust_id,
-                "SK": "PROFILE",
-                "type": "Customer",
-                "name": name,
-                "email": rand_email(name),
-                "city": random.choice(CITIES),
+                "SK": inv_id,
+                "type": "Invoice",
+                "invoice_id": inv_id,
+                "ts": ts,
+                "total": Decimal(str(round(total, 2))),
             }
-            customer_lsi = f"PROFILE#{name}"
-            add_index_keys(item, "Customer", item["PK"], item["SK"], customer_lsi)
-            b.put_item(Item=item)
+            add_index_keys(item, "Invoice", item["PK"], item["SK"], invoice_lsi)
+            yield item
 
-            for inv_ix in range(invoices_per_cust):
-                inv_id = rand_id("INVOICE")
-                dt = datetime.now(timezone.utc) - timedelta(days=random.randint(0, 365))
-                ts = int(dt.timestamp())
-                invoice_lsi = f"INVOICE#{ts:010d}#{inv_id}"
-                total = 0.0
-                item = {
-                    "PK": cust_id,
-                    "SK": inv_id,
-                    "type": "Invoice",
-                    "invoice_id": inv_id,
-                    "ts": ts,
-                }
-                add_index_keys(item, "Invoice", item["PK"], item["SK"], invoice_lsi)
-                b.put_item(Item=item)
-                for line_ix in range(1, lines_per_invoice + 1):
-                    trk = random.choice(track_ids) if track_ids else rand_id("TRACK")
-                    price = round(random.uniform(0.49, 1.99), 2)
-                    qty = random.randint(1, 3)
-                    total += price * qty
-                    price_cents = int(round(price * 100))
-                    item = {
-                        "PK": inv_id,
-                        "SK": f"LINE#{line_ix}",
-                        "type": "InvoiceLine",
-                        "track_id": trk,
-                        "unit_price": Decimal(str(price)),
-                        "quantity": Decimal(str(qty)),
-                    }
-                    line_lsi = f"PRICE#{price_cents:05d}#LINE#{line_ix:03d}"
-                    add_index_keys(item, "InvoiceLine", item["PK"], item["SK"], line_lsi)
-                    b.put_item(Item=item)
-                # update invoice total (simple upsert)
-                item = {
-                    "PK": cust_id,
-                    "SK": inv_id,
-                    "type": "Invoice",
-                    "invoice_id": inv_id,
-                    "ts": ts,
-                    "total": Decimal(str(round(total, 2))),
-                }
-                add_index_keys(item, "Invoice", item["PK"], item["SK"], invoice_lsi)
-                b.put_item(Item=item)
+
+def seed_data(table, sizes, workers: int, batch_size: int):
+    client = table.meta.client
+    table_name = table.name
+    workers = max(1, workers)
+    batch_size = max(1, min(batch_size, 25))
+    max_in_flight = max(1, workers * 4)
+    futures = []
+    batch = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for item in iter_items(sizes):
+            batch.append(item)
+            if len(batch) >= batch_size:
+                futures.append(executor.submit(write_batch, client, table_name, batch))
+                batch = []
+                if len(futures) >= max_in_flight:
+                    done, pending = wait(futures, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        fut.result()
+                    futures = list(pending)
+        if batch:
+            futures.append(executor.submit(write_batch, client, table_name, batch))
+        for fut in futures:
+            fut.result()
 
 def main():
     args = parse_args()
@@ -360,8 +399,12 @@ def main():
     # If you run against Local, SDK still wants some credentials (any value works).
     # If real AWS creds are present in env/profile, boto3 will use them.
     session = boto3.Session(**session_kwargs)
-    dynamo = session.client("dynamodb", **resource_kwargs)
-    resource = session.resource("dynamodb", **resource_kwargs)
+    config = Config(
+        retries={"max_attempts": 10, "mode": "standard"},
+        max_pool_connections=max(10, args.workers * 4),
+    )
+    dynamo = session.client("dynamodb", config=config, **resource_kwargs)
+    resource = session.resource("dynamodb", config=config, **resource_kwargs)
 
     try:
         existed = ensure_table(
@@ -396,7 +439,7 @@ def main():
     }
 
     print("Seeding data…")
-    seed_data(table, sizes)
+    seed_data(table, sizes, args.workers, args.batch_size)
     print("Done.")
 
 if __name__ == "__main__":

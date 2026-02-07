@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::{
     help,
-    util::fill_bg,
+    util::{fill_bg, pad},
     widgets::{Popup, WidgetInner, theme::Theme},
 };
 
@@ -168,7 +168,7 @@ impl crate::widgets::Widget for ConfirmPopup {
     fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         fill_bg(frame.buffer_mut(), area, theme.panel_bg());
         let title = Line::styled(
-            self.title.as_str(),
+            pad(self.title.as_str(), 1),
             Style::default()
                 .fg(theme.error())
                 .add_modifier(Modifier::BOLD),
@@ -182,7 +182,7 @@ impl crate::widgets::Widget for ConfirmPopup {
 
         frame.render_widget(block.clone(), area);
         let inner = block.inner(area).inner(Margin::new(1, 1));
-        let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(inner);
+        let layout = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
 
         let mut lines = Vec::new();
         for line in self.message.lines() {
@@ -291,9 +291,9 @@ impl crate::widgets::Widget for ConfirmPopup {
 
 impl Popup for ConfirmPopup {
     fn rect(&self, area: Rect) -> Rect {
-        let width = (area.width as f32 * 0.45) as u16;
-        let height = (area.height as f32 * 0.22) as u16;
-        let width = width.max(36).min(area.width.saturating_sub(4));
+        let width = (area.width as f32 * 0.4) as u16;
+        let height = (area.height as f32 * 0.18) as u16;
+        let width = width.max(34).min(area.width.saturating_sub(4));
         let height = height.max(7).min(area.height.saturating_sub(4));
         let x = area.x + (area.width - width) / 2;
         let y = area.y + (area.height - height) / 2;
