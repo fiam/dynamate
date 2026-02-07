@@ -37,6 +37,21 @@ jobs:
         with:
           tool: cargo-deny
 
+      - name: Install cargo-dist
+        shell: bash
+        run: |
+          dist_version="$(
+            awk -F'"' '/^cargo-dist-version = "/ { print $2; exit }' dist-workspace.toml
+          )"
+          if [[ -z "${dist_version}" ]]; then
+            echo "::error::Could not read cargo-dist-version from dist-workspace.toml."
+            exit 1
+          fi
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${dist_version}/cargo-dist-installer.sh" | sh
+
+      - name: Check generated release workflow
+        run: dist generate --mode=ci --check
+
       - name: Check formatting
         run: cargo fmt --all --check
 

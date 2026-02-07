@@ -350,23 +350,9 @@ jobs:
     needs:
       - plan
       - announce
-    if: >-
-      ${{
-        always() &&
-        (
-          (needs.plan.outputs.publishing == 'true' && needs.announce.result == 'success') ||
-          (
-            github.event_name == 'workflow_dispatch' &&
-            inputs.tag == 'dry-run' &&
-            (needs.announce.result == 'skipped' || needs.announce.result == 'success')
-          )
-        )
-      }}
     uses: ./.github/workflows/docker.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
-      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.tag == 'dry-run' }}
-      source_ref: ${{ github.sha }}
     secrets: inherit
     permissions:
       "contents": "read"
