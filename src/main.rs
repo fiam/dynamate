@@ -78,7 +78,7 @@ struct Cli {
     config: Option<String>,
 
     /// Endpoint URL for the DynamoDB service
-    #[arg(long, global = true)]
+    #[arg(long)]
     endpoint_url: Option<String>,
 
     /// Table name to open directly
