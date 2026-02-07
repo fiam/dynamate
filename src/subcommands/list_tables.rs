@@ -1,6 +1,5 @@
-use std::time::Instant;
-
 use color_eyre::Result;
+use dynamate::dynamodb::send_dynamo_request;
 
 pub struct Options {
     pub json: bool,
@@ -16,22 +15,23 @@ pub async fn command(client: &aws_sdk_dynamodb::Client, options: Options) -> Res
             start_table=?last_evaluated_table_name.as_deref(),
             "ListTables"
         );
-        let started = Instant::now();
-        let result = client
-            .list_tables()
-            .set_exclusive_start_table_name(last_evaluated_table_name)
-            .send()
-            .await;
+        let (result, duration) = send_dynamo_request(|| {
+            client
+                .list_tables()
+                .set_exclusive_start_table_name(last_evaluated_table_name)
+                .send()
+        })
+        .await;
         match &result {
             Ok(_) => {
                 tracing::trace!(
-                    duration_ms=started.elapsed().as_millis(),
+                    duration_ms=duration.as_millis(),
                     "ListTables complete"
                 );
             }
             Err(err) => {
                 tracing::warn!(
-                    duration_ms=started.elapsed().as_millis(),
+                    duration_ms=duration.as_millis(),
                     error=?err,
                     "ListTables complete"
                 );

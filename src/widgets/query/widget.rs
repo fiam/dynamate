@@ -5,7 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     env, fs,
     process::Command,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
@@ -28,8 +28,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState},
 };
-use throbber_widgets_tui::{Throbber, ThrobberState};
-use throbber_widgets_tui::symbols::throbber::BRAILLE_ONE;
 
 use super::{index_picker, input, item_keys, keys_widget, tree};
 use keys_widget::KeysWidget;
@@ -43,7 +41,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use dynamate::dynamodb::json;
 use dynamate::dynamodb::size::estimate_item_size_bytes;
-use dynamate::dynamodb::{SecondaryIndex, TableInfo};
+use dynamate::dynamodb::{SecondaryIndex, TableInfo, send_dynamo_request};
 use dynamate::{
     dynamodb::{
         DynamoDbRequest, KeyCondition, KeyConditionType, Kind, Output, QueryBuilder, QueryType,
@@ -84,7 +82,6 @@ struct QueryState {
     reopen_tree: Option<usize>,
     scanned_total: i64,
     matched_total: i64,
-    throbber: ThrobberState,
     last_render_capacity: usize,
     is_prefetching: bool,
 }
@@ -479,6 +476,11 @@ impl crate::widgets::Widget for QueryWidget {
             return Some("item".to_string());
         }
         Some(self.table_view_title(&state))
+    }
+
+    fn is_loading(&self) -> bool {
+        let state = self.state.borrow();
+        matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching
     }
 
     fn start(&self, ctx: crate::env::WidgetCtx) {
@@ -1322,25 +1324,26 @@ impl QueryWidget {
         tokio::spawn(async move {
             let key_len = key.len();
             tracing::trace!(table=%table_name, key_len, "DeleteItem");
-            let started = Instant::now();
-            let result = client
-                .delete_item()
-                .table_name(&table_name)
-                .set_key(Some(key.clone()))
-                .send()
-                .await;
+            let (result, duration) = send_dynamo_request(|| {
+                client
+                    .delete_item()
+                    .table_name(&table_name)
+                    .set_key(Some(key.clone()))
+                    .send()
+            })
+            .await;
             match &result {
                 Ok(_) => {
                     tracing::trace!(
                         table=%table_name,
-                        duration_ms=started.elapsed().as_millis(),
+                        duration_ms=duration.as_millis(),
                         "DeleteItem complete"
                     );
                 }
                 Err(err) => {
                     tracing::warn!(
                         table=%table_name,
-                        duration_ms=started.elapsed().as_millis(),
+                        duration_ms=duration.as_millis(),
                         error=%format_sdk_error(err),
                         "DeleteItem complete"
                     );
@@ -1976,9 +1979,6 @@ impl QueryWidget {
         let mut render_state = TableState::default();
         render_state.select(selected_visible);
         StatefulWidget::render(table, area, frame.buffer_mut(), &mut render_state);
-        if matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching {
-            render_loading_throbber(frame, area, theme, &mut state.throbber);
-        }
 
         let filter_value = state.filter.value.trim();
         if !filter_value.is_empty() {
@@ -2060,9 +2060,6 @@ impl QueryWidget {
 
         let paragraph = Paragraph::new(content).block(block);
         frame.render_widget(paragraph, area);
-        if matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching {
-            render_loading_throbber(frame, area, theme, &mut state.throbber);
-        }
     }
 
     fn item_view_title(&self, state: &QueryState) -> String {
@@ -2361,25 +2358,26 @@ impl QueryWidget {
         tokio::spawn(async move {
             let item_len = item.len();
             tracing::trace!(table=%table_name, item_len, "PutItem");
-            let started = Instant::now();
-            let result = client
-                .put_item()
-                .table_name(&table_name)
-                .set_item(Some(item))
-                .send()
-                .await;
+            let (result, duration) = send_dynamo_request(|| {
+                client
+                    .put_item()
+                    .table_name(&table_name)
+                    .set_item(Some(item))
+                    .send()
+            })
+            .await;
             match &result {
                 Ok(_) => {
                     tracing::trace!(
                         table=%table_name,
-                        duration_ms=started.elapsed().as_millis(),
+                        duration_ms=duration.as_millis(),
                         "PutItem complete"
                     );
                 }
                 Err(err) => {
                     tracing::warn!(
                         table=%table_name,
-                        duration_ms=started.elapsed().as_millis(),
+                        duration_ms=duration.as_millis(),
                         error=%format_sdk_error(err),
                         "PutItem complete"
                     );
@@ -2428,24 +2426,25 @@ async fn fetch_table_description(
     table_name: String,
 ) -> Result<TableDescription, String> {
     tracing::trace!(table=%table_name, "DescribeTable");
-    let started = Instant::now();
-    let result = client
-        .describe_table()
-        .table_name(&table_name)
-        .send()
-        .await;
+    let (result, duration) = send_dynamo_request(|| {
+        client
+            .describe_table()
+            .table_name(&table_name)
+            .send()
+    })
+    .await;
     match &result {
         Ok(_) => {
             tracing::trace!(
                 table=%table_name,
-                duration_ms=started.elapsed().as_millis(),
+                duration_ms=duration.as_millis(),
                 "DescribeTable complete"
             );
         }
         Err(err) => {
             tracing::warn!(
                 table=%table_name,
-                duration_ms=started.elapsed().as_millis(),
+                duration_ms=duration.as_millis(),
                 error=?err,
                 "DescribeTable complete"
             );
@@ -2463,24 +2462,25 @@ async fn fetch_ttl_attribute(
     table_name: String,
 ) -> Option<String> {
     tracing::trace!(table=%table_name, "DescribeTimeToLive");
-    let started = Instant::now();
-    let output = client
-        .describe_time_to_live()
-        .table_name(&table_name)
-        .send()
-        .await;
+    let (output, duration) = send_dynamo_request(|| {
+        client
+            .describe_time_to_live()
+            .table_name(&table_name)
+            .send()
+    })
+    .await;
     match &output {
         Ok(_) => {
             tracing::trace!(
                 table=%table_name,
-                duration_ms=started.elapsed().as_millis(),
+                duration_ms=duration.as_millis(),
                 "DescribeTimeToLive complete"
             );
         }
         Err(err) => {
             tracing::warn!(
                 table=%table_name,
-                duration_ms=started.elapsed().as_millis(),
+                duration_ms=duration.as_millis(),
                 error=?err,
                 "DescribeTimeToLive complete"
             );
@@ -2583,23 +2583,6 @@ fn format_ttl_value(value: &AttributeValue) -> Option<String> {
     let time = UNIX_EPOCH + Duration::from_secs(ts as u64);
     let dt: DateTime<Utc> = time.into();
     Some(dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
-}
-fn render_loading_throbber(
-    frame: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    state: &mut ThrobberState,
-) {
-    if area.width < 4 {
-        return;
-    }
-    state.calc_next();
-    let rect = Rect::new(area.x + area.width.saturating_sub(4), area.y, 3, 1);
-    let throbber = Throbber::default()
-        .throbber_set(BRAILLE_ONE)
-        .style(Style::default().fg(theme.text_muted()))
-        .throbber_style(Style::default().fg(theme.warning()));
-    frame.render_stateful_widget(throbber, rect, state);
 }
 
 fn output_info(output: Option<&Output>) -> String {

@@ -34,12 +34,14 @@ use crossterm::event::{
 };
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style, Stylize};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 use ratatui::widgets::{Block, BorderType};
 use ratatui::{DefaultTerminal, Frame};
 use tokio_stream::StreamExt;
 use unicode_width::UnicodeWidthStr;
+use throbber_widgets_tui::{Throbber, ThrobberState};
+use throbber_widgets_tui::symbols::throbber::BRAILLE_SIX;
 
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
@@ -137,10 +139,13 @@ struct App {
     toast: Option<ToastState>,
     modifiers: crossterm::event::KeyModifiers,
     help_mode: ModDisplay,
+    loading_throbber: ThrobberState,
+    last_throbber_tick: Option<Instant>,
 }
 
 impl App {
     const FRAMES_PER_SECOND: f32 = 60.0;
+    const LOADING_THROBBER_TICK: Duration = Duration::from_millis(200);
     const HELP_WITHOUT_POPUP_BACK: &'static [help::Entry<'static>] = &[
         help::Entry {
             keys: Cow::Borrowed(""),
@@ -268,6 +273,8 @@ impl App {
             toast: None,
             modifiers: crossterm::event::KeyModifiers::empty(),
             help_mode: ModDisplay::Both,
+            loading_throbber: ThrobberState::default(),
+            last_throbber_tick: None,
         }
     }
 
@@ -463,12 +470,17 @@ impl App {
             .collect()
     }
 
-    fn render(&self, frame: &mut Frame) {
+    fn render(&mut self, frame: &mut Frame) {
         let start = Instant::now();
         let theme = Theme::default();
         let area = frame.area();
         let buf = frame.buffer_mut();
         fill_bg(buf, area, theme.bg());
+        let loading_line = self
+            .widgets
+            .last()
+            .is_some_and(|w| w.is_loading())
+            .then(|| self.loading_indicator_line(&theme));
         let all_help = self.make_help();
         let modifiers = self.modifiers;
         let help_mode = self.help_mode;
@@ -487,6 +499,15 @@ impl App {
         )
         .centered();
         frame.render_widget(title, title_area);
+        if let Some(line) = loading_line {
+            let width = line.width().min(title_area.width as usize);
+            if width > 0 {
+                frame.render_widget(
+                    line,
+                    Rect::new(title_area.x, title_area.y, width as u16, 1),
+                );
+            }
+        }
         if let Some(widget) = self.widgets.last() {
             let back_title = self
                 .widgets
@@ -798,6 +819,30 @@ impl App {
         frame.render_widget(block, area);
         let text_area = Rect::new(area.x + 2, area.y + 1, area.width - 4, 1);
         frame.render_widget(text, text_area);
+    }
+
+    fn loading_indicator_line(&mut self, theme: &Theme) -> Line<'static> {
+        let now = Instant::now();
+        let should_tick = self
+            .last_throbber_tick
+            .map(|last| now.duration_since(last) >= Self::LOADING_THROBBER_TICK)
+            .unwrap_or(true);
+        if should_tick {
+            self.loading_throbber.calc_next();
+            self.last_throbber_tick = Some(now);
+        }
+
+        let style = Style::default()
+            .fg(theme.warning())
+            .add_modifier(Modifier::BOLD);
+        let throbber = Throbber::default()
+            .throbber_set(BRAILLE_SIX)
+            .style(style)
+            .throbber_style(style);
+        Line::from(vec![
+            Span::raw(" "),
+            throbber.to_symbol_span(&self.loading_throbber),
+        ])
     }
 
     fn prune_toast(&mut self) {

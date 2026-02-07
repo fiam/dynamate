@@ -1,13 +1,11 @@
 use std::collections::HashMap;
-use std::time::Instant;
-
 use aws_sdk_dynamodb::{
     Client, Error,
     operation::{query::QueryOutput, scan::ScanOutput},
     types::{AttributeValue, ConsumedCapacity},
 };
 
-use super::{DynamoDbRequest, QueryBuilder, QueryType, ScanBuilder};
+use super::{DynamoDbRequest, QueryBuilder, QueryType, ScanBuilder, send_dynamo_request};
 
 #[derive(Debug, Clone)]
 pub enum Kind {
@@ -162,20 +160,19 @@ async fn execute_scan(
         request = request.limit(limit);
     }
 
-    let started = Instant::now();
-    let result = request.send().await;
+    let (result, duration) = send_dynamo_request(|| request.send()).await;
     match &result {
         Ok(_) => {
             tracing::trace!(
                 table=%table_name,
-                duration_ms=started.elapsed().as_millis(),
+                duration_ms=duration.as_millis(),
                 "Scan complete"
             );
         }
         Err(err) => {
             tracing::warn!(
                 table=%table_name,
-                duration_ms=started.elapsed().as_millis(),
+                duration_ms=duration.as_millis(),
                 error=?err,
                 "Scan complete"
             );
@@ -239,20 +236,19 @@ async fn execute_query(
         request = request.limit(limit);
     }
 
-    let started = Instant::now();
-    let result = request.send().await;
+    let (result, duration) = send_dynamo_request(|| request.send()).await;
     match &result {
         Ok(_) => {
             tracing::trace!(
                 table=%table_name,
-                duration_ms=started.elapsed().as_millis(),
+                duration_ms=duration.as_millis(),
                 "Query complete"
             );
         }
         Err(err) => {
             tracing::warn!(
                 table=%table_name,
-                duration_ms=started.elapsed().as_millis(),
+                duration_ms=duration.as_millis(),
                 error=?err,
                 "Query complete"
             );
