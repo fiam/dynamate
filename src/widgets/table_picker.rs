@@ -314,7 +314,7 @@ impl TablePickerWidget {
             alt: None,
         },
         help::Entry {
-            keys: Cow::Borrowed("j/k/↑/↓"),
+            keys: Cow::Borrowed("j/k/↑/↓/PgUp/PgDn"),
             short: Cow::Borrowed("move"),
             long: Cow::Borrowed("Move selection"),
             ctrl: None,
@@ -390,7 +390,7 @@ impl TablePickerWidget {
             alt: None,
         },
         help::Entry {
-            keys: Cow::Borrowed("j/k/↑/↓"),
+            keys: Cow::Borrowed("j/k/↑/↓/PgUp/PgDn"),
             short: Cow::Borrowed("move"),
             long: Cow::Borrowed("Move selection"),
             ctrl: None,
@@ -512,6 +512,53 @@ impl TablePickerWidget {
         };
         state.table_state.select(Some(next));
         state.clamp_offset();
+    }
+
+    fn page_down(&self) {
+        let mut state = self.state.borrow_mut();
+        let total = state.filtered_indices.len();
+        if total == 0 {
+            return;
+        }
+        let page = state.last_render_capacity.max(1);
+        let offset = state.table_state.offset();
+        let selected = state
+            .table_state
+            .selected()
+            .unwrap_or(0)
+            .min(total.saturating_sub(1));
+        let rel = selected.saturating_sub(offset).min(page.saturating_sub(1));
+        let max_offset = total.saturating_sub(page);
+        let new_offset = offset.saturating_add(page).min(max_offset);
+        let mut new_selected = new_offset.saturating_add(rel);
+        if new_selected >= total {
+            new_selected = total.saturating_sub(1);
+        }
+        *state.table_state.offset_mut() = new_offset;
+        state.table_state.select(Some(new_selected));
+    }
+
+    fn page_up(&self) {
+        let mut state = self.state.borrow_mut();
+        let total = state.filtered_indices.len();
+        if total == 0 {
+            return;
+        }
+        let page = state.last_render_capacity.max(1);
+        let offset = state.table_state.offset();
+        let selected = state
+            .table_state
+            .selected()
+            .unwrap_or(0)
+            .min(total.saturating_sub(1));
+        let rel = selected.saturating_sub(offset).min(page.saturating_sub(1));
+        let new_offset = offset.saturating_sub(page);
+        let mut new_selected = new_offset.saturating_add(rel);
+        if new_selected >= total {
+            new_selected = total.saturating_sub(1);
+        }
+        *state.table_state.offset_mut() = new_offset;
+        state.table_state.select(Some(new_selected));
     }
 
     fn handle_selection(&self, ctx: crate::env::WidgetCtx) -> bool {
@@ -1000,6 +1047,14 @@ impl crate::widgets::Widget for TablePickerWidget {
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     self.select_previous();
+                    return true;
+                }
+                KeyCode::PageDown => {
+                    self.page_down();
+                    return true;
+                }
+                KeyCode::PageUp => {
+                    self.page_up();
                     return true;
                 }
                 KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {

@@ -628,6 +628,8 @@ impl crate::widgets::Widget for QueryWidget {
                 }
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(ctx.clone()),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
+                KeyCode::PageDown => self.page_down(ctx.clone()),
+                KeyCode::PageUp => self.page_up(),
                 KeyCode::Char('f') => {
                     let state = self.state.borrow();
                     let keys = state
@@ -1394,10 +1396,75 @@ impl QueryWidget {
         }
     }
 
+    fn page_down(&self, ctx: crate::env::WidgetCtx) {
+        let should_load_more = {
+            let mut state = self.state.borrow_mut();
+            let total = state.filtered_indices.len();
+            if total == 0 {
+                if state.show_tree || state.is_loading_more {
+                    false
+                } else {
+                    self.should_load_more(&state)
+                }
+            } else {
+                let page = state.last_render_capacity.max(1);
+                let offset = state.table_state.offset();
+                let selected = state
+                    .table_state
+                    .selected()
+                    .unwrap_or(0)
+                    .min(total.saturating_sub(1));
+                let rel = selected.saturating_sub(offset).min(page.saturating_sub(1));
+                let max_offset = total.saturating_sub(page);
+                let new_offset = offset.saturating_add(page).min(max_offset);
+                let mut new_selected = new_offset.saturating_add(rel);
+                if new_selected >= total {
+                    new_selected = total.saturating_sub(1);
+                }
+                *state.table_state.offset_mut() = new_offset;
+                state.table_state.select(Some(new_selected));
+
+                if state.show_tree || state.is_loading_more {
+                    false
+                } else {
+                    self.should_load_more(&state)
+                        || (state.last_evaluated_key.is_some() && new_offset == max_offset)
+                }
+            }
+        };
+
+        if should_load_more {
+            self.load_more(ctx);
+        }
+    }
+
     fn scroll_up(&self) {
         let mut state = self.state.borrow_mut();
         state.table_state.scroll_up_by(1);
         state.clamp_table_offset();
+    }
+
+    fn page_up(&self) {
+        let mut state = self.state.borrow_mut();
+        let total = state.filtered_indices.len();
+        if total == 0 {
+            return;
+        }
+        let page = state.last_render_capacity.max(1);
+        let offset = state.table_state.offset();
+        let selected = state
+            .table_state
+            .selected()
+            .unwrap_or(0)
+            .min(total.saturating_sub(1));
+        let rel = selected.saturating_sub(offset).min(page.saturating_sub(1));
+        let new_offset = offset.saturating_sub(page);
+        let mut new_selected = new_offset.saturating_add(rel);
+        if new_selected >= total {
+            new_selected = total.saturating_sub(1);
+        }
+        *state.table_state.offset_mut() = new_offset;
+        state.table_state.select(Some(new_selected));
     }
 
     fn should_load_more(&self, state: &QueryState) -> bool {
