@@ -16,9 +16,9 @@ Add or update tests where appropriate to cover new behavior or bug fixes.
 - Log all AWS/DynamoDB interactions at `trace` level, including their duration. On failure, log the error with the same context.
 
 ## Rust Toolchain And Modern Features
-- Target the latest stable Rust. No web search needed: go directly to https://releases.rs/docs/<version>/ for the current stable version, its release date, and changelog. As of 2026-02-07, stable is 1.93.0 (released 2026-01-22).
+- Target the latest stable Rust. No web search needed: go directly to https://doc.rust-lang.org/stable/releases.html for the current stable version, its release date, and changelog. As of 2026-02-07, stable is 1.93.0 (released 2026-01-22).
 - This repo uses the Rust 2024 edition (see Cargo.toml). Keep code compatible with the 2024 edition and prefer its idioms.
-- Before starting work, read the changelog for each release after June 2024 (1.80.0+) at https://releases.rs/docs/<version>/. Use newly stabilized language and library features when they improve clarity or safety, and update the list below when adopting new patterns.
+- Before starting work, read the changelog for each release after June 2024 (1.80.0+) at https://doc.rust-lang.org/stable/releases.html. Use newly stabilized language and library features when they improve clarity or safety, and update the list below when adopting new patterns.
 
 ## Post-1.79 Highlights (Non-Exhaustive)
 - Rust 2024 edition and async closures are stable (1.85).
