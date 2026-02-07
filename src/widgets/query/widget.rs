@@ -5,7 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     env, fs,
     process::Command,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
@@ -1324,12 +1324,32 @@ impl QueryWidget {
         let client = self.client.clone();
         let table_name = self.table_name.clone();
         tokio::spawn(async move {
+            let key_len = key.len();
+            tracing::trace!(table=%table_name, key_len, "DeleteItem");
+            let started = Instant::now();
             let result = client
                 .delete_item()
                 .table_name(&table_name)
                 .set_key(Some(key.clone()))
                 .send()
                 .await;
+            match &result {
+                Ok(_) => {
+                    tracing::trace!(
+                        table=%table_name,
+                        duration_ms=started.elapsed().as_millis(),
+                        "DeleteItem complete"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        table=%table_name,
+                        duration_ms=started.elapsed().as_millis(),
+                        error=%format_sdk_error(err),
+                        "DeleteItem complete"
+                    );
+                }
+            }
             let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
             ctx.emit_self(DeleteItemEvent {
                 key,
@@ -1754,16 +1774,6 @@ impl QueryWidget {
         state: &mut QueryState,
         back_title: Option<&str>,
     ) {
-        tracing::trace!(
-            table = %self.table_name,
-            area_width = area.width,
-            area_height = area.height,
-            items = state.items.len(),
-            filtered = state.filtered_indices.len(),
-            offset = state.table_state.offset(),
-            loading = ?state.loading_state,
-            "render_table"
-        );
         // maximum rows is the area height, minus 2 for the the top and bottom borders,
         // minus 1 for the header
         let max_rows = (area.height - 2 - 1) as usize;
@@ -1936,15 +1946,6 @@ impl QueryWidget {
         state: &mut QueryState,
         back_title: Option<&str>,
     ) {
-        tracing::trace!(
-            table = %self.table_name,
-            area_width = area.width,
-            area_height = area.height,
-            items = state.items.len(),
-            filtered = state.filtered_indices.len(),
-            loading = ?state.loading_state,
-            "render_tree"
-        );
         let more_marker = if state.last_evaluated_key.is_some() {
             "more"
         } else {
@@ -2284,12 +2285,32 @@ impl QueryWidget {
         let client = self.client.clone();
         let table_name = self.table_name.clone();
         tokio::spawn(async move {
+            let item_len = item.len();
+            tracing::trace!(table=%table_name, item_len, "PutItem");
+            let started = Instant::now();
             let result = client
                 .put_item()
                 .table_name(&table_name)
                 .set_item(Some(item))
                 .send()
                 .await;
+            match &result {
+                Ok(_) => {
+                    tracing::trace!(
+                        table=%table_name,
+                        duration_ms=started.elapsed().as_millis(),
+                        "PutItem complete"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        table=%table_name,
+                        duration_ms=started.elapsed().as_millis(),
+                        error=%format_sdk_error(err),
+                        "PutItem complete"
+                    );
+                }
+            }
             let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
             ctx.emit_self(PutItemEvent {
                 active_query,
@@ -2332,12 +2353,31 @@ async fn fetch_table_description(
     client: aws_sdk_dynamodb::Client,
     table_name: String,
 ) -> Result<TableDescription, String> {
-    let out = client
+    tracing::trace!(table=%table_name, "DescribeTable");
+    let started = Instant::now();
+    let result = client
         .describe_table()
         .table_name(&table_name)
         .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .await;
+    match &result {
+        Ok(_) => {
+            tracing::trace!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                "DescribeTable complete"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                error=?err,
+                "DescribeTable complete"
+            );
+        }
+    }
+    let out = result.map_err(|e| e.to_string())?;
     let table = out
         .table()
         .ok_or_else(|| "DescribeTable: missing table".to_string())?;
@@ -2348,11 +2388,30 @@ async fn fetch_ttl_attribute(
     client: aws_sdk_dynamodb::Client,
     table_name: String,
 ) -> Option<String> {
+    tracing::trace!(table=%table_name, "DescribeTimeToLive");
+    let started = Instant::now();
     let output = client
         .describe_time_to_live()
         .table_name(&table_name)
         .send()
         .await;
+    match &output {
+        Ok(_) => {
+            tracing::trace!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                "DescribeTimeToLive complete"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                error=?err,
+                "DescribeTimeToLive complete"
+            );
+        }
+    }
     match output {
         Ok(out) => out.time_to_live_description().and_then(|desc| {
             let enabled = matches!(

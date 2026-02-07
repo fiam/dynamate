@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, time::Duration};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, time::{Duration, Instant}};
 
 use aws_sdk_dynamodb::Client;
 use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
@@ -436,12 +436,32 @@ impl TablePickerWidget {
         let mut last_evaluated_table_name = None;
 
         loop {
-            let output = client
+            tracing::trace!(
+                start_table=?last_evaluated_table_name.as_deref(),
+                "ListTables"
+            );
+            let started = Instant::now();
+            let result = client
                 .list_tables()
                 .set_exclusive_start_table_name(last_evaluated_table_name)
                 .send()
-                .await
-                .map_err(|err| err.to_string())?;
+                .await;
+            match &result {
+                Ok(_) => {
+                    tracing::trace!(
+                        duration_ms=started.elapsed().as_millis(),
+                        "ListTables complete"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        duration_ms=started.elapsed().as_millis(),
+                        error=?err,
+                        "ListTables complete"
+                    );
+                }
+            }
+            let output = result.map_err(|err| err.to_string())?;
             table_names.extend(output.table_names().iter().cloned());
 
             if output.last_evaluated_table_name().is_none() {
@@ -617,11 +637,30 @@ impl TablePickerWidget {
         let client = self.client.clone();
         let ctx_clone = ctx.clone();
         tokio::spawn(async move {
+            let started = Instant::now();
+            tracing::trace!(table=%table_name, "DeleteTable");
             let result = client
                 .delete_table()
                 .table_name(&table_name)
                 .send()
                 .await;
+            match &result {
+                Ok(_) => {
+                    tracing::trace!(
+                        table=%table_name,
+                        duration_ms=started.elapsed().as_millis(),
+                        "DeleteTable complete"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        table=%table_name,
+                        duration_ms=started.elapsed().as_millis(),
+                        error=%format_sdk_error(err),
+                        "DeleteTable complete"
+                    );
+                }
+            }
             let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
             ctx_clone.emit_self(DeleteTableEvent {
                 table_name,
@@ -1016,12 +1055,31 @@ where
 }
 
 async fn fetch_table_meta(client: &Client, table_name: &str) -> Result<TableMeta, String> {
-    let output = client
+    tracing::trace!(table=%table_name, "DescribeTable");
+    let started = Instant::now();
+    let result = client
         .describe_table()
         .table_name(table_name)
         .send()
-        .await
-        .map_err(|err| format_sdk_error(&err))?;
+        .await;
+    match &result {
+        Ok(_) => {
+            tracing::trace!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                "DescribeTable complete"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                error=%format_sdk_error(err),
+                "DescribeTable complete"
+            );
+        }
+    }
+    let output = result.map_err(|err| format_sdk_error(&err))?;
     let table_desc = output
         .table()
         .ok_or_else(|| "DescribeTable: missing table".to_string())?;
@@ -1087,12 +1145,31 @@ fn extract_hash_range(table: &TableDescription) -> (Option<String>, Option<Strin
 }
 
 async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, String> {
-    let output = client
+    tracing::trace!(table=%table_name, "DescribeTable");
+    let started = Instant::now();
+    let result = client
         .describe_table()
         .table_name(table_name)
         .send()
-        .await
-        .map_err(|err| format_sdk_error(&err))?;
+        .await;
+    match &result {
+        Ok(_) => {
+            tracing::trace!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                "DescribeTable complete"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                error=%format_sdk_error(err),
+                "DescribeTable complete"
+            );
+        }
+    }
+    let output = result.map_err(|err| format_sdk_error(&err))?;
     let table_desc = output
         .table()
         .ok_or_else(|| "DescribeTable: missing table".to_string())?;
@@ -1113,7 +1190,24 @@ async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, St
             projection.push_str(", #rk");
         }
 
-        let output = client
+        let start_key_present = last_evaluated_key.is_some();
+        if let Some(start_key) = last_evaluated_key.as_ref() {
+            tracing::trace!(
+                table=%table_name,
+                start_key=?start_key,
+                "Scan pagination start key"
+            );
+        }
+        tracing::trace!(
+            table=%table_name,
+            projection=%projection,
+            start_key=?last_evaluated_key,
+            start_key_present,
+            limit=25,
+            "Scan"
+        );
+        let started = Instant::now();
+        let result = client
             .scan()
             .table_name(table_name)
             .projection_expression(projection)
@@ -1121,8 +1215,25 @@ async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, St
             .limit(25)
             .set_exclusive_start_key(last_evaluated_key.clone())
             .send()
-            .await
-            .map_err(|err| format_sdk_error(&err))?;
+            .await;
+        match &result {
+            Ok(_) => {
+                tracing::trace!(
+                    table=%table_name,
+                    duration_ms=started.elapsed().as_millis(),
+                    "Scan complete"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    table=%table_name,
+                    duration_ms=started.elapsed().as_millis(),
+                    error=%format_sdk_error(err),
+                    "Scan complete"
+                );
+            }
+        }
+        let output = result.map_err(|err| format_sdk_error(&err))?;
 
         let items = output.items();
         if items.is_empty() {
@@ -1160,12 +1271,39 @@ async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, St
         request_items.insert(table_name.to_string(), write_requests);
         let mut pending = request_items;
         loop {
-            let output = client
+            let pending_count = pending
+                .get(table_name)
+                .map(|items| items.len())
+                .unwrap_or(0);
+            tracing::trace!(
+                table=%table_name,
+                items=pending_count,
+                "BatchWriteItem"
+            );
+            let started = Instant::now();
+            let result = client
                 .batch_write_item()
                 .set_request_items(Some(pending.clone()))
                 .send()
-                .await
-                .map_err(|err| format_sdk_error(&err))?;
+                .await;
+            match &result {
+                Ok(_) => {
+                    tracing::trace!(
+                        table=%table_name,
+                        duration_ms=started.elapsed().as_millis(),
+                        "BatchWriteItem complete"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        table=%table_name,
+                        duration_ms=started.elapsed().as_millis(),
+                        error=%format_sdk_error(err),
+                        "BatchWriteItem complete"
+                    );
+                }
+            }
+            let output = result.map_err(|err| format_sdk_error(&err))?;
             let unprocessed = output.unprocessed_items().cloned().unwrap_or_default();
             if unprocessed.is_empty() {
                 break;

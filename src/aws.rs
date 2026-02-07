@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use aws_config::BehaviorVersion;
 use aws_config::environment::{
     credentials::EnvironmentVariableCredentialsProvider, region::EnvironmentVariableRegionProvider,
@@ -33,11 +35,23 @@ pub async fn new_client(endpoint_url: Option<&str>) -> Result<aws_sdk_dynamodb::
 }
 
 pub async fn validate_connection(client: &aws_sdk_dynamodb::Client) -> Result<()> {
-    client
-        .list_tables()
-        .limit(1)
-        .send()
-        .await
-        .map(|_| ())
-        .wrap_err("Failed to connect to DynamoDB")
+    tracing::trace!("ListTables: limit=1 (validate_connection)");
+    let started = Instant::now();
+    let result = client.list_tables().limit(1).send().await;
+    match &result {
+        Ok(_) => {
+            tracing::trace!(
+                duration_ms=started.elapsed().as_millis(),
+                "ListTables complete (validate_connection)"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                duration_ms=started.elapsed().as_millis(),
+                error=?err,
+                "ListTables complete (validate_connection)"
+            );
+        }
+    }
+    result.map(|_| ()).wrap_err("Failed to connect to DynamoDB")
 }

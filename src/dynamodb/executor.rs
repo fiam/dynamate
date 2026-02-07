@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use aws_sdk_dynamodb::{
     Client, Error,
@@ -67,15 +68,23 @@ pub async fn execute_page(
     start_key: Option<HashMap<String, AttributeValue>>,
     limit: Option<i32>,
 ) -> Result<Output, Error> {
-    tracing::debug!(
-        "Dynamo request: table={}, kind={:?}, start_key_present={}, limit={:?}",
-        table_name,
-        match db_request {
+    if let Some(start_key) = start_key.as_ref() {
+        tracing::trace!(
+            table=%table_name,
+            start_key=?start_key,
+            "Pagination start key"
+        );
+    }
+    tracing::trace!(
+        table=%table_name,
+        kind=match db_request {
             DynamoDbRequest::Query(_) => "Query",
             DynamoDbRequest::Scan(_) => "Scan",
         },
-        start_key.is_some(),
-        limit
+        start_key=?start_key,
+        start_key_present=start_key.is_some(),
+        limit=?limit,
+        "Dynamo request"
     );
     match db_request {
         DynamoDbRequest::Query(builder) => {
@@ -122,14 +131,15 @@ async fn execute_scan(
 ) -> Result<ScanOutput, aws_sdk_dynamodb::Error> {
     let mut request = client.scan().table_name(table_name);
 
-    tracing::debug!(
-        "Scan: table={}, filter expression: {:?}, attribute names: {:?}, attribute values {:?}, start_key_present={}, limit={:?}",
-        table_name,
-        builder.filter_expression(),
-        builder.expression_attribute_names(),
-        builder.expression_attribute_values(),
-        start_key.is_some(),
-        limit
+    tracing::trace!(
+        table=%table_name,
+        filter_expression=?builder.filter_expression(),
+        attribute_names=?builder.expression_attribute_names(),
+        attribute_values=?builder.expression_attribute_values(),
+        start_key=?start_key,
+        start_key_present=start_key.is_some(),
+        limit=?limit,
+        "Scan"
     );
 
     if let Some(filter_expr) = builder.filter_expression() {
@@ -152,8 +162,26 @@ async fn execute_scan(
         request = request.limit(limit);
     }
 
-    let output = request.send().await?;
-    Ok(output)
+    let started = Instant::now();
+    let result = request.send().await;
+    match &result {
+        Ok(_) => {
+            tracing::trace!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                "Scan complete"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                error=?err,
+                "Scan complete"
+            );
+        }
+    }
+    Ok(result?)
 }
 
 async fn execute_query(
@@ -190,6 +218,19 @@ async fn execute_query(
     }
 
     let start_key_present = start_key.is_some();
+    tracing::trace!(
+        table=%table_name,
+        index=?builder.index_name(),
+        key_condition_expression=?builder.key_condition_expression(),
+        filter_expression=?builder.filter_expression(),
+        attribute_names=?builder.expression_attribute_names(),
+        attribute_values=?builder.expression_attribute_values(),
+        start_key=?start_key,
+        start_key_present,
+        limit=?limit,
+        "Query"
+    );
+
     if let Some(start_key) = start_key {
         request = request.set_exclusive_start_key(Some(start_key));
     }
@@ -198,19 +239,25 @@ async fn execute_query(
         request = request.limit(limit);
     }
 
-    tracing::debug!(
-        "Query: table={}, index={:?}, key condition expression: {:?}, filter expression: {:?}, attribute names: {:?}, attribute values: {:?}, start_key_present={}, limit={:?}",
-        table_name,
-        builder.index_name(),
-        builder.key_condition_expression(),
-        builder.filter_expression(),
-        builder.expression_attribute_names(),
-        builder.expression_attribute_values(),
-        start_key_present,
-        limit
-    );
+    let started = Instant::now();
+    let result = request.send().await;
+    match &result {
+        Ok(_) => {
+            tracing::trace!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                "Query complete"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                table=%table_name,
+                duration_ms=started.elapsed().as_millis(),
+                error=?err,
+                "Query complete"
+            );
+        }
+    }
 
-    let output = request.send().await?;
-
-    Ok(output)
+    Ok(result?)
 }
