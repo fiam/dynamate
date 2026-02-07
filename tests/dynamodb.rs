@@ -1,4 +1,6 @@
 use assert_cmd::Command;
+use aws_config::BehaviorVersion;
+use aws_sdk_dynamodb::config::{Credentials, Region};
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, KeySchemaElement, KeyType, ProvisionedThroughput, ScalarAttributeType,
 };
@@ -31,18 +33,27 @@ async fn new_dynamodb_env() -> Result<DynamoDBEnv> {
     })
 }
 
+async fn new_local_client(endpoint_url: &str) -> Result<aws_sdk_dynamodb::Client> {
+    let config = aws_config::defaults(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(Credentials::new("local", "local", None, None, "test"))
+        .endpoint_url(endpoint_url)
+        .load()
+        .await;
+    Ok(aws_sdk_dynamodb::Client::new(&config))
+}
+
 #[tokio::test]
 async fn list_tables() {
     let mut cmd = Command::cargo_bin("dynamate").unwrap();
     let env = new_dynamodb_env().await.unwrap();
+    let endpoint_url = env.endpoint_url.as_deref().unwrap();
     let table_names = vec![
         String::from("test-table1"),
         String::from("test-table2"),
         String::from("test-table3"),
     ];
-    let client = dynamate::aws::new_client(env.endpoint_url.as_deref())
-        .await
-        .unwrap();
+    let client = new_local_client(endpoint_url).await.unwrap();
     // Create the tables
     for table_name in &table_names {
         let key_schema = KeySchemaElement::builder()
@@ -71,9 +82,12 @@ async fn list_tables() {
             .unwrap();
     }
     let stdout = cmd
+        .env("AWS_REGION", "us-east-1")
+        .env("AWS_ACCESS_KEY_ID", "local")
+        .env("AWS_SECRET_ACCESS_KEY", "local")
         .arg("list-tables")
         .arg("--endpoint-url")
-        .arg(env.endpoint_url.unwrap())
+        .arg(endpoint_url)
         .arg("--json")
         .assert()
         .success()

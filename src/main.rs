@@ -78,7 +78,7 @@ struct Cli {
     config: Option<String>,
 
     /// Endpoint URL for the DynamoDB service
-    #[arg(long)]
+    #[arg(long, global = true)]
     endpoint_url: Option<String>,
 
     /// Table name to open directly
@@ -131,6 +131,7 @@ struct App {
     event_rx: tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     should_quit: bool,
     should_redraw: bool,
+    input_grace_until: Option<Instant>,
     widgets: Vec<Box<dyn crate::widgets::Widget>>,
     popup: Option<Box<dyn crate::widgets::Popup>>,
     toast: Option<ToastState>,
@@ -261,6 +262,7 @@ impl App {
             event_rx,
             should_quit: false,
             should_redraw: true,
+            input_grace_until: None,
             widgets: Vec::new(),
             popup: None,
             toast: None,
@@ -280,6 +282,7 @@ impl App {
 
         app.help_mode = ModDisplay::Swap;
         drain_pending_input()?;
+        app.input_grace_until = Some(Instant::now() + Duration::from_millis(250));
 
         let app_result = app.run(terminal, client, table_name).await;
         crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
@@ -520,6 +523,15 @@ impl App {
         {
             self.should_quit = true;
             return true;
+        }
+        if let Some(until) = self.input_grace_until {
+            if Instant::now() < until {
+                if event.as_key_event().is_some() {
+                    return false;
+                }
+            } else {
+                self.input_grace_until = None;
+            }
         }
         if let Some(key) = event.as_key_event() {
             let mut updated = false;
