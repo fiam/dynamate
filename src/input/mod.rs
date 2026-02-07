@@ -34,11 +34,13 @@ mod platform {
                 )
         };
         let shift = unsafe {
-            CGEventSourceKeyState(KCG_EVENT_SOURCE_STATE_COMBINED_SESSION_STATE, KEY_SHIFT_LEFT)
-                || CGEventSourceKeyState(
-                    KCG_EVENT_SOURCE_STATE_COMBINED_SESSION_STATE,
-                    KEY_SHIFT_RIGHT,
-                )
+            CGEventSourceKeyState(
+                KCG_EVENT_SOURCE_STATE_COMBINED_SESSION_STATE,
+                KEY_SHIFT_LEFT,
+            ) || CGEventSourceKeyState(
+                KCG_EVENT_SOURCE_STATE_COMBINED_SESSION_STATE,
+                KEY_SHIFT_RIGHT,
+            )
         };
         let alt = unsafe {
             CGEventSourceKeyState(KCG_EVENT_SOURCE_STATE_COMBINED_SESSION_STATE, KEY_ALT_LEFT)

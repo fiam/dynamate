@@ -7,7 +7,7 @@ use aws_sdk_dynamodb::types::{
     AttributeValue, DeleteRequest, KeySchemaElement, KeyType, TableDescription, WriteRequest,
 };
 use crossterm::event::{Event, KeyCode, KeyModifiers};
-use humansize::{format_size, BINARY};
+use humansize::{BINARY, format_size};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -25,8 +25,7 @@ use crate::{
     help,
     util::pad,
     widgets::{
-        QueryWidget,
-        WidgetInner,
+        QueryWidget, WidgetInner,
         confirm::{ConfirmAction, ConfirmPopup},
         create_table::{CreateTablePopup, TableCreatedEvent},
         error::ErrorPopup,
@@ -240,10 +239,7 @@ impl TablePickerState {
         }
 
         if let Some(current) = current
-            && let Some(index) = self
-                .filtered_indices
-                .iter()
-                .position(|idx| *idx == current)
+            && let Some(index) = self.filtered_indices.iter().position(|idx| *idx == current)
         {
             self.table_state.select(Some(index));
             self.clamp_offset();
@@ -650,12 +646,7 @@ impl TablePickerWidget {
     }
 
     fn confirm_table_action(&self, ctx: crate::env::WidgetCtx, action: TableAction) {
-        let selected = {
-            self.state
-                .borrow()
-                .selected_table()
-                .cloned()
-        };
+        let selected = { self.state.borrow().selected_table().cloned() };
         let Some(entry) = selected else {
             self.show_error(ctx, "No table selected");
             return;
@@ -729,12 +720,7 @@ impl TablePickerWidget {
             let span = tracing::trace_span!("DeleteTable", table = %table_name);
             let result = send_dynamo_request(
                 span,
-                || {
-                    client
-                        .delete_table()
-                        .table_name(&table_name)
-                        .send()
-                },
+                || client.delete_table().table_name(&table_name).send(),
                 format_sdk_error,
             )
             .await;
@@ -756,9 +742,7 @@ impl TablePickerWidget {
         let ctx_clone = ctx.clone();
         tokio::spawn(async move {
             let result = purge_table_items(client, &table_name).await;
-            ctx_clone.emit_self(PurgeTableEvent {
-                result,
-            });
+            ctx_clone.emit_self(PurgeTableEvent { result });
         });
     }
 
@@ -779,7 +763,10 @@ impl crate::widgets::Widget for TablePickerWidget {
 
     fn is_loading(&self) -> bool {
         let state = self.state.borrow();
-        matches!(state.loading_state, LoadingState::Loading | LoadingState::Busy(_))
+        matches!(
+            state.loading_state,
+            LoadingState::Loading | LoadingState::Busy(_)
+        )
     }
 
     fn start(&self, ctx: crate::env::WidgetCtx) {
@@ -878,7 +865,8 @@ impl crate::widgets::Widget for TablePickerWidget {
                             let status_style = status_style(&entry.meta.status, theme);
                             let items = format_count(entry.meta.item_count);
                             let size = format_size_bytes(entry.meta.size_bytes);
-                            let idx_label = format!("G{}/L{}", entry.meta.gsi_count, entry.meta.lsi_count);
+                            let idx_label =
+                                format!("G{}/L{}", entry.meta.gsi_count, entry.meta.lsi_count);
                             Row::new(vec![
                                 Cell::from(entry.name.clone()),
                                 Cell::from(entry.meta.status.clone()).style(status_style),
@@ -914,7 +902,12 @@ impl crate::widgets::Widget for TablePickerWidget {
                     state.last_render_capacity = visible_rows;
                     state.clamp_offset();
 
-                    StatefulWidget::render(table, list_area, frame.buffer_mut(), &mut state.table_state);
+                    StatefulWidget::render(
+                        table,
+                        list_area,
+                        frame.buffer_mut(),
+                        &mut state.table_state,
+                    );
                 }
             }
         }
@@ -1199,7 +1192,9 @@ async fn fetch_table_meta(client: &Client, table_name: &str) -> Result<TableMeta
 }
 
 fn format_count(count: Option<i64>) -> String {
-    count.map(|value| value.to_string()).unwrap_or_else(|| "—".to_string())
+    count
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "—".to_string())
 }
 
 fn format_table_count(count: usize) -> String {
@@ -1220,8 +1215,7 @@ fn format_table_count_label(total: usize, filtered: usize) -> String {
 }
 
 fn format_size_bytes(size: Option<i64>) -> String {
-    size
-        .and_then(|value| u64::try_from(value).ok())
+    size.and_then(|value| u64::try_from(value).ok())
         .map(|value| format_size(value, BINARY))
         .unwrap_or_else(|| "—".to_string())
 }
@@ -1347,7 +1341,11 @@ async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, St
                 .set_key(Some(key))
                 .build()
                 .map_err(|err| err.to_string())?;
-            write_requests.push(WriteRequest::builder().delete_request(delete_request).build());
+            write_requests.push(
+                WriteRequest::builder()
+                    .delete_request(delete_request)
+                    .build(),
+            );
         }
 
         let batch_count = write_requests.len();
@@ -1390,7 +1388,6 @@ async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, St
         if last_evaluated_key.is_none() {
             break;
         }
-
     }
 
     Ok(deleted)

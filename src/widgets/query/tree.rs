@@ -163,10 +163,9 @@ fn scalar_span(value: &Value, theme: &Theme) -> Span<'static> {
         Value::Number(number) => {
             Span::styled(number.to_string(), Style::default().fg(theme.warning()))
         }
-        Value::Bool(value) => Span::styled(
-            value.to_string(),
-            Style::default().fg(theme.text_muted()),
-        ),
+        Value::Bool(value) => {
+            Span::styled(value.to_string(), Style::default().fg(theme.text_muted()))
+        }
         Value::Null => Span::styled("null", Style::default().fg(theme.text_muted())),
         _ => Span::styled(scalar_text(value), Style::default().fg(theme.text())),
     }

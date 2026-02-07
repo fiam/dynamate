@@ -234,14 +234,8 @@ impl crate::widgets::Widget for ConfirmPopup {
         } else {
             Style::default().fg(theme.text())
         };
-        let confirm_button = Span::styled(
-            format!("[ {} ]", self.confirm_label),
-            confirm_style,
-        );
-        let cancel_button = Span::styled(
-            format!("[ {} ]", self.cancel_label),
-            cancel_style,
-        );
+        let confirm_button = Span::styled(format!("[ {} ]", self.confirm_label), confirm_style);
+        let cancel_button = Span::styled(format!("[ {} ]", self.cancel_label), cancel_style);
         let buttons = Line::from(vec![confirm_button, Span::raw("  "), cancel_button]);
         let footer = Paragraph::new(Text::from(buttons)).alignment(Alignment::Center);
         frame.render_widget(footer, layout[1]);

@@ -1,9 +1,9 @@
-use std::collections::HashMap;
 use aws_sdk_dynamodb::{
     Client, Error,
     operation::{query::QueryOutput, scan::ScanOutput},
     types::{AttributeValue, ConsumedCapacity},
 };
+use std::collections::HashMap;
 
 use super::{DynamoDbRequest, QueryBuilder, QueryType, ScanBuilder, send_dynamo_request};
 

@@ -1,4 +1,8 @@
-use std::{borrow::Cow, cell::{Cell, RefCell}, path::{Path, PathBuf}};
+use std::{
+    borrow::Cow,
+    cell::{Cell, RefCell},
+    path::{Path, PathBuf},
+};
 
 use crossterm::event::KeyCode;
 use directories::BaseDirs;
@@ -48,11 +52,19 @@ impl FormInput {
 
     fn handle_key(&mut self, key: &crossterm::event::KeyEvent) -> bool {
         match key.code {
-            KeyCode::Char('a') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+            KeyCode::Char('a')
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
                 self.cursor = 0;
                 true
             }
-            KeyCode::Char('e') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+            KeyCode::Char('e')
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
                 self.cursor = self.value.chars().count();
                 true
             }
@@ -116,12 +128,7 @@ impl FormInput {
         if cursor >= width {
             start = cursor + 1 - width;
         }
-        let text: String = self
-            .value
-            .chars()
-            .skip(start)
-            .take(width)
-            .collect();
+        let text: String = self.value.chars().skip(start).take(width).collect();
         let cursor_pos = cursor.saturating_sub(start).min(width.saturating_sub(1));
         (text, cursor_pos)
     }
@@ -305,13 +312,7 @@ impl ExportPopup {
         }
     }
 
-    fn render_checkbox_row(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        focused: bool,
-        theme: &Theme,
-    ) {
+    fn render_checkbox_row(&self, frame: &mut Frame, area: Rect, focused: bool, theme: &Theme) {
         let label_area = Rect::new(area.x, area.y, Self::LABEL_WIDTH, 1);
         frame.render_widget(Paragraph::new(""), label_area);
         let input_area = Rect::new(
@@ -359,7 +360,10 @@ impl ExportPopup {
         let export_button = Span::styled("[ Export ]", export_style);
         let cancel_button = Span::styled("[ Cancel ]", cancel_style);
         let buttons = Line::from(vec![export_button, Span::raw("  "), cancel_button]).centered();
-        frame.render_widget(Paragraph::new(Text::from(buttons)).alignment(Alignment::Center), area);
+        frame.render_widget(
+            Paragraph::new(Text::from(buttons)).alignment(Alignment::Center),
+            area,
+        );
     }
 }
 
@@ -473,7 +477,10 @@ impl crate::widgets::Widget for ExportPopup {
                 }
             }
             Focus::Checkbox => {
-                if matches!(key.code, KeyCode::Char(' ') | KeyCode::Char('f') | KeyCode::Enter) {
+                if matches!(
+                    key.code,
+                    KeyCode::Char(' ') | KeyCode::Char('f') | KeyCode::Enter
+                ) {
                     self.toggle_fetch_all();
                     ctx.invalidate();
                     return true;

@@ -27,7 +27,10 @@ pub fn pad<S: AsRef<str>>(s: S, pad: usize) -> String {
 
 pub fn env_flag(name: &str) -> bool {
     match env::var(name) {
-        Ok(value) => matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"),
+        Ok(value) => matches!(
+            value.as_str(),
+            "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+        ),
         Err(_) => false,
     }
 }

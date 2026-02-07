@@ -6,7 +6,10 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -16,9 +19,7 @@ use aws_sdk_dynamodb::types::{
     AttributeValue, KeySchemaElement, KeyType, TableDescription, TimeToLiveStatus,
 };
 use crossterm::cursor::MoveTo;
-use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
-};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -233,7 +234,6 @@ where
     DisplayErrorContext(err).to_string()
 }
 
-
 #[derive(Debug, Default)]
 struct FilterInput {
     value: String,
@@ -419,7 +419,6 @@ impl QueryState {
     fn filter_applied(&self) -> bool {
         !self.filter.value.trim().is_empty()
     }
-
 
     fn apply_filter(&mut self) {
         let needle = self.filter.value.trim().to_lowercase();
@@ -616,9 +615,7 @@ impl crate::widgets::Widget for QueryWidget {
         }
         if let Some(key) = event.as_key_press_event() {
             match key.code {
-                KeyCode::Tab | KeyCode::BackTab => {
-                    self.state.borrow_mut().input.toggle_active()
-                }
+                KeyCode::Tab | KeyCode::BackTab => self.state.borrow_mut().input.toggle_active(),
                 KeyCode::Esc if input_is_active => {
                     let mut state = self.state.borrow_mut();
                     state.input.toggle_active();
@@ -694,10 +691,7 @@ impl crate::widgets::Widget for QueryWidget {
                         &keys,
                         move |ev| match ev {
                             keys_widget::Event::KeyHidden(name) => {
-                                ctx_for_keys.emit_self(KeyVisibilityEvent {
-                                    name,
-                                    hidden: true,
-                                });
+                                ctx_for_keys.emit_self(KeyVisibilityEvent { name, hidden: true });
                             }
                             keys_widget::Event::KeyUnhidden(name) => {
                                 ctx_for_keys.emit_self(KeyVisibilityEvent {
@@ -939,18 +933,17 @@ impl crate::widgets::Widget for QueryWidget {
                     let message = match outcome.mode {
                         ExportMode::Item => format!("Exported to {display_path}"),
                         ExportMode::Results => {
-                            format!(
-                                "Exported {} items to {}",
-                                outcome.count,
-                                display_path
-                            )
+                            format!("Exported {} items to {}", outcome.count, display_path)
                         }
                     };
                     ctx.show_toast(Toast {
                         message,
                         kind: ToastKind::Info,
                         duration: Duration::from_secs(4),
-                        action: Some(ToastAction::copy_path('c', outcome.path.display().to_string())),
+                        action: Some(ToastAction::copy_path(
+                            'c',
+                            outcome.path.display().to_string(),
+                        )),
                     });
                 }
                 Err(err) => {
@@ -994,7 +987,11 @@ impl crate::widgets::Widget for QueryWidget {
                         duration: Duration::from_secs(3),
                         action: None,
                     });
-                    self.restart_query(put_event.active_query.clone(), ctx.clone(), put_event.reopen_tree);
+                    self.restart_query(
+                        put_event.active_query.clone(),
+                        ctx.clone(),
+                        put_event.reopen_tree,
+                    );
                 }
                 Err(err) => {
                     let message = format!("{}: {err}", put_event.action.error_prefix());
@@ -1265,16 +1262,14 @@ impl QueryWidget {
             alt: None,
         },
     ];
-    const HELP_LOADING: &'static [help::Entry<'static>] = &[
-        help::Entry {
-            keys: Cow::Borrowed("esc"),
-            short: Cow::Borrowed("cancel"),
-            long: Cow::Borrowed("Cancel request"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-    ];
+    const HELP_LOADING: &'static [help::Entry<'static>] = &[help::Entry {
+        keys: Cow::Borrowed("esc"),
+        short: Cow::Borrowed("cancel"),
+        long: Cow::Borrowed("Cancel request"),
+        ctrl: None,
+        shift: None,
+        alt: None,
+    }];
     const HELP_TREE: &'static [help::Entry<'static>] = &[
         help::Entry {
             keys: Cow::Borrowed("j/k/↑/↓"),
@@ -1460,11 +1455,7 @@ impl QueryWidget {
         ctx.set_popup(popup);
     }
 
-    fn show_export_progress_toast(
-        &self,
-        ctx: crate::env::WidgetCtx,
-        count: usize,
-    ) {
+    fn show_export_progress_toast(&self, ctx: crate::env::WidgetCtx, count: usize) {
         let message = format!(
             "Exporting... {} item{}",
             count,
@@ -1605,11 +1596,7 @@ impl QueryWidget {
     {
         let ctx_for_export = ctx.clone();
         tokio::spawn(async move {
-            let result = task(path.clone()).map(|count| ExportOutcome {
-                mode,
-                path,
-                count,
-            });
+            let result = task(path.clone()).map(|count| ExportOutcome { mode, path, count });
             ctx_for_export.emit_self(ExportEvent { result });
         });
     }
@@ -1659,10 +1646,7 @@ impl QueryWidget {
         }
     }
 
-    fn item_export_file_name(
-        &self,
-        item: &HashMap<String, AttributeValue>,
-    ) -> Option<String> {
+    fn item_export_file_name(&self, item: &HashMap<String, AttributeValue>) -> Option<String> {
         let meta = self.table_meta.borrow();
         let meta = meta.as_ref()?;
         let table_info = TableInfo::from_table_description(&meta.table_desc);
@@ -1710,7 +1694,9 @@ impl QueryWidget {
             });
         }
         for gsi in table_info.global_secondary_indexes.iter() {
-            if item_matches_index(item, gsi) && let Some(value) = item.0.get(&gsi.hash_key) {
+            if item_matches_index(item, gsi)
+                && let Some(value) = item.0.get(&gsi.hash_key)
+            {
                 targets.push(index_picker::IndexTarget {
                     name: gsi.name.clone(),
                     kind: index_picker::IndexKind::Global,
@@ -1721,7 +1707,9 @@ impl QueryWidget {
             }
         }
         for lsi in table_info.local_secondary_indexes.iter() {
-            if item_matches_index(item, lsi) && let Some(value) = item.0.get(&lsi.hash_key) {
+            if item_matches_index(item, lsi)
+                && let Some(value) = item.0.get(&lsi.hash_key)
+            {
                 targets.push(index_picker::IndexTarget {
                     name: lsi.name.clone(),
                     kind: index_picker::IndexKind::Local,
@@ -2306,8 +2294,8 @@ impl QueryWidget {
         };
 
         let keys: Vec<String> = state.item_keys.visible().to_vec();
-        let header = Row::new(keys.iter().map(|key| Line::from(key.clone())))
-        .style(Style::new().bold());
+        let header =
+            Row::new(keys.iter().map(|key| Line::from(key.clone()))).style(Style::new().bold());
 
         let visible_indices = if total == 0 {
             &[][..]
@@ -2380,10 +2368,7 @@ impl QueryWidget {
                 pad(
                     format!(
                         "scanned {} · matched {} · {}{}",
-                        state.scanned_total,
-                        state.matched_total,
-                        more_marker,
-                        footer_suffix
+                        state.scanned_total, state.matched_total, more_marker, footer_suffix
                     ),
                     2,
                 ),
@@ -2949,7 +2934,12 @@ async fn fetch_ttl_attribute(
     let span = tracing::trace_span!("DescribeTimeToLive", table = %table_name);
     let output = send_dynamo_request(
         span,
-        || client.describe_time_to_live().table_name(&table_name).send(),
+        || {
+            client
+                .describe_time_to_live()
+                .table_name(&table_name)
+                .send()
+        },
         |err| err.to_string(),
     )
     .await;
@@ -3006,7 +2996,9 @@ fn extract_hash_range(table: &TableDescription) -> (Option<String>, Option<Strin
 }
 
 fn env_u64(name: &str) -> Option<u64> {
-    env::var(name).ok().and_then(|value| value.parse::<u64>().ok())
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 fn item_matches_index(item: &Item, index: &SecondaryIndex) -> bool {
@@ -3104,15 +3096,9 @@ async fn export_results_full(request: ExportResultsRequest) -> Result<usize, Str
         if cancel.load(Ordering::Relaxed) {
             return Err("Export canceled".to_string());
         }
-        let output = execute_page(
-            &client,
-            &table_name,
-            &request,
-            Some(start_key),
-            None,
-        )
-        .await
-        .map_err(|err| err.to_string())?;
+        let output = execute_page(&client, &table_name, &request, Some(start_key), None)
+            .await
+            .map_err(|err| err.to_string())?;
         for item in output.items() {
             let keep = filter
                 .as_deref()
@@ -3175,8 +3161,7 @@ fn write_json_to_path(path: &Path, value: &serde_json::Value) -> Result<(), Stri
         fs::create_dir_all(parent)
             .map_err(|err| format!("Failed to create export directory: {err}"))?;
     }
-    let payload =
-        serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
+    let payload = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
     fs::write(path, payload).map_err(|err| err.to_string())?;
     Ok(())
 }
@@ -3194,19 +3179,10 @@ fn export_file_name(table_name: &str, mode: ExportMode, timestamp_ms: u128) -> S
         ExportMode::Item => "item",
         ExportMode::Results => "results",
     };
-    format!(
-        "dynamate-export-{}-{}-{}.json",
-        table,
-        label,
-        timestamp_ms
-    )
+    format!("dynamate-export-{}-{}-{}.json", table, label, timestamp_ms)
 }
 
-fn export_results_file_name(
-    table_name: &str,
-    query: Option<&str>,
-    timestamp_ms: u128,
-) -> String {
+fn export_results_file_name(table_name: &str, query: Option<&str>, timestamp_ms: u128) -> String {
     let table = sanitize_export_component(table_name);
     let query = query
         .map(str::trim)
@@ -3402,10 +3378,23 @@ fn format_expr(expr: &dynamate::expr::DynamoExpression, parent_prec: u8) -> Stri
         _ => 4,
     };
     let rendered = match expr {
-        Comparison { left, operator, right } => {
-            format!("{}{}{}", format_operand(left), format_comparator(operator), format_operand(right))
+        Comparison {
+            left,
+            operator,
+            right,
+        } => {
+            format!(
+                "{}{}{}",
+                format_operand(left),
+                format_comparator(operator),
+                format_operand(right)
+            )
         }
-        Between { operand, lower, upper } => {
+        Between {
+            operand,
+            lower,
+            upper,
+        } => {
             format!(
                 "{} BETWEEN {} AND {}",
                 format_operand(operand),
@@ -3414,18 +3403,34 @@ fn format_expr(expr: &dynamate::expr::DynamoExpression, parent_prec: u8) -> Stri
             )
         }
         In { operand, values } => {
-            let values = values.iter().map(format_operand).collect::<Vec<_>>().join(", ");
+            let values = values
+                .iter()
+                .map(format_operand)
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("{} IN ({values})", format_operand(operand))
         }
         Function { name, args } => {
-            let args = args.iter().map(format_operand).collect::<Vec<_>>().join(", ");
+            let args = args
+                .iter()
+                .map(format_operand)
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("{}({})", format_function_name(name), args)
         }
         And(left, right) => {
-            format!("{} AND {}", format_expr(left, my_prec), format_expr(right, my_prec))
+            format!(
+                "{} AND {}",
+                format_expr(left, my_prec),
+                format_expr(right, my_prec)
+            )
         }
         Or(left, right) => {
-            format!("{} OR {}", format_expr(left, my_prec), format_expr(right, my_prec))
+            format!(
+                "{} OR {}",
+                format_expr(left, my_prec),
+                format_expr(right, my_prec)
+            )
         }
         Not(inner) => format!("NOT {}", format_expr(inner, my_prec)),
         Parentheses(inner) => format!("({})", format_expr(inner, 0)),
@@ -3440,10 +3445,23 @@ fn format_expr(expr: &dynamate::expr::DynamoExpression, parent_prec: u8) -> Stri
 fn format_expr_compact(expr: &dynamate::expr::DynamoExpression) -> String {
     use dynamate::expr::DynamoExpression::*;
     match expr {
-        Comparison { left, operator, right } => {
-            format!("{}{}{}", format_operand(left), format_comparator(operator), format_operand(right))
+        Comparison {
+            left,
+            operator,
+            right,
+        } => {
+            format!(
+                "{}{}{}",
+                format_operand(left),
+                format_comparator(operator),
+                format_operand(right)
+            )
         }
-        Between { operand, lower, upper } => {
+        Between {
+            operand,
+            lower,
+            upper,
+        } => {
             format!(
                 "{} BETWEEN {} AND {}",
                 format_operand(operand),
@@ -3452,11 +3470,19 @@ fn format_expr_compact(expr: &dynamate::expr::DynamoExpression) -> String {
             )
         }
         In { operand, values } => {
-            let values = values.iter().map(format_operand).collect::<Vec<_>>().join(", ");
+            let values = values
+                .iter()
+                .map(format_operand)
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("{} IN ({values})", format_operand(operand))
         }
         Function { name, args } => {
-            let args = args.iter().map(format_operand).collect::<Vec<_>>().join(", ");
+            let args = args
+                .iter()
+                .map(format_operand)
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("{}({})", format_function_name(name), args)
         }
         Parentheses(inner) => format!("({})", format_expr(inner, 0)),
@@ -3552,10 +3578,7 @@ mod tests {
             sanitize_filename_component("Value/With Spaces", "fallback"),
             "Value_With_Spaces"
         );
-        assert_eq!(
-            sanitize_filename_component("___", "fallback"),
-            "fallback"
-        );
+        assert_eq!(sanitize_filename_component("___", "fallback"), "fallback");
     }
 
     #[test]

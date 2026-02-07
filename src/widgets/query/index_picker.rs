@@ -129,11 +129,7 @@ impl crate::widgets::Widget for IndexPicker {
             .border_style(Style::default().fg(theme.border()))
             .style(Style::default().bg(theme.panel_bg()).fg(theme.text()));
 
-        let header = Row::new(vec![
-            Line::from("Index"),
-            Line::from("Partition key"),
-        ])
-        .style(
+        let header = Row::new(vec![Line::from("Index"), Line::from("Partition key")]).style(
             Style::default()
                 .fg(theme.text_muted())
                 .add_modifier(Modifier::BOLD),

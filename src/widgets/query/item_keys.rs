@@ -138,9 +138,7 @@ fn extract_key_ordering(table: &TableDescription) -> KeyOrdering {
 }
 
 /// Return (HASH_name, RANGE_name) from a key schema (None if absent).
-fn extract_hash_range_from_schema(
-    schema: &[KeySchemaElement],
-) -> (Option<String>, Option<String>) {
+fn extract_hash_range_from_schema(schema: &[KeySchemaElement]) -> (Option<String>, Option<String>) {
     let mut hash = None;
     let mut range = None;
     for KeySchemaElement {

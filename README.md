@@ -1,10 +1,31 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="dynamate logo" width="720" />
+</p>
+
 # dynamate
 
-DynamoDB swiss‑army knife with a TUI for browsing tables and querying items.
+`dynamate` is your DynamoDB table mate in the terminal, built with Rust 2024.
 
-**Create Table (CLI)**
+## What you get
 
-Command:
+- Fast TUI workflows for DynamoDB tables and items.
+- CLI subcommands like `list-tables` and `create-table`.
+- Cross-platform release binaries.
+- Homebrew distribution for macOS.
+- Docker image published to GHCR.
+
+## Quick start
+
+Run locally:
+
+```bash
+cargo run -- --help
+cargo run -- list-tables --json
+```
+
+## Create Table (CLI)
+
+Command examples:
 
 ```bash
 # minimal
@@ -25,14 +46,27 @@ Command:
 
 Syntax rules:
 
-1. `--pk NAME:TYPE` is required. `TYPE` is `S`, `N`, or `B` (string/number/binary).
+1. `--pk NAME:TYPE` is required. `TYPE` is `S`, `N`, or `B`.
 2. `--sk NAME:TYPE` is optional.
-3. `--gsi NAME:PK:PK_TYPE[:SK:SK_TYPE][:PROJECTION]` can be repeated. `SK` is optional.
-4. `--lsi NAME:SK:SK_TYPE[:PROJECTION]` can be repeated. Requires a table sort key.
+3. `--gsi NAME:PK:PK_TYPE[:SK:SK_TYPE][:PROJECTION]` can be repeated.
+4. `--lsi NAME:SK:SK_TYPE[:PROJECTION]` can be repeated and requires a table sort key.
 5. `PROJECTION` tokens are `all`, `keys_only`, or `include=attr1,attr2`.
 
-Notes:
+## Installation
 
-1. GSI sort keys are optional.
-2. If `include=...` is used, the list must include at least one attribute.
-3. Index names must be unique across GSIs and LSIs.
+Install via Homebrew:
+
+```bash
+GH_OWNER=fiam
+HOMEBREW_TAP_REPO_NAME=homebrew-dynamate
+brew tap "${GH_OWNER}/${HOMEBREW_TAP_REPO_NAME}"
+brew install dynamate
+```
+
+Or download your platform archive from GitHub Releases and place `dynamate` on your `PATH`.
+
+## Developer docs
+
+Engineering and release documentation lives in:
+
+- `DEVELOPING.md`

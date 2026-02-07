@@ -1,6 +1,6 @@
 mod export_popup;
-mod input;
 mod index_picker;
+mod input;
 mod item_keys;
 mod keys_widget;
 mod tree;

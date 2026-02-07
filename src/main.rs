@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEventKind, ModifierKeyCode, MouseButton, MouseEventKind,
-    poll, read,
+    Event, EventStream, KeyCode, KeyEventKind, ModifierKeyCode, MouseButton, MouseEventKind, poll,
+    read,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style, Stylize};
@@ -40,10 +40,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 use ratatui::widgets::{Block, BorderType};
 use ratatui::{DefaultTerminal, Frame};
+use throbber_widgets_tui::symbols::throbber::BRAILLE_SIX;
+use throbber_widgets_tui::{Throbber, ThrobberState};
 use tokio_stream::StreamExt;
 use unicode_width::UnicodeWidthStr;
-use throbber_widgets_tui::{Throbber, ThrobberState};
-use throbber_widgets_tui::symbols::throbber::BRAILLE_SIX;
 
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
@@ -59,8 +59,8 @@ mod util;
 mod widgets;
 
 use crate::env::{
-    AppBus, AppBusRx, AppCommand, AppEvent, HelpStateEvent, Toast, ToastAction,
-    ToastKind, WidgetEvent,
+    AppBus, AppBusRx, AppCommand, AppEvent, HelpStateEvent, Toast, ToastAction, ToastKind,
+    WidgetEvent,
 };
 use crate::help::ModDisplay;
 use crate::util::{env_flag, fill_bg};
@@ -70,7 +70,7 @@ use crate::widgets::theme::Theme;
 #[command(
     name = "dynamate",
     version = "0.1.0",
-    about = "DynamoDB swiss army knife",
+    about = "Your DynamoDB table mate",
     long_about = None
 )]
 struct Cli {
@@ -538,10 +538,7 @@ impl App {
         if let Some(line) = loading_line {
             let width = line.width().min(title_area.width as usize);
             if width > 0 {
-                frame.render_widget(
-                    line,
-                    Rect::new(title_area.x, title_area.y, width as u16, 1),
-                );
+                frame.render_widget(line, Rect::new(title_area.x, title_area.y, width as u16, 1));
             }
         }
         if let Some(widget) = self.widgets.last() {
@@ -651,10 +648,9 @@ impl App {
             && let Some(rect) = self.toast_rect.get()
             && let Some(action) = self.toast.as_ref().and_then(|toast| toast.action.clone())
         {
-            let within_x = mouse.column >= rect.x
-                && mouse.column < rect.x.saturating_add(rect.width);
-            let within_y = mouse.row >= rect.y
-                && mouse.row < rect.y.saturating_add(rect.height);
+            let within_x =
+                mouse.column >= rect.x && mouse.column < rect.x.saturating_add(rect.width);
+            let within_y = mouse.row >= rect.y && mouse.row < rect.y.saturating_add(rect.height);
             if within_x && within_y {
                 self.handle_toast_action(&action);
                 return true;
@@ -747,7 +743,8 @@ impl App {
         let event = HelpStateEvent {
             modifiers: self.modifiers,
         };
-        self.bus.broadcast(AppEvent::new(env::WidgetId::app(), event));
+        self.bus
+            .broadcast(AppEvent::new(env::WidgetId::app(), event));
     }
 
     fn process_widget_self_events(&mut self) {
@@ -873,9 +870,10 @@ impl App {
         let message = toast.message.as_str();
         let show_throbber = is_export_progress_toast(message);
         let show_cancel = self.export_cancel_active();
-        let action_label = toast.action.as_ref().map(|action| {
-            format!("[{}] {}", action.key(), action.label())
-        });
+        let action_label = toast
+            .action
+            .as_ref()
+            .map(|action| format!("[{}] {}", action.key(), action.label()));
         let mut full_message = if let Some(label) = action_label.as_ref() {
             format!("{message}  {label}")
         } else {
@@ -917,16 +915,10 @@ impl App {
                             "Exported to ",
                             Style::default().fg(theme.text()),
                         ));
-                        spans.push(Span::styled(
-                            path,
-                            Style::default().fg(theme.text_muted()),
-                        ));
+                        spans.push(Span::styled(path, Style::default().fg(theme.text_muted())));
                     }
                     ExportCompleteParts::Results { count, items, path } => {
-                        spans.push(Span::styled(
-                            "Exported ",
-                            Style::default().fg(theme.text()),
-                        ));
+                        spans.push(Span::styled("Exported ", Style::default().fg(theme.text())));
                         spans.push(Span::styled(
                             count,
                             Style::default()
@@ -937,10 +929,7 @@ impl App {
                             format!(" {items} to "),
                             Style::default().fg(theme.text()),
                         ));
-                        spans.push(Span::styled(
-                            path,
-                            Style::default().fg(theme.text_muted()),
-                        ));
+                        spans.push(Span::styled(path, Style::default().fg(theme.text_muted())));
                     }
                 }
             } else if let Some((count, suffix)) = parse_export_progress(message) {
@@ -949,19 +938,13 @@ impl App {
                     Style::default().fg(theme.text()),
                 ));
                 spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    count,
-                    Style::default().fg(theme.text_muted()),
-                ));
+                spans.push(Span::styled(count, Style::default().fg(theme.text_muted())));
                 spans.push(Span::styled(
                     suffix,
                     Style::default().fg(theme.text_muted()),
                 ));
             } else {
-                spans.push(Span::styled(
-                    message,
-                    Style::default().fg(theme.text()),
-                ));
+                spans.push(Span::styled(message, Style::default().fg(theme.text())));
             }
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
@@ -987,10 +970,7 @@ impl App {
                 Style::default().fg(theme.text()),
             ));
             spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                count,
-                Style::default().fg(theme.text_muted()),
-            ));
+            spans.push(Span::styled(count, Style::default().fg(theme.text_muted())));
             spans.push(Span::styled(
                 suffix,
                 Style::default().fg(theme.text_muted()),
@@ -1004,10 +984,7 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    "cancel",
-                    Style::default().fg(theme.text()),
-                ));
+                spans.push(Span::styled("cancel", Style::default().fg(theme.text())));
             }
             Line::from(spans)
         } else {
@@ -1103,28 +1080,26 @@ impl App {
 
     fn handle_toast_action(&mut self, action: &ToastAction) {
         match action {
-            ToastAction::CopyPath { value, .. } => {
-                match copy_to_clipboard(value) {
-                    Ok(()) => {
-                        self.toast = Some(ToastState::from(Toast {
-                            message: "Path copied to clipboard".to_string(),
-                            kind: ToastKind::Info,
-                            duration: Duration::from_secs(2),
-                            action: None,
-                        }));
-                        self.should_redraw = true;
-                    }
-                    Err(err) => {
-                        self.toast = Some(ToastState::from(Toast {
-                            message: format!("Failed to copy path: {err}"),
-                            kind: ToastKind::Error,
-                            duration: Duration::from_secs(3),
-                            action: None,
-                        }));
-                        self.should_redraw = true;
-                    }
+            ToastAction::CopyPath { value, .. } => match copy_to_clipboard(value) {
+                Ok(()) => {
+                    self.toast = Some(ToastState::from(Toast {
+                        message: "Path copied to clipboard".to_string(),
+                        kind: ToastKind::Info,
+                        duration: Duration::from_secs(2),
+                        action: None,
+                    }));
+                    self.should_redraw = true;
                 }
-            }
+                Err(err) => {
+                    self.toast = Some(ToastState::from(Toast {
+                        message: format!("Failed to copy path: {err}"),
+                        kind: ToastKind::Error,
+                        duration: Duration::from_secs(3),
+                        action: None,
+                    }));
+                    self.should_redraw = true;
+                }
+            },
         }
     }
 }
@@ -1204,8 +1179,14 @@ fn is_export_progress_toast(message: &str) -> bool {
 }
 
 enum ExportCompleteParts {
-    Item { path: String },
-    Results { count: String, items: String, path: String },
+    Item {
+        path: String,
+    },
+    Results {
+        count: String,
+        items: String,
+        path: String,
+    },
 }
 
 fn parse_export_complete(message: &str) -> Option<ExportCompleteParts> {
