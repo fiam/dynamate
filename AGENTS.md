@@ -4,6 +4,7 @@
 Use Conventional Commits: `type(scope?): subject` (imperative, lowercase). Prefer types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`, `ci`, `perf`.
 
 Before committing, run and fix all issues:
+- `cargo fmt --all -- --check`
 - `cargo check --all-targets --all-features`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test --all-targets --all-features`

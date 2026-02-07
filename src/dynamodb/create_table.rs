@@ -399,15 +399,16 @@ fn parse_attribute_list(raw: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AttributeType, CreateTableSpec, GsiSpec, IndexProjection, KeySpec, LsiSpec,
-    };
+    use super::{AttributeType, CreateTableSpec, GsiSpec, IndexProjection, KeySpec, LsiSpec};
 
     #[test]
     fn attribute_type_parse_accepts_shortcodes() {
         assert_eq!(AttributeType::parse("S").unwrap(), AttributeType::String);
         assert_eq!(AttributeType::parse("n").unwrap(), AttributeType::Number);
-        assert_eq!(AttributeType::parse("binary").unwrap(), AttributeType::Binary);
+        assert_eq!(
+            AttributeType::parse("binary").unwrap(),
+            AttributeType::Binary
+        );
     }
 
     #[test]

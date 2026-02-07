@@ -235,8 +235,7 @@ impl crate::widgets::Widget for CreateTablePopup {
                 matches!(state.active_field, FieldId::Actions),
                 state.selected_action,
             );
-            let status_area =
-                Rect::new(inner.x, inner.y + content_height + 1, inner.width, 1);
+            let status_area = Rect::new(inner.x, inner.y + content_height + 1, inner.width, 1);
             render_status(frame, status_area, &state, theme, scroll_info.clone());
         } else if footer_height == 1 {
             let footer_area = Rect::new(inner.x, inner.y + content_height, inner.width, 1);
@@ -311,7 +310,11 @@ impl crate::widgets::Widget for CreateTablePopup {
             let rows = build_rows(&state);
             let viewport = state.last_viewport_height.max(1);
             let page = viewport.saturating_sub(1).max(1) as i16;
-            let delta = if key.code == KeyCode::PageDown { page } else { -page };
+            let delta = if key.code == KeyCode::PageDown {
+                page
+            } else {
+                -page
+            };
             state.scroll_by(delta, &rows, viewport);
             state.user_scrolled = true;
             ctx.invalidate();
@@ -437,18 +440,14 @@ impl crate::widgets::Widget for CreateTablePopup {
             FieldId::GsiHashType(idx) => state.gsis[idx].hash_key.key_type.handle_event(event),
             FieldId::GsiSortName(idx) => state.gsis[idx].sort_key.name.handle_event(event),
             FieldId::GsiSortType(idx) => state.gsis[idx].sort_key.key_type.handle_event(event),
-            FieldId::GsiProjectionKind(idx) => {
-                state.gsis[idx].projection.kind.handle_event(event)
-            }
+            FieldId::GsiProjectionKind(idx) => state.gsis[idx].projection.kind.handle_event(event),
             FieldId::GsiProjectionAttrs(idx) => {
                 state.gsis[idx].projection.include_attrs.handle_event(event)
             }
             FieldId::LsiName(idx) => state.lsis[idx].name.handle_event(event),
             FieldId::LsiSortName(idx) => state.lsis[idx].sort_key.name.handle_event(event),
             FieldId::LsiSortType(idx) => state.lsis[idx].sort_key.key_type.handle_event(event),
-            FieldId::LsiProjectionKind(idx) => {
-                state.lsis[idx].projection.kind.handle_event(event)
-            }
+            FieldId::LsiProjectionKind(idx) => state.lsis[idx].projection.kind.handle_event(event),
             FieldId::LsiProjectionAttrs(idx) => {
                 state.lsis[idx].projection.include_attrs.handle_event(event)
             }
@@ -599,14 +598,8 @@ impl RowKind {
     fn matches_active(self, active: FieldId) -> bool {
         match self {
             RowKind::TableName => matches!(active, FieldId::TableName),
-            RowKind::HashKey => matches!(
-                active,
-                FieldId::HashKeyName | FieldId::HashKeyType
-            ),
-            RowKind::SortKey => matches!(
-                active,
-                FieldId::SortKeyName | FieldId::SortKeyType
-            ),
+            RowKind::HashKey => matches!(active, FieldId::HashKeyName | FieldId::HashKeyType),
+            RowKind::SortKey => matches!(active, FieldId::SortKeyName | FieldId::SortKeyType),
             RowKind::GsiLabel(_) | RowKind::SectionHeader(_) | RowKind::EmptyHint(_) => false,
             RowKind::GsiName(idx) => matches!(active, FieldId::GsiName(i) if i == idx),
             RowKind::GsiHash(idx) => matches!(
@@ -790,8 +783,7 @@ impl CreateTableState {
         }
         let max_offset = total_height.saturating_sub(viewport_height);
         if let Some((row_start, row_end)) = active_row_range(rows, self.active_field)
-            && (row_start < self.scroll_offset
-                || row_end > self.scroll_offset + viewport_height)
+            && (row_start < self.scroll_offset || row_end > self.scroll_offset + viewport_height)
         {
             self.scroll_offset = row_start.min(max_offset);
         }
@@ -865,7 +857,8 @@ impl CreateTableState {
     }
 
     fn sync_active(&mut self) {
-        self.table_name.set_active(matches!(self.active_field, FieldId::TableName));
+        self.table_name
+            .set_active(matches!(self.active_field, FieldId::TableName));
         self.hash_key
             .name
             .set_active(matches!(self.active_field, FieldId::HashKeyName));
@@ -897,9 +890,9 @@ impl CreateTableState {
             gsi.projection
                 .kind
                 .set_active(matches!(self.active_field, FieldId::GsiProjectionKind(i) if i == idx));
-            gsi.projection
-                .include_attrs
-                .set_active(matches!(self.active_field, FieldId::GsiProjectionAttrs(i) if i == idx));
+            gsi.projection.include_attrs.set_active(
+                matches!(self.active_field, FieldId::GsiProjectionAttrs(i) if i == idx),
+            );
         }
 
         for (idx, lsi) in self.lsis.iter_mut().enumerate() {
@@ -914,9 +907,9 @@ impl CreateTableState {
             lsi.projection
                 .kind
                 .set_active(matches!(self.active_field, FieldId::LsiProjectionKind(i) if i == idx));
-            lsi.projection
-                .include_attrs
-                .set_active(matches!(self.active_field, FieldId::LsiProjectionAttrs(i) if i == idx));
+            lsi.projection.include_attrs.set_active(
+                matches!(self.active_field, FieldId::LsiProjectionAttrs(i) if i == idx),
+            );
         }
     }
 
@@ -1183,10 +1176,10 @@ fn scroll_indicator(rows: &[RowSpec], viewport_height: u16, scroll_offset: u16) 
     if total_height <= viewport_height {
         return None;
     }
-    let pages = total_height
-        .saturating_add(viewport_height.saturating_sub(1))
-        / viewport_height;
-    let page = (scroll_offset / viewport_height).saturating_add(1).min(pages);
+    let pages = total_height.saturating_add(viewport_height.saturating_sub(1)) / viewport_height;
+    let page = (scroll_offset / viewport_height)
+        .saturating_add(1)
+        .min(pages);
     Some(format!("Scroll {page}/{pages}"))
 }
 
@@ -1215,9 +1208,11 @@ impl GsiInput {
     fn new(id: usize) -> Self {
         Self {
             name: TextInput::new("GSI name", format!("GSI{id}")),
-            hash_key: KeyInput::new("GSI partition key name", AttributeType::String, format!(
-                "GSI{id}PK"
-            )),
+            hash_key: KeyInput::new(
+                "GSI partition key name",
+                AttributeType::String,
+                format!("GSI{id}PK"),
+            ),
             sort_key: KeyInput::new(
                 "GSI sort key name (optional)",
                 AttributeType::String,
@@ -1292,9 +1287,12 @@ impl ProjectionSelect {
             .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()))
             .border_style(Style::default().fg(border));
         let value = format!("{} ({})", self.value.label(), self.value.description());
-        let input = Paragraph::new(Line::from(Span::styled(value, Style::default().fg(theme.text()))))
-            .block(block)
-            .alignment(Alignment::Center);
+        let input = Paragraph::new(Line::from(Span::styled(
+            value,
+            Style::default().fg(theme.text()),
+        )))
+        .block(block)
+        .alignment(Alignment::Center);
         frame.render_widget(input, area);
     }
 
@@ -1349,9 +1347,12 @@ impl TypeSelect {
             .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()))
             .border_style(Style::default().fg(border));
         let value = format!("{} ({})", self.value.label(), self.value.description());
-        let input = Paragraph::new(Line::from(Span::styled(value, Style::default().fg(theme.text()))))
-            .block(block)
-            .alignment(Alignment::Center);
+        let input = Paragraph::new(Line::from(Span::styled(
+            value,
+            Style::default().fg(theme.text()),
+        )))
+        .block(block)
+        .alignment(Alignment::Center);
         frame.render_widget(input, area);
     }
 
@@ -1511,12 +1512,20 @@ fn render_projection_row(
     projection.include_attrs.render(frame, attrs_area, theme);
 }
 
-fn render_row(frame: &mut Frame, area: Rect, kind: RowKind, state: &CreateTableState, theme: &Theme) {
+fn render_row(
+    frame: &mut Frame,
+    area: Rect,
+    kind: RowKind,
+    state: &CreateTableState,
+    theme: &Theme,
+) {
     match kind {
         RowKind::TableName => state.table_name.render(frame, area, theme),
         RowKind::HashKey => render_key_row(frame, area, &state.hash_key, theme),
         RowKind::SortKey => render_key_row(frame, area, &state.sort_key, theme),
-        RowKind::SectionHeader(section) => render_section_header(frame, area, section.label(), theme),
+        RowKind::SectionHeader(section) => {
+            render_section_header(frame, area, section.label(), theme)
+        }
         RowKind::EmptyHint(section) => render_empty_hint(frame, area, section.empty_label(), theme),
         RowKind::GsiLabel(idx) => {
             let label = format!("GSI {}", idx + 1);
@@ -1551,28 +1560,16 @@ fn render_section_header(frame: &mut Frame, area: Rect, label: &str, theme: &The
 }
 
 fn render_index_label(frame: &mut Frame, area: Rect, label: &str, theme: &Theme) {
-    let text = Line::from(Span::styled(
-        label,
-        Style::default().fg(theme.text_muted()),
-    ));
+    let text = Line::from(Span::styled(label, Style::default().fg(theme.text_muted())));
     frame.render_widget(Paragraph::new(text), area);
 }
 
 fn render_empty_hint(frame: &mut Frame, area: Rect, label: &str, theme: &Theme) {
-    let text = Line::from(Span::styled(
-        label,
-        Style::default().fg(theme.text_muted()),
-    ));
+    let text = Line::from(Span::styled(label, Style::default().fg(theme.text_muted())));
     frame.render_widget(Paragraph::new(text), area);
 }
 
-fn render_actions(
-    frame: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    active: bool,
-    selected: ActionId,
-) {
+fn render_actions(frame: &mut Frame, area: Rect, theme: &Theme, active: bool, selected: ActionId) {
     let base_style = Style::default()
         .fg(theme.accent())
         .add_modifier(Modifier::BOLD);
@@ -1610,7 +1607,10 @@ fn render_status(
     scroll_info: Option<String>,
 ) {
     let status = if let Some(error) = state.error.as_ref() {
-        Some((format!("Error: {error}"), Style::default().fg(theme.error())))
+        Some((
+            format!("Error: {error}"),
+            Style::default().fg(theme.error()),
+        ))
     } else if matches!(state.status, CreateStatus::Submitting) {
         Some((
             "Creating table...".to_string(),
@@ -1642,12 +1642,7 @@ fn render_status(
     }
 }
 
-fn render_remove_picker(
-    frame: &mut Frame,
-    area: Rect,
-    picker: &RemovePickerState,
-    theme: &Theme,
-) {
+fn render_remove_picker(frame: &mut Frame, area: Rect, picker: &RemovePickerState, theme: &Theme) {
     frame.render_widget(Clear, area);
     fill_bg(frame.buffer_mut(), area, theme.panel_bg());
     let block = Block::bordered()

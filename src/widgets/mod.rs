@@ -6,9 +6,9 @@ use rand::{Rng, distributions::Alphanumeric};
 use ratatui::{Frame, layout::Rect};
 use theme::Theme;
 
-pub mod error;
 pub mod confirm;
 pub mod create_table;
+pub mod error;
 mod query;
 mod table_picker;
 pub mod theme;
@@ -68,7 +68,6 @@ impl WidgetInner {
         }
         events
     }
-
 }
 
 fn type_basename(full: &str) -> &str {
@@ -89,13 +88,7 @@ pub trait Widget: Send {
     fn render(&self, _frame: &mut Frame, _area: Rect, _theme: &Theme) {}
 
     /// Render the widget's content with navigation context.
-    fn render_with_nav(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &Theme,
-        _nav: &NavContext,
-    ) {
+    fn render_with_nav(&self, frame: &mut Frame, area: Rect, theme: &Theme, _nav: &NavContext) {
         self.render(frame, area, theme);
     }
 

@@ -31,8 +31,7 @@ pub struct Args {
 
 pub async fn command(client: &aws_sdk_dynamodb::Client, args: Args) -> Result<()> {
     let table_name = args.table.trim().to_string();
-    let hash_key = parse_key_spec(&args.pk)
-        .map_err(|err| eyre!("Invalid --pk value: {err}"))?;
+    let hash_key = parse_key_spec(&args.pk).map_err(|err| eyre!("Invalid --pk value: {err}"))?;
     let sort_key = match args.sk.as_deref() {
         Some(raw) => Some(parse_key_spec(raw).map_err(|err| eyre!("Invalid --sk value: {err}"))?),
         None => None,
@@ -40,15 +39,13 @@ pub async fn command(client: &aws_sdk_dynamodb::Client, args: Args) -> Result<()
 
     let mut gsis = Vec::new();
     for raw in &args.gsi {
-        let spec = parse_gsi(raw)
-            .map_err(|err| eyre!("Invalid --gsi value ({raw}): {err}"))?;
+        let spec = parse_gsi(raw).map_err(|err| eyre!("Invalid --gsi value ({raw}): {err}"))?;
         gsis.push(spec);
     }
 
     let mut lsis = Vec::new();
     for raw in &args.lsi {
-        let spec = parse_lsi(raw)
-            .map_err(|err| eyre!("Invalid --lsi value ({raw}): {err}"))?;
+        let spec = parse_lsi(raw).map_err(|err| eyre!("Invalid --lsi value ({raw}): {err}"))?;
         lsis.push(spec);
     }
 
@@ -122,9 +119,7 @@ fn parse_gsi(raw: &str) -> Result<GsiSpec, String> {
                 projection,
             })
         }
-        _ => Err(
-            "expected NAME:PK:PK_TYPE[:SK:SK_TYPE][:PROJECTION]".to_string(),
-        ),
+        _ => Err("expected NAME:PK:PK_TYPE[:SK:SK_TYPE][:PROJECTION]".to_string()),
     }
 }
 
@@ -205,8 +200,7 @@ mod tests {
 
     #[test]
     fn parse_args_minimal() {
-        let cli = Cli::try_parse_from(["dynamate", "--table", "demo", "--pk", "PK:S"])
-            .unwrap();
+        let cli = Cli::try_parse_from(["dynamate", "--table", "demo", "--pk", "PK:S"]).unwrap();
         assert_eq!(cli.args.table, "demo");
         assert_eq!(cli.args.pk, "PK:S");
         assert!(cli.args.sk.is_none());
