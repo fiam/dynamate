@@ -7,6 +7,15 @@ on:
         description: "dist plan output JSON"
         required: true
         type: string
+      dry_run:
+        description: "Build image without pushing to GHCR"
+        required: false
+        default: false
+        type: boolean
+      source_ref:
+        description: "Git ref to build when dry_run=true"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -23,6 +32,7 @@ jobs:
     steps:
       - name: Parse release metadata
         id: meta
+        if: ${{ !inputs.dry_run }}
         env:
           DIST_PLAN: ${{ inputs.plan }}
         shell: bash
@@ -45,9 +55,41 @@ jobs:
           echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout source at release tag
+        if: ${{ !inputs.dry_run }}
         uses: actions/checkout@v6
         with:
           ref: ${{ steps.meta.outputs.tag }}
+
+      - name: Checkout source for dry run
+        if: ${{ inputs.dry_run }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+
+      - name: Derive dry-run metadata
+        id: dry_meta
+        if: ${{ inputs.dry_run }}
+        shell: bash
+        run: |
+          version="$(
+            awk '
+              $0 == "[package]" { in_package = 1; next }
+              in_package && /^\[/ { exit }
+              in_package && /^version = "/ {
+                gsub(/^version = "/, "", $0)
+                gsub(/"$/, "", $0)
+                print $0
+                exit
+              }
+            ' Cargo.toml
+          )"
+          if [[ -z "${version}" ]]; then
+            echo "::error::Could not read package version from Cargo.toml."
+            exit 1
+          fi
+          echo "tag=dry-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=true" >> "${GITHUB_OUTPUT}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -56,6 +98,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: ${{ !inputs.dry_run }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -68,14 +111,14 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ env.GHCR_IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ steps.meta.outputs.tag }}
-            type=raw,value=${{ steps.meta.outputs.version }}
-            type=raw,value=latest,enable=${{ steps.meta.outputs.prerelease != 'true' }}
+            type=raw,value=${{ inputs.dry_run && steps.dry_meta.outputs.tag || steps.meta.outputs.tag }}
+            type=raw,value=${{ inputs.dry_run && steps.dry_meta.outputs.version || steps.meta.outputs.version }},enable=${{ !inputs.dry_run }}
+            type=raw,value=latest,enable=${{ !inputs.dry_run && steps.meta.outputs.prerelease != 'true' }}
           labels: |
             org.opencontainers.image.title=dynamate
             org.opencontainers.image.description=Terminal UI for DynamoDB exploration and querying
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.version=${{ inputs.dry_run && steps.dry_meta.outputs.version || steps.meta.outputs.version }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -83,6 +126,6 @@ jobs:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ !inputs.dry_run }}
           tags: ${{ steps.docker_meta.outputs.tags }}
           labels: ${{ steps.docker_meta.outputs.labels }}
