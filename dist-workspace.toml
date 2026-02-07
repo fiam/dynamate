@@ -1,0 +1,22 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.30.3"
+ci = "github"
+installers = ["homebrew"]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "x86_64-pc-windows-msvc",
+]
+install-path = "CARGO_HOME"
+hosting = "github"
+tap = "fiam/homebrew-dynamate"
+publish-jobs = ["homebrew"]
+post-announce-jobs = ["./docker"]
+dispatch-releases = true
+unix-archive = ".tar.gz"
+install-updater = false
+github-custom-job-permissions = { docker = { contents = "read", packages = "write" } }

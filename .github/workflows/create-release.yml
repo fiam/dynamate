@@ -1,24 +1,39 @@
-name: Create Release Tag
+name: Bump, Tag, and Dispatch Release
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version (for example: 0.2.0 or v0.2.0)"
+      bump:
+        description: "Bump strategy: patch, minor, major, or exact"
         required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - exact
+      version:
+        description: "Required when bump=exact (for example: 0.2.0 or v0.2.0)"
+        required: false
         type: string
       ref:
-        description: "Branch or commit to tag"
+        description: "Branch to bump and tag"
         required: false
         default: "main"
         type: string
 
 permissions:
   contents: write
+  actions: write
+
+concurrency:
+  group: release-cut-${{ inputs.ref }}
+  cancel-in-progress: false
 
 jobs:
-  create-tag:
-    name: Create and push tag
+  cut-release:
+    name: Bump version, create tag, dispatch release
     runs-on: ubuntu-latest
 
     steps:
@@ -32,19 +47,96 @@ jobs:
         id: validate
         shell: bash
         run: |
+          branch="${{ inputs.ref }}"
+          bump="${{ inputs.bump }}"
           raw_version="${{ inputs.version }}"
-          version="${raw_version#v}"
-          tag="v${version}"
 
-          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
-            echo "::error::Version must follow semver (example: 1.2.3 or 1.2.3-rc1)."
+          if ! git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            echo "::error::'${branch}' is not a branch on origin."
             exit 1
           fi
 
-          manifest_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n1)"
-          if [[ "${manifest_version}" != "${version}" ]]; then
-            echo "::error::Cargo.toml version is '${manifest_version}', requested '${version}'."
-            echo "::error::Update Cargo.toml (and Cargo.lock if needed) before tagging."
+          manifest_version="$(
+            awk '
+              $0 == "[package]" { in_package = 1; next }
+              in_package && /^\[/ { exit }
+              in_package && /^version = "/ {
+                gsub(/^version = "/, "", $0)
+                gsub(/"$/, "", $0)
+                print $0
+                exit
+              }
+            ' Cargo.toml
+          )"
+          if [[ -z "${manifest_version}" ]]; then
+            echo "::error::Could not read package version from Cargo.toml."
+            exit 1
+          fi
+
+          if [[ "${bump}" == "exact" ]]; then
+            if [[ -z "${raw_version}" ]]; then
+              echo "::error::version is required when bump=exact."
+              exit 1
+            fi
+            version="${raw_version#v}"
+            if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+              echo "::error::Version must follow semver (example: 1.2.3 or 1.2.3-rc1)."
+              exit 1
+            fi
+            if [[ "${manifest_version}" == "${version}" ]]; then
+              echo "::error::Cargo.toml already uses version '${version}'. Pick a new version."
+              exit 1
+            fi
+            bump_arg="${version}"
+          else
+            if [[ -n "${raw_version}" ]]; then
+              echo "::warning::Ignoring 'version' because bump=${bump}."
+            fi
+            bump_arg="${bump}"
+          fi
+
+          echo "bump_arg=${bump_arg}" >> "${GITHUB_OUTPUT}"
+          echo "current_version=${manifest_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.93.0
+
+      - name: Install cargo-release
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-release
+
+      - name: Bump Cargo.toml version
+        shell: bash
+        run: |
+          cargo release version "${{ steps.validate.outputs.bump_arg }}" --execute --no-confirm
+
+      - name: Resolve and validate release tag
+        id: version
+        shell: bash
+        run: |
+          version="$(
+            awk '
+              $0 == "[package]" { in_package = 1; next }
+              in_package && /^\[/ { exit }
+              in_package && /^version = "/ {
+                gsub(/^version = "/, "", $0)
+                gsub(/"$/, "", $0)
+                print $0
+                exit
+              }
+            ' Cargo.toml
+          )"
+          tag="v${version}"
+
+          if [[ -z "${version}" ]]; then
+            echo "::error::Failed to read bumped version from Cargo.toml."
+            exit 1
+          fi
+          if [[ "${version}" == "${{ steps.validate.outputs.current_version }}" ]]; then
+            echo "::error::Version did not change after bump."
             exit 1
           fi
 
@@ -52,26 +144,55 @@ jobs:
             echo "::error::Tag ${tag} already exists locally."
             exit 1
           fi
-
           if git ls-remote --tags origin "refs/tags/${tag}" | grep -q "refs/tags/${tag}$"; then
             echo "::error::Tag ${tag} already exists on origin."
             exit 1
           fi
 
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
-      - name: Create and push annotated tag
+      - name: Verify release commit checks
         shell: bash
         run: |
-          tag="${{ steps.validate.outputs.tag }}"
+          cargo fmt --all -- --check
+          cargo check --all-targets --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all-targets --all-features
+
+      - name: Commit, tag, and push
+        shell: bash
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add Cargo.toml Cargo.lock
+          if git diff --cached --quiet; then
+            echo "::error::Version bump did not change Cargo.toml/Cargo.lock."
+            exit 1
+          fi
+
+          git commit -m "chore(release): ${tag}"
           git tag -a "${tag}" -m "release ${tag}"
+          git push origin "HEAD:${{ inputs.ref }}"
           git push origin "${tag}"
+
+      - name: Dispatch Release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          gh api \
+            --method POST \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/dispatches" \
+            -f ref="${{ inputs.ref }}" \
+            -f inputs[tag]="${tag}"
 
       - name: Release handoff summary
         shell: bash
         run: |
-          echo "Created tag ${{ steps.validate.outputs.tag }} from '${{ inputs.ref }}'."
-          echo "The 'Release' workflow will now build artifacts and publish the release."
+          echo "Bumped version from ${{ steps.validate.outputs.current_version }} to ${{ steps.version.outputs.version }} on '${{ inputs.ref }}'."
+          echo "Created tag ${{ steps.version.outputs.tag }} and dispatched 'Release'."
