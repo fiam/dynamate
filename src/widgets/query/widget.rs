@@ -52,7 +52,6 @@ use dynamate::{
     expr::parse_dynamo_expression,
 };
 use humansize::{BINARY, format_size};
-use serde_json;
 use unicode_width::UnicodeWidthStr;
 
 pub struct QueryWidget {
@@ -878,7 +877,6 @@ impl crate::widgets::Widget for QueryWidget {
                 Some(ActiveQuery::Index(index_event.target.clone())),
             ));
             ctx.push_widget(widget);
-            return;
         }
     }
 }
@@ -1250,29 +1248,25 @@ impl QueryWidget {
             });
         }
         for gsi in table_info.global_secondary_indexes.iter() {
-            if item_matches_index(item, gsi) {
-                if let Some(value) = item.0.get(&gsi.hash_key) {
-                    targets.push(index_picker::IndexTarget {
-                        name: gsi.name.clone(),
-                        kind: index_picker::IndexKind::Global,
-                        hash_key: gsi.hash_key.clone(),
-                        hash_value: value.clone(),
-                        hash_display: item.value(&gsi.hash_key),
-                    });
-                }
+            if item_matches_index(item, gsi) && let Some(value) = item.0.get(&gsi.hash_key) {
+                targets.push(index_picker::IndexTarget {
+                    name: gsi.name.clone(),
+                    kind: index_picker::IndexKind::Global,
+                    hash_key: gsi.hash_key.clone(),
+                    hash_value: value.clone(),
+                    hash_display: item.value(&gsi.hash_key),
+                });
             }
         }
         for lsi in table_info.local_secondary_indexes.iter() {
-            if item_matches_index(item, lsi) {
-                if let Some(value) = item.0.get(&lsi.hash_key) {
-                    targets.push(index_picker::IndexTarget {
-                        name: lsi.name.clone(),
-                        kind: index_picker::IndexKind::Local,
-                        hash_key: lsi.hash_key.clone(),
-                        hash_value: value.clone(),
-                        hash_display: item.value(&lsi.hash_key),
-                    });
-                }
+            if item_matches_index(item, lsi) && let Some(value) = item.0.get(&lsi.hash_key) {
+                targets.push(index_picker::IndexTarget {
+                    name: lsi.name.clone(),
+                    kind: index_picker::IndexKind::Local,
+                    hash_key: lsi.hash_key.clone(),
+                    hash_value: value.clone(),
+                    hash_display: item.value(&lsi.hash_key),
+                });
             }
         }
         Ok(targets)
@@ -2589,8 +2583,7 @@ fn format_query_summary(expr: &dynamate::expr::DynamoExpression) -> String {
 fn contains_or_or_not(expr: &dynamate::expr::DynamoExpression) -> bool {
     use dynamate::expr::DynamoExpression::*;
     match expr {
-        Or(left, right) => contains_or_or_not(left) || contains_or_or_not(right) || true,
-        Not(inner) => contains_or_or_not(inner) || true,
+        Or(_, _) | Not(_) => true,
         And(left, right) => contains_or_or_not(left) || contains_or_or_not(right),
         Parentheses(inner) => contains_or_or_not(inner),
         Comparison { .. } | Between { .. } | In { .. } | Function { .. } => false,
