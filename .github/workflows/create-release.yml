@@ -31,6 +31,9 @@ concurrency:
   group: release-cut-${{ inputs.ref }}
   cancel-in-progress: false
 
+env:
+  RUST_BACKTRACE: full
+
 jobs:
   cut-release:
     name: Bump version, create tag, dispatch release

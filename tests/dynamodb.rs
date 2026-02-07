@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use assert_cmd::Command;
 use aws_config::BehaviorVersion;
 use aws_sdk_dynamodb::config::{Credentials, Region};
@@ -15,6 +17,63 @@ use testcontainers::{
 struct DynamoDBEnv {
     container: ContainerAsync<GenericImage>,
     endpoint_url: Option<String>,
+}
+
+const CREATE_TABLE_MAX_ATTEMPTS: u32 = 6;
+const CREATE_TABLE_RETRY_DELAY_MS: u64 = 150;
+
+fn is_transient_dispatch_failure(err: &impl std::fmt::Debug) -> bool {
+    let rendered = format!("{err:?}");
+    rendered.contains("DispatchFailure")
+        || rendered.contains("TransientError")
+        || rendered.contains("IncompleteMessage")
+}
+
+async fn create_table_with_retry(
+    client: &aws_sdk_dynamodb::Client,
+    table_name: &str,
+) -> Result<()> {
+    for attempt in 1..=CREATE_TABLE_MAX_ATTEMPTS {
+        let key_schema = KeySchemaElement::builder()
+            .attribute_name("PK".to_string())
+            .key_type(KeyType::Hash)
+            .build()
+            .unwrap();
+        let attribute_def = AttributeDefinition::builder()
+            .attribute_name("PK".to_string())
+            .attribute_type(ScalarAttributeType::S)
+            .build()
+            .unwrap();
+        let provisioned_throughput = ProvisionedThroughput::builder()
+            .read_capacity_units(10)
+            .write_capacity_units(5)
+            .build()
+            .unwrap();
+
+        match client
+            .create_table()
+            .table_name(table_name)
+            .key_schema(key_schema)
+            .attribute_definitions(attribute_def)
+            .provisioned_throughput(provisioned_throughput)
+            .send()
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(err)
+                if attempt < CREATE_TABLE_MAX_ATTEMPTS && is_transient_dispatch_failure(&err) =>
+            {
+                let delay_ms = CREATE_TABLE_RETRY_DELAY_MS * u64::from(attempt);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            Err(err) => {
+                return Err(color_eyre::eyre::eyre!(
+                    "failed to create table {table_name} after {attempt} attempt(s): {err:?}"
+                ));
+            }
+        }
+    }
+    unreachable!("create_table_with_retry must return from loop")
 }
 
 async fn new_dynamodb_env() -> Result<DynamoDBEnv> {
@@ -56,30 +115,7 @@ async fn list_tables() {
     let client = new_local_client(endpoint_url).await.unwrap();
     // Create the tables
     for table_name in &table_names {
-        let key_schema = KeySchemaElement::builder()
-            .attribute_name("PK".to_string())
-            .key_type(KeyType::Hash)
-            .build()
-            .unwrap();
-        let attribute_def = AttributeDefinition::builder()
-            .attribute_name("PK".to_string())
-            .attribute_type(ScalarAttributeType::S)
-            .build()
-            .unwrap();
-        let provisioned_throughput = ProvisionedThroughput::builder()
-            .read_capacity_units(10)
-            .write_capacity_units(5)
-            .build()
-            .unwrap();
-        client
-            .create_table()
-            .table_name(table_name)
-            .key_schema(key_schema)
-            .attribute_definitions(attribute_def)
-            .provisioned_throughput(provisioned_throughput)
-            .send()
-            .await
-            .unwrap();
+        create_table_with_retry(&client, table_name).await.unwrap();
     }
     let stdout = cmd
         .env("AWS_REGION", "us-east-1")
