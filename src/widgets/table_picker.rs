@@ -326,6 +326,18 @@ impl TablePickerWidget {
             short: Cow::Borrowed(""),
             long: Cow::Borrowed(""),
             ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^r")),
+                short: Some(Cow::Borrowed("refresh")),
+                long: Some(Cow::Borrowed("Refresh tables")),
+            }),
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
                 keys: Some(Cow::Borrowed("^d")),
                 short: Some(Cow::Borrowed("delete")),
                 long: Some(Cow::Borrowed("Delete table")),
@@ -394,6 +406,18 @@ impl TablePickerWidget {
             short: Cow::Borrowed("move"),
             long: Cow::Borrowed("Move selection"),
             ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^r")),
+                short: Some(Cow::Borrowed("refresh")),
+                long: Some(Cow::Borrowed("Refresh tables")),
+            }),
             shift: None,
             alt: None,
         },
@@ -1011,6 +1035,13 @@ impl crate::widgets::Widget for TablePickerWidget {
             )
         };
         if busy {
+            return true;
+        }
+        if let Some(key) = event.as_key_press_event()
+            && key.code == KeyCode::Char('r')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.reload_tables(ctx);
             return true;
         }
         if filter_active {
