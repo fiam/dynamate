@@ -2248,6 +2248,15 @@ impl QueryWidget {
             }
         };
 
+        if updated == item {
+            ctx.show_toast(Toast {
+                message: "Item unchanged".to_string(),
+                kind: ToastKind::Info,
+                duration: Duration::from_secs(3),
+            });
+            return;
+        }
+
         self.put_item(updated, active_query, PutAction::Update, ctx, reopen_tree);
     }
 
