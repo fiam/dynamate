@@ -152,6 +152,7 @@ async fn execute_scan(
         }
     }
 
+    let start_key_present = start_key.is_some();
     if let Some(start_key) = start_key {
         request = request.set_exclusive_start_key(Some(start_key));
     }
@@ -160,24 +161,13 @@ async fn execute_scan(
         request = request.limit(limit);
     }
 
-    let (result, duration) = send_dynamo_request(|| request.send()).await;
-    match &result {
-        Ok(_) => {
-            tracing::trace!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                "Scan complete"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                error=?err,
-                "Scan complete"
-            );
-        }
-    }
+    let span = tracing::trace_span!(
+        "Scan",
+        table = %table_name,
+        start_key_present = start_key_present,
+        limit = ?limit
+    );
+    let result = send_dynamo_request(span, || request.send(), |err| format!("{err:?}")).await;
     Ok(result?)
 }
 
@@ -236,24 +226,12 @@ async fn execute_query(
         request = request.limit(limit);
     }
 
-    let (result, duration) = send_dynamo_request(|| request.send()).await;
-    match &result {
-        Ok(_) => {
-            tracing::trace!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                "Query complete"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                error=?err,
-                "Query complete"
-            );
-        }
-    }
-
+    let span = tracing::trace_span!(
+        "Query",
+        table = %table_name,
+        start_key_present = start_key_present,
+        limit = ?limit
+    );
+    let result = send_dynamo_request(span, || request.send(), |err| format!("{err:?}")).await;
     Ok(result?)
 }

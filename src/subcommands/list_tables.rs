@@ -11,32 +11,21 @@ pub async fn command(client: &aws_sdk_dynamodb::Client, options: Options) -> Res
     let mut last_evaluated_table_name = None;
 
     loop {
-        tracing::trace!(
-            start_table=?last_evaluated_table_name.as_deref(),
-            "ListTables"
+        let span = tracing::trace_span!(
+            "ListTables",
+            start_table = ?last_evaluated_table_name.as_deref()
         );
-        let (result, duration) = send_dynamo_request(|| {
-            client
-                .list_tables()
-                .set_exclusive_start_table_name(last_evaluated_table_name)
-                .send()
-        })
+        let result = send_dynamo_request(
+            span,
+            || {
+                client
+                    .list_tables()
+                    .set_exclusive_start_table_name(last_evaluated_table_name)
+                    .send()
+            },
+            |err| err.to_string(),
+        )
         .await;
-        match &result {
-            Ok(_) => {
-                tracing::trace!(
-                    duration_ms=duration.as_millis(),
-                    "ListTables complete"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    duration_ms=duration.as_millis(),
-                    error=?err,
-                    "ListTables complete"
-                );
-            }
-        }
         let output = result?;
         table_names.extend(output.table_names().iter().cloned());
 

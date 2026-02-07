@@ -1323,32 +1323,23 @@ impl QueryWidget {
         let table_name = self.table_name.clone();
         tokio::spawn(async move {
             let key_len = key.len();
-            tracing::trace!(table=%table_name, key_len, "DeleteItem");
-            let (result, duration) = send_dynamo_request(|| {
-                client
-                    .delete_item()
-                    .table_name(&table_name)
-                    .set_key(Some(key.clone()))
-                    .send()
-            })
+            let span = tracing::trace_span!(
+                "DeleteItem",
+                table = %table_name,
+                key_len = key_len
+            );
+            let result = send_dynamo_request(
+                span,
+                || {
+                    client
+                        .delete_item()
+                        .table_name(&table_name)
+                        .set_key(Some(key.clone()))
+                        .send()
+                },
+                format_sdk_error,
+            )
             .await;
-            match &result {
-                Ok(_) => {
-                    tracing::trace!(
-                        table=%table_name,
-                        duration_ms=duration.as_millis(),
-                        "DeleteItem complete"
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        table=%table_name,
-                        duration_ms=duration.as_millis(),
-                        error=%format_sdk_error(err),
-                        "DeleteItem complete"
-                    );
-                }
-            }
             let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
             ctx.emit_self(DeleteItemEvent {
                 key,
@@ -2357,32 +2348,23 @@ impl QueryWidget {
         let table_name = self.table_name.clone();
         tokio::spawn(async move {
             let item_len = item.len();
-            tracing::trace!(table=%table_name, item_len, "PutItem");
-            let (result, duration) = send_dynamo_request(|| {
-                client
-                    .put_item()
-                    .table_name(&table_name)
-                    .set_item(Some(item))
-                    .send()
-            })
+            let span = tracing::trace_span!(
+                "PutItem",
+                table = %table_name,
+                item_len = item_len
+            );
+            let result = send_dynamo_request(
+                span,
+                || {
+                    client
+                        .put_item()
+                        .table_name(&table_name)
+                        .set_item(Some(item))
+                        .send()
+                },
+                format_sdk_error,
+            )
             .await;
-            match &result {
-                Ok(_) => {
-                    tracing::trace!(
-                        table=%table_name,
-                        duration_ms=duration.as_millis(),
-                        "PutItem complete"
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        table=%table_name,
-                        duration_ms=duration.as_millis(),
-                        error=%format_sdk_error(err),
-                        "PutItem complete"
-                    );
-                }
-            }
             let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
             ctx.emit_self(PutItemEvent {
                 active_query,
@@ -2425,31 +2407,13 @@ async fn fetch_table_description(
     client: aws_sdk_dynamodb::Client,
     table_name: String,
 ) -> Result<TableDescription, String> {
-    tracing::trace!(table=%table_name, "DescribeTable");
-    let (result, duration) = send_dynamo_request(|| {
-        client
-            .describe_table()
-            .table_name(&table_name)
-            .send()
-    })
+    let span = tracing::trace_span!("DescribeTable", table = %table_name);
+    let result = send_dynamo_request(
+        span,
+        || client.describe_table().table_name(&table_name).send(),
+        |err| err.to_string(),
+    )
     .await;
-    match &result {
-        Ok(_) => {
-            tracing::trace!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                "DescribeTable complete"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                error=?err,
-                "DescribeTable complete"
-            );
-        }
-    }
     let out = result.map_err(|e| e.to_string())?;
     let table = out
         .table()
@@ -2461,31 +2425,13 @@ async fn fetch_ttl_attribute(
     client: aws_sdk_dynamodb::Client,
     table_name: String,
 ) -> Option<String> {
-    tracing::trace!(table=%table_name, "DescribeTimeToLive");
-    let (output, duration) = send_dynamo_request(|| {
-        client
-            .describe_time_to_live()
-            .table_name(&table_name)
-            .send()
-    })
+    let span = tracing::trace_span!("DescribeTimeToLive", table = %table_name);
+    let output = send_dynamo_request(
+        span,
+        || client.describe_time_to_live().table_name(&table_name).send(),
+        |err| err.to_string(),
+    )
     .await;
-    match &output {
-        Ok(_) => {
-            tracing::trace!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                "DescribeTimeToLive complete"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                error=?err,
-                "DescribeTimeToLive complete"
-            );
-        }
-    }
     match output {
         Ok(out) => out.time_to_live_description().and_then(|desc| {
             let enabled = matches!(

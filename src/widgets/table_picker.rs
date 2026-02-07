@@ -462,32 +462,21 @@ impl TablePickerWidget {
         let mut last_evaluated_table_name = None;
 
         loop {
-            tracing::trace!(
-                start_table=?last_evaluated_table_name.as_deref(),
-                "ListTables"
+            let span = tracing::trace_span!(
+                "ListTables",
+                start_table = ?last_evaluated_table_name.as_deref()
             );
-            let (result, duration) = send_dynamo_request(|| {
-                client
-                    .list_tables()
-                    .set_exclusive_start_table_name(last_evaluated_table_name)
-                    .send()
-            })
+            let result = send_dynamo_request(
+                span,
+                || {
+                    client
+                        .list_tables()
+                        .set_exclusive_start_table_name(last_evaluated_table_name)
+                        .send()
+                },
+                |err| err.to_string(),
+            )
             .await;
-            match &result {
-                Ok(_) => {
-                    tracing::trace!(
-                        duration_ms=duration.as_millis(),
-                        "ListTables complete"
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        duration_ms=duration.as_millis(),
-                        error=?err,
-                        "ListTables complete"
-                    );
-                }
-            }
             let output = result.map_err(|err| err.to_string())?;
             table_names.extend(output.table_names().iter().cloned());
 
@@ -711,31 +700,18 @@ impl TablePickerWidget {
         let client = self.client.clone();
         let ctx_clone = ctx.clone();
         tokio::spawn(async move {
-            tracing::trace!(table=%table_name, "DeleteTable");
-            let (result, duration) = send_dynamo_request(|| {
-                client
-                    .delete_table()
-                    .table_name(&table_name)
-                    .send()
-            })
+            let span = tracing::trace_span!("DeleteTable", table = %table_name);
+            let result = send_dynamo_request(
+                span,
+                || {
+                    client
+                        .delete_table()
+                        .table_name(&table_name)
+                        .send()
+                },
+                format_sdk_error,
+            )
             .await;
-            match &result {
-                Ok(_) => {
-                    tracing::trace!(
-                        table=%table_name,
-                        duration_ms=duration.as_millis(),
-                        "DeleteTable complete"
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        table=%table_name,
-                        duration_ms=duration.as_millis(),
-                        error=%format_sdk_error(err),
-                        "DeleteTable complete"
-                    );
-                }
-            }
             let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
             ctx_clone.emit_self(DeleteTableEvent {
                 table_name,
@@ -815,11 +791,7 @@ impl crate::widgets::Widget for TablePickerWidget {
 
         let total_tables = state.tables.len();
         let filtered_tables = state.filtered_indices.len();
-        let count_label = if total_tables == filtered_tables {
-            format!("{total_tables} tables")
-        } else {
-            format!("{filtered_tables} of {total_tables} tables")
-        };
+        let count_label = format_table_count_label(total_tables, filtered_tables);
 
         let block = Block::bordered()
             .title_top(title)
@@ -946,8 +918,8 @@ impl crate::widgets::Widget for TablePickerWidget {
                     if !payload.warnings.is_empty() {
                         ctx.show_toast(Toast {
                             message: format!(
-                                "{} tables missing metadata",
-                                payload.warnings.len()
+                                "{} missing metadata",
+                                format_table_count(payload.warnings.len())
                             ),
                             kind: ToastKind::Warning,
                             duration: Duration::from_secs(4),
@@ -1150,31 +1122,13 @@ where
 }
 
 async fn fetch_table_meta(client: &Client, table_name: &str) -> Result<TableMeta, String> {
-    tracing::trace!(table=%table_name, "DescribeTable");
-    let (result, duration) = send_dynamo_request(|| {
-        client
-            .describe_table()
-            .table_name(table_name)
-            .send()
-    })
+    let span = tracing::trace_span!("DescribeTable", table = %table_name);
+    let result = send_dynamo_request(
+        span,
+        || client.describe_table().table_name(table_name).send(),
+        format_sdk_error,
+    )
     .await;
-    match &result {
-        Ok(_) => {
-            tracing::trace!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                "DescribeTable complete"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                error=%format_sdk_error(err),
-                "DescribeTable complete"
-            );
-        }
-    }
     let output = result.map_err(|err| format_sdk_error(&err))?;
     let table_desc = output
         .table()
@@ -1200,6 +1154,23 @@ async fn fetch_table_meta(client: &Client, table_name: &str) -> Result<TableMeta
 
 fn format_count(count: Option<i64>) -> String {
     count.map(|value| value.to_string()).unwrap_or_else(|| "—".to_string())
+}
+
+fn format_table_count(count: usize) -> String {
+    match count {
+        0 => "no tables".to_string(),
+        1 => "1 table".to_string(),
+        _ => format!("{count} tables"),
+    }
+}
+
+fn format_table_count_label(total: usize, filtered: usize) -> String {
+    if total == filtered {
+        format_table_count(total)
+    } else {
+        let total_label = if total == 1 { "table" } else { "tables" };
+        format!("{filtered} of {total} {total_label}")
+    }
 }
 
 fn format_size_bytes(size: Option<i64>) -> String {
@@ -1241,31 +1212,13 @@ fn extract_hash_range(table: &TableDescription) -> (Option<String>, Option<Strin
 }
 
 async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, String> {
-    tracing::trace!(table=%table_name, "DescribeTable");
-    let (result, duration) = send_dynamo_request(|| {
-        client
-            .describe_table()
-            .table_name(table_name)
-            .send()
-    })
+    let span = tracing::trace_span!("DescribeTable", table = %table_name);
+    let result = send_dynamo_request(
+        span,
+        || client.describe_table().table_name(table_name).send(),
+        format_sdk_error,
+    )
     .await;
-    match &result {
-        Ok(_) => {
-            tracing::trace!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                "DescribeTable complete"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                table=%table_name,
-                duration_ms=duration.as_millis(),
-                error=%format_sdk_error(err),
-                "DescribeTable complete"
-            );
-        }
-    }
     let output = result.map_err(|err| format_sdk_error(&err))?;
     let table_desc = output
         .table()
@@ -1295,42 +1248,29 @@ async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, St
                 "Scan pagination start key"
             );
         }
-        tracing::trace!(
-            table=%table_name,
-            projection=%projection,
-            start_key=?last_evaluated_key,
-            start_key_present,
-            limit=25,
-            "Scan"
+        let span = tracing::trace_span!(
+            "Scan",
+            table = %table_name,
+            projection = %projection,
+            start_key = ?last_evaluated_key,
+            start_key_present = start_key_present,
+            limit = 25
         );
-        let (result, duration) = send_dynamo_request(|| {
-            client
-                .scan()
-                .table_name(table_name)
-                .projection_expression(projection)
-                .set_expression_attribute_names(Some(expr_names))
-                .limit(25)
-                .set_exclusive_start_key(last_evaluated_key.clone())
-                .send()
-        })
+        let result = send_dynamo_request(
+            span,
+            || {
+                client
+                    .scan()
+                    .table_name(table_name)
+                    .projection_expression(projection)
+                    .set_expression_attribute_names(Some(expr_names))
+                    .limit(25)
+                    .set_exclusive_start_key(last_evaluated_key.clone())
+                    .send()
+            },
+            format_sdk_error,
+        )
         .await;
-        match &result {
-            Ok(_) => {
-                tracing::trace!(
-                    table=%table_name,
-                    duration_ms=duration.as_millis(),
-                    "Scan complete"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    table=%table_name,
-                    duration_ms=duration.as_millis(),
-                    error=%format_sdk_error(err),
-                    "Scan complete"
-                );
-            }
-        }
         let output = result.map_err(|err| format_sdk_error(&err))?;
 
         let items = output.items();
@@ -1373,35 +1313,22 @@ async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, St
                 .get(table_name)
                 .map(|items| items.len())
                 .unwrap_or(0);
-            tracing::trace!(
-                table=%table_name,
-                items=pending_count,
-                "BatchWriteItem"
+            let span = tracing::trace_span!(
+                "BatchWriteItem",
+                table = %table_name,
+                items = pending_count
             );
-            let (result, duration) = send_dynamo_request(|| {
-                client
-                    .batch_write_item()
-                    .set_request_items(Some(pending.clone()))
-                    .send()
-            })
+            let result = send_dynamo_request(
+                span,
+                || {
+                    client
+                        .batch_write_item()
+                        .set_request_items(Some(pending.clone()))
+                        .send()
+                },
+                format_sdk_error,
+            )
             .await;
-            match &result {
-                Ok(_) => {
-                    tracing::trace!(
-                        table=%table_name,
-                        duration_ms=duration.as_millis(),
-                        "BatchWriteItem complete"
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        table=%table_name,
-                        duration_ms=duration.as_millis(),
-                        error=%format_sdk_error(err),
-                        "BatchWriteItem complete"
-                    );
-                }
-            }
             let output = result.map_err(|err| format_sdk_error(&err))?;
             let unprocessed = output.unprocessed_items().cloned().unwrap_or_default();
             if unprocessed.is_empty() {

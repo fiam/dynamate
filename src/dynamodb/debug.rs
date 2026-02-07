@@ -7,15 +7,37 @@ use std::{
 
 const DEBUG_DELAY_ENV: &str = "DYNAMATE_DEBUG_DYNAMO_DELAY_MS";
 
-pub async fn send_dynamo_request<F, Fut, T, E>(send: F) -> (Result<T, E>, Duration)
+pub async fn send_dynamo_request<F, Fut, T, E, FE>(
+    span: tracing::Span,
+    send: F,
+    format_error: FE,
+) -> Result<T, E>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T, E>>,
+    FE: FnOnce(&E) -> String,
 {
+    let _enter = span.enter();
     debug_dynamo_delay().await;
     let started = Instant::now();
     let result = send().await;
-    (result, started.elapsed())
+    let duration = started.elapsed();
+    match &result {
+        Ok(_) => {
+            tracing::trace!(
+                duration_ms = duration.as_millis(),
+                "DynamoDB request complete"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                duration_ms = duration.as_millis(),
+                error = %format_error(err),
+                "DynamoDB request complete"
+            );
+        }
+    }
+    result
 }
 
 async fn debug_dynamo_delay() {
