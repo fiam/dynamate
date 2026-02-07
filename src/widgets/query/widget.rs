@@ -57,7 +57,9 @@ use dynamate::{
         DynamoDbRequest, KeyCondition, KeyConditionType, Kind, Output, QueryBuilder, QueryType,
         ScanBuilder, execute_page,
     },
-    expr::parse_dynamo_expression,
+    expr::{
+        Comparator, DynamoExpression, Operand, parse_dynamo_expression, parse_single_value_token,
+    },
 };
 use humansize::{BINARY, format_size};
 use unicode_width::UnicodeWidthStr;
@@ -1639,9 +1641,14 @@ impl QueryWidget {
                 base.join(export_file_name(&self.table_name, mode, timestamp))
             }
             ExportMode::Results => {
+                let table_desc = self
+                    .table_meta
+                    .borrow()
+                    .as_ref()
+                    .map(|meta| meta.table_desc.clone());
                 let query = {
                     let state = self.state.borrow();
-                    normalized_query(&state.active_query)
+                    normalized_query(&state.active_query, table_desc.as_ref())
                 };
                 base.join(export_results_file_name(
                     &self.table_name,
@@ -2340,7 +2347,16 @@ impl QueryWidget {
         if let Some(value) = approx_total.as_ref() {
             footer_suffix.push_str(&format!(" · {value}"));
         }
-        if let Some(value) = query_footer_label(state.query_output.as_ref(), &state.active_query) {
+        let table_desc = self
+            .table_meta
+            .borrow()
+            .as_ref()
+            .map(|meta| meta.table_desc.clone());
+        if let Some(value) = query_footer_label(
+            state.query_output.as_ref(),
+            &state.active_query,
+            table_desc.as_ref(),
+        ) {
             footer_suffix.push_str(&format!(" · {value}"));
         }
         let (title, title_bottom, title_style) = match &state.loading_state {
@@ -2876,11 +2892,36 @@ async fn create_request_from_query(
             desc
         }
     };
-    let expr = parse_dynamo_expression(query).map_err(|e| e.to_string())?;
+    let expr = parse_query_expression(query, &table_desc)?;
     Ok(DynamoDbRequest::from_expression_and_table(
         &expr,
         &table_desc,
     ))
+}
+
+fn parse_query_expression(
+    query: &str,
+    table_desc: &TableDescription,
+) -> Result<DynamoExpression, String> {
+    match parse_dynamo_expression(query) {
+        Ok(expr) => Ok(expr),
+        Err(parse_error) => {
+            let parse_error_text = parse_error.to_string();
+            let value = match parse_single_value_token(query) {
+                Ok(value) => value,
+                Err(_) => return Err(parse_error_text),
+            };
+            let (hash_key, _) = extract_hash_range(table_desc);
+            let Some(hash_key) = hash_key else {
+                return Err(parse_error_text);
+            };
+            Ok(DynamoExpression::Comparison {
+                left: Operand::Path(hash_key),
+                operator: Comparator::Equal,
+                right: value,
+            })
+        }
+    }
 }
 
 async fn fetch_table_description(
@@ -3272,7 +3313,11 @@ fn output_info(output: Option<&Output>) -> String {
     }
 }
 
-fn query_footer_label(output: Option<&Output>, active_query: &ActiveQuery) -> Option<String> {
+fn query_footer_label(
+    output: Option<&Output>,
+    active_query: &ActiveQuery,
+    table_desc: Option<&TableDescription>,
+) -> Option<String> {
     let (prefix, allow_query) = match output.map(|o| o.kind()) {
         Some(Kind::Scan) => ("scan".to_string(), true),
         Some(Kind::Query) => ("query".to_string(), true),
@@ -3281,7 +3326,7 @@ fn query_footer_label(output: Option<&Output>, active_query: &ActiveQuery) -> Op
         None => return None,
     };
     let query = if allow_query {
-        normalized_query(active_query)
+        normalized_query(active_query, table_desc)
     } else {
         None
     };
@@ -3291,15 +3336,22 @@ fn query_footer_label(output: Option<&Output>, active_query: &ActiveQuery) -> Op
     }
 }
 
-fn normalized_query(active_query: &ActiveQuery) -> Option<String> {
+fn normalized_query(
+    active_query: &ActiveQuery,
+    table_desc: Option<&TableDescription>,
+) -> Option<String> {
     let raw = active_query.input_value()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    match parse_dynamo_expression(trimmed) {
-        Ok(expr) => Some(format_query_summary(&expr)),
-        Err(_) => Some(trimmed.to_string()),
+    let parsed = match table_desc {
+        Some(table_desc) => parse_query_expression(trimmed, table_desc).ok(),
+        None => parse_dynamo_expression(trimmed).ok(),
+    };
+    match parsed {
+        Some(expr) => Some(format_query_summary(&expr)),
+        None => Some(trimmed.to_string()),
     }
 }
 
@@ -3471,6 +3523,18 @@ fn format_number(value: f64) -> String {
 mod tests {
     use super::*;
 
+    fn table_description_with_hash_key(hash_key: &str) -> TableDescription {
+        let key = KeySchemaElement::builder()
+            .attribute_name(hash_key)
+            .key_type(KeyType::Hash)
+            .build()
+            .expect("hash key schema should be valid");
+        TableDescription::builder()
+            .table_name("demo")
+            .key_schema(key)
+            .build()
+    }
+
     #[test]
     fn sanitize_export_component_rewrites_invalid_chars() {
         assert_eq!(sanitize_export_component("My Table"), "my_table");
@@ -3516,5 +3580,55 @@ mod tests {
     fn export_results_file_name_ignores_empty_query() {
         let name = export_results_file_name("My Table", Some("!!!"), 12345);
         assert_eq!(name, "my_table_12345.json");
+    }
+
+    #[test]
+    fn parse_query_expression_uses_primary_hash_key_shortcut() {
+        let table_desc = table_description_with_hash_key("PK");
+        let parsed = parse_query_expression("customer_123", &table_desc).unwrap();
+        assert_eq!(
+            parsed,
+            DynamoExpression::Comparison {
+                left: Operand::Path("PK".to_string()),
+                operator: Comparator::Equal,
+                right: Operand::Value("customer_123".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_query_expression_shortcut_supports_quoted_scalars() {
+        let table_desc = table_description_with_hash_key("PK");
+        let parsed = parse_query_expression(r#""foo bar""#, &table_desc).unwrap();
+        assert_eq!(
+            parsed,
+            DynamoExpression::Comparison {
+                left: Operand::Path("PK".to_string()),
+                operator: Comparator::Equal,
+                right: Operand::Value("foo bar".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_query_expression_shortcut_rejects_backticks() {
+        let table_desc = table_description_with_hash_key("PK");
+        let err = parse_query_expression("`other field`", &table_desc).unwrap_err();
+        assert!(err.contains("Expected comparison operator"));
+    }
+
+    #[test]
+    fn normalized_query_applies_pk_shortcut_with_table_metadata() {
+        let table_desc = table_description_with_hash_key("PK");
+        let query = ActiveQuery::Text("foo".to_string());
+        let normalized = normalized_query(&query, Some(&table_desc));
+        assert_eq!(normalized.as_deref(), Some("PK=\"foo\""));
+    }
+
+    #[test]
+    fn normalized_query_keeps_raw_single_token_without_table_metadata() {
+        let query = ActiveQuery::Text("foo".to_string());
+        let normalized = normalized_query(&query, None);
+        assert_eq!(normalized.as_deref(), Some("foo"));
     }
 }

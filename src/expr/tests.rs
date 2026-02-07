@@ -409,6 +409,33 @@ mod expr_tests {
         }
     }
 
+    #[test]
+    fn test_single_value_token_parsing() {
+        assert_eq!(
+            parse_single_value_token("city").unwrap(),
+            Operand::Value("city".to_string())
+        );
+        assert_eq!(
+            parse_single_value_token(r#""foo bar""#).unwrap(),
+            Operand::Value("foo bar".to_string())
+        );
+        assert_eq!(
+            parse_single_value_token("123").unwrap(),
+            Operand::Number(123.0)
+        );
+        assert_eq!(
+            parse_single_value_token("true").unwrap(),
+            Operand::Boolean(true)
+        );
+        assert_eq!(parse_single_value_token("null").unwrap(), Operand::Null);
+    }
+
+    #[test]
+    fn test_single_value_token_rejects_backticks_and_multiple_tokens() {
+        assert!(parse_single_value_token("`other field`").is_err());
+        assert!(parse_single_value_token("foo bar").is_err());
+    }
+
     // Key-Value Parser Tests
     #[test]
     fn test_simple_key_value() {

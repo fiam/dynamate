@@ -8,4 +8,4 @@ mod tests;
 pub use ast::*;
 pub use error::*;
 pub use key_value::*;
-pub use parser::parse_dynamo_expression;
+pub use parser::{parse_dynamo_expression, parse_single_value_token};

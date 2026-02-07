@@ -7,6 +7,37 @@ pub fn parse_dynamo_expression(input: &str) -> Result<DynamoExpression, ParseErr
     parse_or_expression(&mut lexer)
 }
 
+pub fn parse_single_value_token(input: &str) -> Result<Operand, ParseError> {
+    let mut lexer = Lexer::new(input);
+    let operand = match lexer.next_token()? {
+        Token::Identifier(name) => infer_identifier_operand(&name),
+        Token::String(value) => Operand::Value(value),
+        Token::Number(number) => Operand::Number(number),
+        Token::Boolean(value) => Operand::Boolean(value),
+        Token::Null => Operand::Null,
+        Token::EOF => {
+            return Err(ParseError::InvalidSyntax {
+                message: "Expected a value token".to_string(),
+                position: lexer.position,
+            });
+        }
+        token => {
+            return Err(ParseError::UnexpectedToken {
+                token: format!("{:?}", token),
+                position: lexer.position,
+            });
+        }
+    };
+
+    match lexer.next_token()? {
+        Token::EOF => Ok(operand),
+        token => Err(ParseError::UnexpectedToken {
+            token: format!("{:?}", token),
+            position: lexer.position,
+        }),
+    }
+}
+
 pub fn parse_or_expression(lexer: &mut Lexer) -> Result<DynamoExpression, ParseError> {
     let mut expr = parse_and_expression(lexer)?;
 
@@ -328,9 +359,10 @@ fn parse_numeric_identifier(token: &str) -> Option<f64> {
     if !token.chars().any(|c| c.is_ascii_digit()) {
         return None;
     }
-    if !token.chars().all(|c| {
-        c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E')
-    }) {
+    if !token
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))
+    {
         return None;
     }
     token.parse::<f64>().ok()
