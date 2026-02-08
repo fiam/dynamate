@@ -14,7 +14,11 @@ RUN apt-get update \
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --locked
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target-cache,sharing=locked \
+    CARGO_TARGET_DIR=/app/target-cache \
+    cargo install --locked --path . --root /app/install --bin dynamate
 
 FROM debian:bookworm-slim
 
@@ -44,7 +48,7 @@ ENV DYNAMATE_DATA=/data \
 RUN mkdir -p /data \
     && chown -R dynamate:users /data
 
-COPY --from=builder /app/target/release/dynamate /usr/local/bin/dynamate
+COPY --from=builder /app/install/bin/dynamate /usr/local/bin/dynamate
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

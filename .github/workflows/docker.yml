@@ -127,3 +127,5 @@ jobs:
           push: ${{ github.event_name == 'workflow_call' }}
           tags: ${{ steps.docker_meta.outputs.tags }}
           labels: ${{ steps.docker_meta.outputs.labels }}
+          cache-from: type=gha,scope=dynamate-docker
+          cache-to: type=gha,mode=max,scope=dynamate-docker
