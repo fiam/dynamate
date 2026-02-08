@@ -1,6 +1,6 @@
 # DynamoDB Query Syntax Reference
 
-This document describes the query expression syntax accepted by Dynamate's parser (`src/expr/parser.rs`) and how those expressions are translated into DynamoDB Query/Scan requests.
+This document describes the query expression syntax accepted by Dynamate's parser ([`src/expr/parser.rs`](src/expr/parser.rs)) and how those expressions are translated into DynamoDB Query/Scan requests.
 
 ## Quick Start
 

@@ -4,7 +4,7 @@ This is the developer documentation entry point for `dynamate`.
 
 ## Setup
 
-- Use the pinned stable toolchain in `rust-toolchain.toml` (currently `1.93.0`).
+- Use the pinned stable toolchain in [`rust-toolchain.toml`](rust-toolchain.toml) (currently `1.93.0`).
 - Install Docker if you want to run integration tests that start DynamoDB Local.
 
 ## Required local checks
@@ -20,5 +20,5 @@ cargo test --all-targets --all-features --locked
 
 ## Docs index
 
-- CI policy and workflow details: `docs/CI.md`
-- Release process and Homebrew publishing: `docs/RELEASING.md`
+- CI policy and workflow details: [`docs/CI.md`](docs/CI.md)
+- Release process and Homebrew publishing: [`docs/RELEASING.md`](docs/RELEASING.md)

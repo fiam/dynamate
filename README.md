@@ -69,4 +69,4 @@ Or download your platform archive from GitHub Releases and place `dynamate` on y
 
 Engineering and release documentation lives in:
 
-- `DEVELOPING.md`
+- [`DEVELOPING.md`](DEVELOPING.md)

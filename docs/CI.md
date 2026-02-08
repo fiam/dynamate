@@ -2,7 +2,7 @@
 
 ## Workflow
 
-- File: `.github/workflows/ci.yml`
+- File: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
 - Triggers: `pull_request`, `push` to `main` and `master`
 - Toolchain: stable Rust `1.93.0`
 
@@ -18,7 +18,7 @@
 
 ## Dependency policy config
 
-- File: `deny.toml`
+- File: [`deny.toml`](../deny.toml)
 - Enforces known registry sources.
 - Denies yanked crates.
 - Enables advisory, bans, and license checks.
