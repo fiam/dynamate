@@ -13,14 +13,6 @@ services:
       retries: 15
       timeout: 1s
 
-  dynamodb-admin:
-    image: aaronshaf/dynamodb-admin
-    ports:
-      - "8001:8001"
-    environment:
-      - DYNAMO_ENDPOINT=http://dynamodb:8000
-    depends_on:
-      - dynamodb
   seed:
     image: astral/uv:python3.12-bookworm-slim
     profiles:
