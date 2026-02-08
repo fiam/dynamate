@@ -1,7 +1,7 @@
 # dynamate
 
 <p align="center">
-  <img src="assets/logo.svg" alt="dynamate logo" width="720" />
+  <img src="assets/logo.svg" alt="dynamate logo with icon and wordmark" width="720" />
 </p>
 
 <p align="center">

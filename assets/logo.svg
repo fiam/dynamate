@@ -1,37 +1,79 @@
 <svg width="720" height="220" viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">Dynamate logo</title>
-  <desc id="desc">Stylized DynamoDB terminal emblem with lightning accent.</desc>
+  <desc id="desc">Bold magenta DynamoDB-inspired emblem with a unified dynamate wordmark.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0b1f2a"/>
-      <stop offset="100%" stop-color="#13394a"/>
+      <stop offset="0%" stop-color="#16061f"/>
+      <stop offset="55%" stop-color="#4d0f62"/>
+      <stop offset="100%" stop-color="#8e1a5f"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="0.82" cy="0.2" r="0.8">
+      <stop offset="0%" stop-color="#ff4dc4" stop-opacity="0.48"/>
+      <stop offset="100%" stop-color="#ff4dc4" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="22" height="22" patternUnits="userSpaceOnUse">
+      <path d="M22 0H0V22" fill="none" stroke="#ff7fd5" stroke-width="0.8" stroke-opacity="0.2"/>
+    </pattern>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#2a0a36"/>
+      <stop offset="100%" stop-color="#6d165f"/>
+    </linearGradient>
+    <linearGradient id="diskTop" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff9ce9"/>
+      <stop offset="100%" stop-color="#d65dff"/>
+    </linearGradient>
+    <linearGradient id="diskBody" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff4cb8"/>
+      <stop offset="100%" stop-color="#7a1fbe"/>
     </linearGradient>
     <linearGradient id="bolt" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#f8d66d"/>
-      <stop offset="100%" stop-color="#f39a3b"/>
+      <stop offset="0%" stop-color="#ff98d8"/>
+      <stop offset="55%" stop-color="#ff4d7a"/>
+      <stop offset="100%" stop-color="#ff2b2b"/>
     </linearGradient>
-    <linearGradient id="text" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#f2fbff"/>
-      <stop offset="100%" stop-color="#b6e9ff"/>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#fff4ff"/>
+      <stop offset="50%" stop-color="#ff9fe1"/>
+      <stop offset="100%" stop-color="#d975ff"/>
     </linearGradient>
+    <filter id="softShadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#02080f" flood-opacity="0.5"/>
+    </filter>
+    <filter id="neon" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
   </defs>
 
   <rect x="0" y="0" width="720" height="220" rx="24" fill="url(#bg)"/>
+  <rect x="0" y="0" width="720" height="220" rx="24" fill="url(#aura)"/>
+  <rect x="0" y="0" width="720" height="220" rx="24" fill="url(#grid)"/>
 
-  <g transform="translate(42,35)">
-    <rect x="0" y="8" width="170" height="136" rx="16" fill="#0f2530" stroke="#48c7ff" stroke-width="4"/>
-    <rect x="16" y="24" width="138" height="18" rx="6" fill="#1f4f63"/>
-    <rect x="16" y="54" width="104" height="14" rx="5" fill="#2a6f88"/>
-    <rect x="16" y="78" width="138" height="14" rx="5" fill="#2a6f88"/>
-    <rect x="16" y="102" width="90" height="14" rx="5" fill="#2a6f88"/>
-    <ellipse cx="85" cy="150" rx="60" ry="10" fill="#173647"/>
-    <ellipse cx="85" cy="140" rx="60" ry="10" fill="#2e91b4"/>
-    <ellipse cx="85" cy="130" rx="60" ry="10" fill="#6dd4ff"/>
-    <path d="M150 4L124 66H154L122 148L170 76H142L170 4Z" fill="url(#bolt)" stroke="#ffd688" stroke-width="2"/>
+  <g transform="translate(38,26)" filter="url(#softShadow)">
+    <rect x="0" y="0" width="196" height="168" rx="30" fill="url(#panel)" stroke="#ff68ce" stroke-width="2.6"/>
+    <rect x="14" y="14" width="168" height="140" rx="22" fill="#1a0625" stroke="#b54bbd" stroke-width="1.6"/>
+
+    <ellipse cx="98" cy="54" rx="54" ry="14" fill="url(#diskTop)"/>
+    <rect x="44" y="54" width="108" height="62" fill="url(#diskBody)"/>
+    <ellipse cx="98" cy="116" rx="54" ry="14" fill="#cf35b3"/>
+    <ellipse cx="98" cy="116" rx="38" ry="8" fill="#862e9f" opacity="0.7"/>
+
+    <ellipse cx="98" cy="76" rx="42" ry="10" fill="#ffcbf4" opacity="0.37"/>
+    <ellipse cx="98" cy="93" rx="42" ry="10" fill="#ffcbf4" opacity="0.29"/>
+
+    <path d="M36 42C22 62 22 106 36 126" fill="none" stroke="#ffa1e8" stroke-width="2.1" stroke-linecap="round" opacity="0.82"/>
+    <path d="M160 42C174 62 174 106 160 126" fill="none" stroke="#ffa1e8" stroke-width="2.1" stroke-linecap="round" opacity="0.82"/>
+
+    <path d="M131 16L100 74H128L91 148L145 84H118L155 16Z" fill="url(#bolt)" stroke="#ffd0ea" stroke-width="2.3" stroke-linejoin="round"/>
+    <path d="M131 16L100 74H128L91 148L145 84H118L155 16Z" fill="none" stroke="#ffd8f0" stroke-width="1.2" filter="url(#neon)" opacity="0.78"/>
   </g>
 
-  <g transform="translate(250,64)">
-    <text x="0" y="58" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace" font-size="72" font-weight="800" letter-spacing="1.5" fill="url(#text)">dynamate</text>
-    <text x="2" y="96" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace" font-size="22" fill="#8fdcff">your dynamodb table mate</text>
+  <g transform="translate(252,88)">
+    <text x="0" y="52" font-family="Arial Black, Arial, Helvetica, sans-serif" font-size="82" font-weight="900" letter-spacing="0.4" fill="url(#wordmark)">dynamate</text>
+    <circle cx="405" cy="-10" r="3.8" fill="#ffb8ec" opacity="0.95"/>
+    <circle cx="420" cy="0" r="2.4" fill="#eaa0ff" opacity="0.9"/>
   </g>
 </svg>
