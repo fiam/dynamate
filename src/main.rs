@@ -153,11 +153,13 @@ struct App {
     last_throbber_tick: Option<Instant>,
     toast_throbber: RefCell<ThrobberState>,
     last_toast_throbber_tick: Cell<Option<Instant>>,
+    show_frame_render_duration: bool,
 }
 
 impl App {
     const FRAMES_PER_SECOND: f32 = 60.0;
     const LOADING_THROBBER_TICK: Duration = Duration::from_millis(200);
+    const FRAME_RENDER_DURATION_ENV: &'static str = "DYNAMATE_FRAME_RENDER_DURATION";
     const HELP_WITHOUT_POPUP_BACK: &'static [help::Entry<'static>] = &[
         help::Entry {
             keys: Cow::Borrowed(""),
@@ -290,6 +292,8 @@ impl App {
             last_throbber_tick: None,
             toast_throbber: RefCell::new(ThrobberState::default()),
             last_toast_throbber_tick: Cell::new(None),
+            show_frame_render_duration: cfg!(debug_assertions)
+                || env_flag(Self::FRAME_RENDER_DURATION_ENV),
         }
     }
 
@@ -564,15 +568,17 @@ impl App {
             self.render_toast(frame, body_area, footer_area, &theme, toast);
         }
         help::render(&all_help, frame, footer_area, &theme, modifiers, help_mode);
-        let duration = start.elapsed();
-        // Render duration in red at the bottom right corner
-        let duration_str = format!("{:.2?}", duration);
-        let area = frame.area();
-        let len = duration_str.len();
-        let x = area.x + area.width.saturating_sub(len as u16 + 1);
-        let y = area.y + area.height.saturating_sub(1);
-        let duration_line = Line::from(duration_str).right_aligned().red();
-        frame.render_widget(duration_line, Rect::new(x, y, len as u16, 1));
+        if self.show_frame_render_duration {
+            let duration = start.elapsed();
+            // Render duration in red at the bottom right corner
+            let duration_str = format!("{:.2?}", duration);
+            let area = frame.area();
+            let len = duration_str.len();
+            let x = area.x + area.width.saturating_sub(len as u16 + 1);
+            let y = area.y + area.height.saturating_sub(1);
+            let duration_line = Line::from(duration_str).right_aligned().red();
+            frame.render_widget(duration_line, Rect::new(x, y, len as u16, 1));
+        }
     }
 
     fn handle_event(&mut self, event: &Event) -> bool {
