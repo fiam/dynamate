@@ -1,4 +1,4 @@
-.PHONY: dynamodb-up dynamodb-down dynamodb-seed dynamodb-local run-local dynamate-local dynamate-local-debug dynamate-compose
+.PHONY: dynamodb-up dynamodb-down dynamodb-seed dynamodb-local run-local dynamate-local dynamate-local-debug dynamate-compose markdownlint markdownlint-fix
 
 COMPOSE ?= docker compose
 DYNAMO_ENDPOINT ?= http://localhost:8000
@@ -10,6 +10,7 @@ AWS_SECRET_ACCESS_KEY ?= local
 SEED_ARGS ?= --skip-if-exists
 DYNAMATE_ARGS ?=
 RELEASE ?=
+MARKDOWNLINT ?= npx --yes markdownlint-cli@0.47.0
 
 dynamodb-up:
 	@if [ -z "$$($(COMPOSE) -f compose.yaml ps -q --status=running dynamodb)" ]; then \
@@ -62,3 +63,9 @@ dynamate-compose: dynamodb-local
 	DYNAMO_TABLE="$(DYNAMO_TABLE)" \
 	DYNAMO_ENDPOINT="$(DYNAMO_ENDPOINT_DOCKER)" \
 	$(COMPOSE) -f compose.yaml --profile dynamate up --build -d dynamate
+
+markdownlint:
+	@$(MARKDOWNLINT) "**/*.md"
+
+markdownlint-fix:
+	@$(MARKDOWNLINT) "**/*.md" --fix

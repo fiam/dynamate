@@ -1,6 +1,8 @@
 # DynamoDB Query Syntax Reference
 
-This document describes the query expression syntax accepted by Dynamate's parser ([`src/expr/parser.rs`](src/expr/parser.rs)) and how those expressions are translated into DynamoDB Query/Scan requests.
+This document describes the query expression syntax accepted by Dynamate's
+parser ([`src/expr/parser.rs`](src/expr/parser.rs)) and how those expressions
+are translated into DynamoDB Query/Scan requests.
 
 ## Quick Start
 
@@ -116,7 +118,8 @@ Dynamate analyzes the parsed expression against the table schema:
 
 Current behavior note:
 
-1. For key-based queries, Dynamate does not currently extract extra non-key predicates into a separate filter expression.
+1. For key-based queries, Dynamate does not currently extract extra non-key
+   predicates into a separate filter expression.
 2. If the expression cannot be represented as a key query pattern, it falls back to `Scan`.
 
 ## Not Supported

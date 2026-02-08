@@ -1,8 +1,8 @@
+# dynamate
+
 <p align="center">
   <img src="assets/logo.svg" alt="dynamate logo" width="720" />
 </p>
-
-# dynamate
 
 `dynamate` is your DynamoDB table mate in the terminal, built with Rust 2024.
 
