@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Terminal UI for DynamoDB exploration and querying"
 repository = "https://github.com/fiam/dynamate"
 homepage = "https://github.com/fiam/dynamate"
+license = "MIT"
 edition = "2024"
 publish = false
 
