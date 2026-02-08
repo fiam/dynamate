@@ -4,7 +4,14 @@ use super::lexer::{Lexer, Token};
 
 pub fn parse_dynamo_expression(input: &str) -> Result<DynamoExpression, ParseError> {
     let mut lexer = Lexer::new(input);
-    parse_or_expression(&mut lexer)
+    let expr = parse_or_expression(&mut lexer)?;
+    match lexer.next_token()? {
+        Token::EOF => Ok(expr),
+        token => Err(ParseError::UnexpectedToken {
+            token: format!("{:?}", token),
+            position: lexer.position,
+        }),
+    }
 }
 
 pub fn parse_single_value_token(input: &str) -> Result<Operand, ParseError> {

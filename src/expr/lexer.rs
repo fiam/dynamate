@@ -102,7 +102,7 @@ impl Lexer {
     pub fn read_identifier(&mut self) -> String {
         let mut result = String::new();
         while let Some(ch) = self.current_char() {
-            if ch.is_alphanumeric() || ch == '_' {
+            if is_bare_token_char(ch) {
                 result.push(ch);
                 self.advance();
             } else {
@@ -110,22 +110,6 @@ impl Lexer {
             }
         }
         result
-    }
-
-    pub fn read_number(&mut self) -> Result<f64, ParseError> {
-        let mut result = String::new();
-        while let Some(ch) = self.current_char() {
-            if ch.is_ascii_digit() || ch == '.' {
-                result.push(ch);
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        result.parse().map_err(|_| ParseError::InvalidSyntax {
-            message: format!("Invalid number: {}", result),
-            position: self.position,
-        })
     }
 
     pub fn next_token(&mut self) -> Result<Token, ParseError> {
@@ -194,23 +178,9 @@ impl Lexer {
                 let s = self.read_string('\'')?;
                 Ok(Token::String(s))
             }
-            Some(ch) if ch.is_ascii_digit() => {
-                let num = self.read_number()?;
-                Ok(Token::Number(num))
-            }
-            Some(ch) if ch.is_alphabetic() || ch == '_' => {
-                let ident = self.read_identifier();
-                match ident.to_uppercase().as_str() {
-                    "AND" => Ok(Token::And),
-                    "OR" => Ok(Token::Or),
-                    "NOT" => Ok(Token::Not),
-                    "BETWEEN" => Ok(Token::Between),
-                    "IN" => Ok(Token::In),
-                    "TRUE" => Ok(Token::Boolean(true)),
-                    "FALSE" => Ok(Token::Boolean(false)),
-                    "NULL" => Ok(Token::Null),
-                    _ => Ok(Token::Identifier(ident)),
-                }
+            Some(ch) if is_bare_token_start(ch) => {
+                let token = self.read_identifier();
+                classify_bare_token(&token)
             }
             Some(ch) => Err(ParseError::UnexpectedToken {
                 token: ch.to_string(),
@@ -225,4 +195,48 @@ impl Lexer {
         self.position = saved_position;
         Ok(token)
     }
+}
+
+fn is_bare_token_start(ch: char) -> bool {
+    is_bare_token_char(ch)
+}
+
+fn is_bare_token_char(ch: char) -> bool {
+    !ch.is_whitespace()
+        && !matches!(
+            ch,
+            '(' | ')' | ',' | '=' | '!' | '<' | '>' | '"' | '\'' | '`'
+        )
+}
+
+fn classify_bare_token(token: &str) -> Result<Token, ParseError> {
+    let upper = token.to_ascii_uppercase();
+    let classified = match upper.as_str() {
+        "AND" => Token::And,
+        "OR" => Token::Or,
+        "NOT" => Token::Not,
+        "BETWEEN" => Token::Between,
+        "IN" => Token::In,
+        "TRUE" => Token::Boolean(true),
+        "FALSE" => Token::Boolean(false),
+        "NULL" => Token::Null,
+        _ => match parse_numeric_bare_token(token) {
+            Some(number) => Token::Number(number),
+            None => Token::Identifier(token.to_string()),
+        },
+    };
+    Ok(classified)
+}
+
+fn parse_numeric_bare_token(token: &str) -> Option<f64> {
+    if !token.chars().any(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    if !token
+        .chars()
+        .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-' | '+' | 'e' | 'E'))
+    {
+        return None;
+    }
+    token.parse::<f64>().ok()
 }

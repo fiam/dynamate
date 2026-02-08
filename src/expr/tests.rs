@@ -43,6 +43,19 @@ mod expr_tests {
     }
 
     #[test]
+    fn test_unquoted_value_with_hash_character_is_preserved() {
+        let result = parse_dynamo_expression("PK=ACC#docker").unwrap();
+        assert_eq!(
+            result,
+            DynamoExpression::Comparison {
+                left: Operand::Path("PK".to_string()),
+                operator: Comparator::Equal,
+                right: Operand::Value("ACC#docker".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn test_backtick_path_on_rhs() {
         let result = parse_dynamo_expression("city = `other field`").unwrap();
         assert_eq!(
@@ -401,6 +414,7 @@ mod expr_tests {
             "invalid_func()", // Invalid function name
             "age >< 25",      // Invalid operator
             "age ! 25",       // Invalid use of ! without =
+            "age = 25 foo",   // Trailing tokens are not allowed
         ];
 
         for input in invalid_inputs {
@@ -414,6 +428,10 @@ mod expr_tests {
         assert_eq!(
             parse_single_value_token("city").unwrap(),
             Operand::Value("city".to_string())
+        );
+        assert_eq!(
+            parse_single_value_token("ACC#docker").unwrap(),
+            Operand::Value("ACC#docker".to_string())
         );
         assert_eq!(
             parse_single_value_token(r#""foo bar""#).unwrap(),
