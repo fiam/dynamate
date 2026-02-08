@@ -353,6 +353,7 @@ jobs:
     uses: ./.github/workflows/docker.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
+      publish: true
     secrets: inherit
     permissions:
       "contents": "read"
