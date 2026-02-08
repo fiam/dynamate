@@ -16,8 +16,8 @@ install-path = "CARGO_HOME"
 hosting = "github"
 tap = "fiam/homebrew-dynamate"
 publish-jobs = ["homebrew"]
-post-announce-jobs = ["./docker"]
 dispatch-releases = true
 unix-archive = ".tar.gz"
 install-updater = false
-github-custom-job-permissions = { docker = { contents = "read", packages = "write" } }
+post-announce-jobs = ["./docker", "./changelog"]
+github-custom-job-permissions = { docker = { contents = "read", packages = "write" }, changelog = { contents = "write" } }

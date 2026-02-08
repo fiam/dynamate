@@ -1,0 +1,190 @@
+name: Update Release Changelog
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: "dist plan output JSON"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to update (for example: v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  changelog:
+    name: Update release notes with changelog
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Parse release metadata
+        id: meta
+        shell: bash
+        env:
+          DIST_PLAN: ${{ inputs.plan }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+            if [[ -z "${tag}" ]]; then
+              echo "::error::tag input is required."
+              exit 1
+            fi
+            body_file="${RUNNER_TEMP}/dist-release-body.md"
+            printf '## Release assets\n\nSee the assets section below.\n' > "${body_file}"
+          else
+            tag="$(jq --raw-output '.announcement_tag' <<< "${DIST_PLAN}")"
+            if [[ -z "${tag}" || "${tag}" == "null" ]]; then
+              echo "::error::dist plan does not include announcement_tag."
+              exit 1
+            fi
+            body_file="${RUNNER_TEMP}/dist-release-body.md"
+            jq --raw-output '.announcement_github_body' <<< "${DIST_PLAN}" > "${body_file}"
+            if [[ ! -s "${body_file}" ]]; then
+              echo "::error::dist plan does not include announcement_github_body."
+              exit 1
+            fi
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "body_file=${body_file}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout source with tags
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Build conventional changelog
+        id: changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.meta.outputs.tag }}"
+          git fetch --force --tags
+
+          if ! git rev-parse --quiet --verify "refs/tags/${tag}" > /dev/null; then
+            echo "::error::Tag ${tag} does not exist in this repository."
+            exit 1
+          fi
+
+          previous_tag="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+          if [[ -n "${previous_tag}" ]]; then
+            range="${previous_tag}..${tag}"
+          else
+            range="${tag}"
+          fi
+
+          mapfile -t commit_rows < <(git log --no-merges --pretty=format:'%s%x09%h' "${range}")
+
+          breaking=()
+          feat=()
+          fix=()
+          perf=()
+          refactor=()
+          docs=()
+          test=()
+          build=()
+          ci=()
+          chore=()
+          other=()
+          conventional_regex='^([[:lower:]]+)(\([^)]+\))?(!)?:[[:space:]]+(.+)$'
+
+          for row in "${commit_rows[@]}"; do
+            subject="${row%%$'\t'*}"
+            short_sha="${row##*$'\t'}"
+
+            if [[ "${subject}" =~ ${conventional_regex} ]]; then
+              type="${BASH_REMATCH[1]}"
+              bang="${BASH_REMATCH[3]}"
+              message="${BASH_REMATCH[4]}"
+              line="- ${message} (${short_sha})"
+
+              if [[ -n "${bang}" ]]; then
+                breaking+=("${line}")
+              fi
+
+              case "${type}" in
+                feat) feat+=("${line}") ;;
+                fix) fix+=("${line}") ;;
+                perf) perf+=("${line}") ;;
+                refactor) refactor+=("${line}") ;;
+                docs) docs+=("${line}") ;;
+                test) test+=("${line}") ;;
+                build) build+=("${line}") ;;
+                ci) ci+=("${line}") ;;
+                chore) chore+=("${line}") ;;
+                *) other+=("- ${subject} (${short_sha})") ;;
+              esac
+            else
+              other+=("- ${subject} (${short_sha})")
+            fi
+          done
+
+          changelog_file="${RUNNER_TEMP}/conventional-changelog.md"
+          {
+            echo "## Changelog"
+            echo
+            if [[ -n "${previous_tag}" ]]; then
+              echo "Changes in \`${tag}\` since \`${previous_tag}\`."
+            else
+              echo "Changes included in initial release \`${tag}\`."
+            fi
+            echo
+          } > "${changelog_file}"
+
+          append_section() {
+            local title="$1"
+            local -n lines="$2"
+            if (( ${#lines[@]} )); then
+              {
+                echo "### ${title}"
+                echo
+                printf '%s\n' "${lines[@]}"
+                echo
+              } >> "${changelog_file}"
+            fi
+          }
+
+          append_section "Breaking Changes" breaking
+          append_section "Features" feat
+          append_section "Fixes" fix
+          append_section "Performance" perf
+          append_section "Refactors" refactor
+          append_section "Documentation" docs
+          append_section "Tests" test
+          append_section "Build" build
+          append_section "CI" ci
+          append_section "Chores" chore
+          append_section "Other" other
+
+          if (( ${#commit_rows[@]} == 0 )); then
+            {
+              echo "- No commits found in this release range."
+              echo
+            } >> "${changelog_file}"
+          fi
+
+          echo "changelog_file=${changelog_file}" >> "${GITHUB_OUTPUT}"
+
+      - name: Update GitHub release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.meta.outputs.tag }}"
+          combined_file="${RUNNER_TEMP}/release-notes.md"
+          cat "${{ steps.changelog.outputs.changelog_file }}" > "${combined_file}"
+          printf '\n---\n\n' >> "${combined_file}"
+          cat "${{ steps.meta.outputs.body_file }}" >> "${combined_file}"
+
+          gh release edit "${tag}" --notes-file "${combined_file}"
