@@ -33,8 +33,15 @@ You can also jump straight into a table:
 dynamate --table orders-prod
 ```
 
+Or open a table and run an initial query immediately:
+
+```bash
+dynamate --table orders-prod --query 'status = "OPEN"'
+```
+
 `dynamate` is primarily a TUI and works without arguments. Passing `--table`
-is optional and only preselects a table at startup.
+is optional and only preselects a table at startup. `--query` requires
+`--table`; using `--query` alone returns a CLI error.
 
 ## AWS authentication and configuration
 

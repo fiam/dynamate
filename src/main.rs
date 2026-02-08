@@ -91,6 +91,10 @@ struct Cli {
     #[arg(short, long)]
     table: Option<String>,
 
+    /// Query to run immediately when opening a table
+    #[arg(long, requires = "table")]
+    query: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -129,7 +133,7 @@ async fn main() -> Result<()> {
         None => {
             logging::initialize()?;
             App::default()
-                .run_tui(client.clone(), cli.table.as_deref())
+                .run_tui(client.clone(), cli.table.as_deref(), cli.query.as_deref())
                 .await?;
             Ok(())
         }
@@ -301,6 +305,7 @@ impl App {
         self,
         client: Arc<aws_sdk_dynamodb::Client>,
         table_name: Option<&str>,
+        initial_query: Option<&str>,
     ) -> Result<()> {
         let mut app = self;
         let terminal = ratatui::init();
@@ -315,7 +320,7 @@ impl App {
         // Give a short grace period so those don't trigger actions at startup.
         app.input_grace_until = Some(Instant::now() + Duration::from_millis(250));
 
-        let app_result = app.run(terminal, client, table_name).await;
+        let app_result = app.run(terminal, client, table_name, initial_query).await;
         crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
         ratatui::restore();
         app_result
@@ -326,15 +331,22 @@ impl App {
         mut terminal: DefaultTerminal,
         client: Arc<aws_sdk_dynamodb::Client>,
         table_name: Option<&str>,
+        initial_query: Option<&str>,
     ) -> Result<()> {
         let event_driven_render = env_flag("DYNAMATE_EVENT_DRIVEN_RENDER");
-        let widget: Box<dyn crate::widgets::Widget> = match table_name {
-            Some(name) => Box::new(widgets::QueryWidget::new(
+        let widget: Box<dyn crate::widgets::Widget> = match (table_name, initial_query) {
+            (Some(name), Some(query)) => Box::new(widgets::QueryWidget::new_with_text_query(
+                client.as_ref().clone(),
+                name,
+                query,
+                env::WidgetId::app(),
+            )),
+            (Some(name), None) => Box::new(widgets::QueryWidget::new(
                 client.as_ref().clone(),
                 name,
                 env::WidgetId::app(),
             )),
-            None => Box::new(widgets::TablePickerWidget::new(
+            (None, _) => Box::new(widgets::TablePickerWidget::new(
                 client.as_ref().clone(),
                 env::WidgetId::app(),
             )),
@@ -1230,4 +1242,29 @@ fn parse_export_progress(message: &str) -> Option<(String, String)> {
         return Some((count.to_string(), " item".to_string()));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Cli;
+
+    #[test]
+    fn query_requires_table() {
+        let err = Cli::try_parse_from(["dynamate", "--query", "status = OPEN"])
+            .err()
+            .expect("query without table should be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn query_and_table_parse_for_tui_launch() {
+        let cli =
+            Cli::try_parse_from(["dynamate", "--table", "orders", "--query", "status = OPEN"])
+                .unwrap();
+        assert_eq!(cli.table.as_deref(), Some("orders"));
+        assert_eq!(cli.query.as_deref(), Some("status = OPEN"));
+        assert!(cli.command.is_none());
+    }
 }

@@ -1336,6 +1336,20 @@ impl QueryWidget {
         Self::new_with_query(client, table_name, parent, None)
     }
 
+    pub fn new_with_text_query(
+        client: aws_sdk_dynamodb::Client,
+        table_name: &str,
+        query: &str,
+        parent: crate::env::WidgetId,
+    ) -> Self {
+        Self::new_with_query(
+            client,
+            table_name,
+            parent,
+            Some(ActiveQuery::Text(query.to_string())),
+        )
+    }
+
     fn new_with_query(
         client: aws_sdk_dynamodb::Client,
         table_name: &str,

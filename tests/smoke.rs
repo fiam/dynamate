@@ -18,3 +18,12 @@ fn bad_argument_fails() {
         .failure()
         .stderr(predicate::str::contains("error:"));
 }
+
+#[test]
+fn query_without_table_fails() {
+    let mut cmd = Command::cargo_bin("dynamate").unwrap();
+    cmd.args(["--query", "status = OPEN"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--table").and(predicate::str::contains("--query")));
+}
