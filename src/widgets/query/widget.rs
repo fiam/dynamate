@@ -100,7 +100,16 @@ struct QueryState {
     is_prefetching: bool,
     export_id: Option<u64>,
     export_cancel: Option<Arc<AtomicBool>>,
+    column_offset: usize,
+    compact_columns: bool,
 }
+
+const TABLE_RENDER_CHROME_WIDTH: usize = 4;
+const TABLE_COLUMN_SPACING: usize = 1;
+const TABLE_MIN_COLUMN_WIDTH: usize = 1;
+const TABLE_MAX_COLUMN_WIDTH: usize = 48;
+const TABLE_MAX_COLUMN_WIDTH_COMPACT: usize = 20;
+const TABLE_MAX_RENDER_COLUMNS: usize = 24;
 
 struct QueryPageEvent {
     request_id: u64,
@@ -675,6 +684,21 @@ impl crate::widgets::Widget for QueryWidget {
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
                 KeyCode::PageDown => self.page_down(ctx.clone()),
                 KeyCode::PageUp => self.page_up(),
+                KeyCode::Left
+                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+                {
+                    self.scroll_columns_left()
+                }
+                KeyCode::Right
+                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+                {
+                    self.scroll_columns_right()
+                }
+                KeyCode::Char('z')
+                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+                {
+                    self.toggle_compact_columns()
+                }
                 KeyCode::Char('f') => {
                     let state = self.state.borrow();
                     let keys = state
@@ -1068,6 +1092,22 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
+            keys: Cow::Borrowed("←/→"),
+            short: Cow::Borrowed("columns"),
+            long: Cow::Borrowed("Scroll columns"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("z"),
+            short: Cow::Borrowed("compact"),
+            long: Cow::Borrowed("Toggle compact columns"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("x"),
             short: Cow::Borrowed("export"),
             long: Cow::Borrowed("Export"),
@@ -1193,6 +1233,22 @@ impl QueryWidget {
             keys: Cow::Borrowed("f"),
             short: Cow::Borrowed("fields"),
             long: Cow::Borrowed("Enable/disable fields"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("←/→"),
+            short: Cow::Borrowed("columns"),
+            long: Cow::Borrowed("Scroll columns"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("z"),
+            short: Cow::Borrowed("compact"),
+            long: Cow::Borrowed("Toggle compact columns"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -1921,6 +1977,35 @@ impl QueryWidget {
         state.table_state.select(Some(new_selected));
     }
 
+    fn scroll_columns_left(&self) {
+        let mut state = self.state.borrow_mut();
+        if state.show_tree {
+            return;
+        }
+        state.column_offset = state.column_offset.saturating_sub(1);
+    }
+
+    fn scroll_columns_right(&self) {
+        let mut state = self.state.borrow_mut();
+        if state.show_tree {
+            return;
+        }
+        let total_columns = state.item_keys.visible().len();
+        if total_columns == 0 {
+            state.column_offset = 0;
+            return;
+        }
+        state.column_offset = (state.column_offset + 1).min(total_columns.saturating_sub(1));
+    }
+
+    fn toggle_compact_columns(&self) {
+        let mut state = self.state.borrow_mut();
+        if state.show_tree {
+            return;
+        }
+        state.compact_columns = !state.compact_columns;
+    }
+
     fn should_load_more(&self, state: &QueryState) -> bool {
         if state.is_loading_more || state.last_evaluated_key.is_none() {
             return false;
@@ -2013,6 +2098,7 @@ impl QueryWidget {
             state.scanned_total = 0;
             state.matched_total = 0;
             state.is_prefetching = false;
+            state.column_offset = 0;
         }
         ctx.invalidate();
         self.start_query_page(query, None, false, ctx, request_id);
@@ -2106,6 +2192,7 @@ impl QueryWidget {
             state.scanned_total = 0;
             state.matched_total = 0;
             state.is_prefetching = false;
+            state.column_offset = 0;
         }
         ctx.invalidate();
         self.start_index_query_page(target, None, false, ctx, request_id);
@@ -2307,10 +2394,7 @@ impl QueryWidget {
             (first_item, last_item)
         };
 
-        let keys: Vec<String> = state.item_keys.visible().to_vec();
-        let header =
-            Row::new(keys.iter().map(|key| Line::from(key.clone()))).style(Style::new().bold());
-
+        let all_keys: Vec<String> = state.item_keys.visible().to_vec();
         let visible_indices = if total == 0 {
             &[][..]
         } else {
@@ -2319,7 +2403,7 @@ impl QueryWidget {
             &state.filtered_indices[start..end]
         };
 
-        let widths: Vec<Constraint> = keys
+        let natural_widths: Vec<usize> = all_keys
             .iter()
             .map(|key| {
                 let max_value = visible_indices
@@ -2329,9 +2413,29 @@ impl QueryWidget {
                     .max()
                     .unwrap_or(0);
                 let key_size = key.len() + 2;
-                Constraint::Min(max(max_value, key_size) as u16)
+                max(max_value, key_size)
             })
             .collect();
+        let max_column_width = if state.compact_columns {
+            TABLE_MAX_COLUMN_WIDTH_COMPACT
+        } else {
+            TABLE_MAX_COLUMN_WIDTH
+        };
+        let (column_offset, fitted_widths) = fit_table_column_widths(
+            &natural_widths,
+            area.width,
+            state.column_offset,
+            max_column_width,
+        );
+        state.column_offset = column_offset;
+        let rendered_columns = fitted_widths.len();
+        let column_end = column_offset
+            .saturating_add(rendered_columns)
+            .min(all_keys.len());
+        let keys = &all_keys[column_offset..column_end];
+        let widths: Vec<Constraint> = fitted_widths.into_iter().map(Constraint::Length).collect();
+        let header =
+            Row::new(keys.iter().map(|key| Line::from(key.clone()))).style(Style::new().bold());
 
         // a block with a right aligned title with the loading state on the right
         let more_marker = if state.last_evaluated_key.is_some() {
@@ -2360,6 +2464,18 @@ impl QueryWidget {
             table_desc.as_ref(),
         ) {
             footer_suffix.push_str(&format!(" · {value}"));
+        }
+        let has_hidden_columns =
+            !all_keys.is_empty() && (column_offset > 0 || column_end < all_keys.len());
+        if has_hidden_columns {
+            footer_suffix.push_str(&format!(
+                " · cols {}-{column_end}/{}",
+                column_offset + 1,
+                all_keys.len()
+            ));
+        }
+        if state.compact_columns {
+            footer_suffix.push_str(" · compact");
         }
         let (title, title_bottom, title_style) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => (
@@ -3559,6 +3675,52 @@ fn format_number(value: f64) -> String {
     }
 }
 
+fn fit_table_column_widths(
+    natural_widths: &[usize],
+    area_width: u16,
+    desired_offset: usize,
+    max_column_width: usize,
+) -> (usize, Vec<u16>) {
+    if natural_widths.is_empty() {
+        return (0, Vec::new());
+    }
+
+    let offset = desired_offset.min(natural_widths.len().saturating_sub(1));
+    let budget = usize::from(area_width)
+        .saturating_sub(TABLE_RENDER_CHROME_WIDTH)
+        .max(TABLE_MIN_COLUMN_WIDTH);
+    let mut used = 0usize;
+    let mut widths = Vec::new();
+
+    for &natural in natural_widths.iter().skip(offset) {
+        if widths.len() >= TABLE_MAX_RENDER_COLUMNS {
+            break;
+        }
+
+        let mut width = natural.clamp(TABLE_MIN_COLUMN_WIDTH, max_column_width);
+        if widths.is_empty() {
+            width = width.min(budget);
+            widths.push(width as u16);
+            used = width;
+            continue;
+        }
+
+        let additional = TABLE_COLUMN_SPACING + width;
+        if used.saturating_add(additional) > budget {
+            break;
+        }
+
+        widths.push(width as u16);
+        used += additional;
+    }
+
+    if widths.is_empty() {
+        widths.push(TABLE_MIN_COLUMN_WIDTH as u16);
+    }
+
+    (offset, widths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3667,5 +3829,57 @@ mod tests {
         let query = ActiveQuery::Text("foo".to_string());
         let normalized = normalized_query(&query, None);
         assert_eq!(normalized.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn fit_table_column_widths_caps_rendered_columns() {
+        let widths = vec![3; 64];
+        let (offset, fitted) = fit_table_column_widths(&widths, 400, 0, TABLE_MAX_COLUMN_WIDTH);
+        assert_eq!(offset, 0);
+        assert_eq!(fitted.len(), TABLE_MAX_RENDER_COLUMNS);
+    }
+
+    #[test]
+    fn fit_table_column_widths_respects_width_budget() {
+        let widths = vec![20, 20, 20];
+        let (_, fitted) = fit_table_column_widths(&widths, 40, 0, TABLE_MAX_COLUMN_WIDTH);
+        assert_eq!(fitted, vec![20]);
+    }
+
+    #[test]
+    fn fit_table_column_widths_keeps_first_column_when_area_is_tiny() {
+        let widths = vec![20, 5];
+        let (_, fitted) = fit_table_column_widths(&widths, 4, 0, TABLE_MAX_COLUMN_WIDTH);
+        assert_eq!(fitted, vec![TABLE_MIN_COLUMN_WIDTH as u16]);
+    }
+
+    #[test]
+    fn fit_table_column_widths_clamps_maximum_column_width() {
+        let widths = vec![usize::MAX];
+        let (_, fitted) = fit_table_column_widths(&widths, 200, 0, TABLE_MAX_COLUMN_WIDTH);
+        assert_eq!(fitted, vec![TABLE_MAX_COLUMN_WIDTH as u16]);
+    }
+
+    #[test]
+    fn fit_table_column_widths_uses_requested_offset() {
+        let widths = vec![8, 8, 8];
+        let (offset, fitted) = fit_table_column_widths(&widths, 40, 1, TABLE_MAX_COLUMN_WIDTH);
+        assert_eq!(offset, 1);
+        assert_eq!(fitted, vec![8, 8]);
+    }
+
+    #[test]
+    fn fit_table_column_widths_clamps_offset_to_last_column() {
+        let widths = vec![8, 8, 8];
+        let (offset, fitted) = fit_table_column_widths(&widths, 40, 99, TABLE_MAX_COLUMN_WIDTH);
+        assert_eq!(offset, 2);
+        assert_eq!(fitted, vec![8]);
+    }
+
+    #[test]
+    fn fit_table_column_widths_compact_mode_reduces_column_width() {
+        let widths = vec![80];
+        let (_, fitted) = fit_table_column_widths(&widths, 200, 0, TABLE_MAX_COLUMN_WIDTH_COMPACT);
+        assert_eq!(fitted, vec![TABLE_MAX_COLUMN_WIDTH_COMPACT as u16]);
     }
 }
