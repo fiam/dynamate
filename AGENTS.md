@@ -3,6 +3,9 @@
 ## Commit Policy
 
 Use Conventional Commits: `type(scope?): subject` (imperative, lowercase).
+Commit messages must include a body explaining the why and key changes, not
+just the title line.
+Wrap commit body lines at 72 characters to follow Git line-length conventions.
 Prefer types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `build`,
 `ci`, `perf`.
 
