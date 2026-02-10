@@ -9,7 +9,8 @@ on:
         type: string
       publish:
         description: "Whether to push image to GHCR"
-        required: true
+        required: false
+        default: true
         type: boolean
   workflow_dispatch:
     inputs:
