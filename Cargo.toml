@@ -1,6 +1,6 @@
 [package]
 name = "dynamate"
-version = "0.1.0"
+version = "0.2.0"
 description = "Terminal UI for DynamoDB exploration and querying"
 repository = "https://github.com/fiam/dynamate"
 homepage = "https://github.com/fiam/dynamate"
