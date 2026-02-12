@@ -70,7 +70,7 @@ use crate::widgets::theme::Theme;
 #[derive(clap::Parser)]
 #[command(
     name = "dynamate",
-    version = "0.1.0",
+    version,
     about = "Your DynamoDB table mate",
     long_about = None
 )]
@@ -1246,7 +1246,7 @@ fn parse_export_progress(message: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
 
     use super::Cli;
 
@@ -1266,5 +1266,11 @@ mod tests {
         assert_eq!(cli.table.as_deref(), Some("orders"));
         assert_eq!(cli.query.as_deref(), Some("status = OPEN"));
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn cli_version_matches_package_version() {
+        let cmd = Cli::command();
+        assert_eq!(cmd.get_version(), Some(env!("CARGO_PKG_VERSION")));
     }
 }
