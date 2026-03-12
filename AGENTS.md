@@ -50,8 +50,8 @@ Add or update tests where appropriate to cover new behavior or bug fixes.
 
 - Target the latest stable Rust. No web search needed: go directly to
   https://doc.rust-lang.org/stable/releases.html for the current stable
-  version, its release date, and changelog. As of 2026-02-07, stable is 1.93.0
-  (released 2026-01-22).
+  version, its release date, and changelog. As of 2026-03-12, stable is 1.94.0
+  (released 2026-03-05).
 - This repo uses the Rust 2024 edition (see [`Cargo.toml`](Cargo.toml)). Keep
   code compatible with the 2024 edition and prefer its idioms.
 - Before starting work, read the changelog for each release after June 2024

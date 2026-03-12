@@ -4,7 +4,7 @@
 
 - File: [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
 - Triggers: `pull_request`, `push` to `main` and `master`
-- Toolchain: stable Rust `1.93.0`
+- Toolchain: stable Rust `1.94.0`
 
 ## Checks performed
 
