@@ -1296,6 +1296,7 @@ dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-dynamodb",
+ "aws-smithy-types",
  "chrono",
  "clap",
  "color-eyre",

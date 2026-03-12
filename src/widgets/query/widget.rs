@@ -102,6 +102,9 @@ struct QueryState {
     export_cancel: Option<Arc<AtomicBool>>,
     column_offset: usize,
     compact_columns: bool,
+    tree_scroll_offset: usize,
+    tree_render_capacity: usize,
+    tree_line_count: usize,
 }
 
 const TABLE_RENDER_CHROME_WIDTH: usize = 4;
@@ -450,6 +453,7 @@ impl QueryState {
 
         if self.filtered_indices.is_empty() {
             self.table_state.select(None);
+            self.reset_tree_scroll();
             return;
         }
 
@@ -466,6 +470,7 @@ impl QueryState {
 
         self.table_state.select(Some(0));
         self.clamp_table_offset();
+        self.reset_tree_scroll();
     }
 
     fn clamp_table_offset(&mut self) {
@@ -498,6 +503,42 @@ impl QueryState {
             let new_offset = selected + 1 - max_rows;
             *self.table_state.offset_mut() = new_offset.min(total.saturating_sub(1));
         }
+    }
+
+    fn reset_tree_scroll(&mut self) {
+        self.tree_scroll_offset = 0;
+    }
+
+    fn clamp_tree_offset(&mut self) {
+        let viewport = self.tree_render_capacity.max(1);
+        let max_offset = self.tree_line_count.saturating_sub(viewport);
+        self.tree_scroll_offset = self.tree_scroll_offset.min(max_offset);
+    }
+
+    fn scroll_tree_down(&mut self) {
+        self.clamp_tree_offset();
+        let viewport = self.tree_render_capacity.max(1);
+        let max_offset = self.tree_line_count.saturating_sub(viewport);
+        self.tree_scroll_offset = (self.tree_scroll_offset + 1).min(max_offset);
+    }
+
+    fn scroll_tree_up(&mut self) {
+        self.tree_scroll_offset = self.tree_scroll_offset.saturating_sub(1);
+    }
+
+    fn page_tree_down(&mut self) {
+        self.clamp_tree_offset();
+        let viewport = self.tree_render_capacity.max(1);
+        let max_offset = self.tree_line_count.saturating_sub(viewport);
+        self.tree_scroll_offset = self
+            .tree_scroll_offset
+            .saturating_add(viewport)
+            .min(max_offset);
+    }
+
+    fn page_tree_up(&mut self) {
+        let viewport = self.tree_render_capacity.max(1);
+        self.tree_scroll_offset = self.tree_scroll_offset.saturating_sub(viewport);
     }
 }
 
@@ -666,6 +707,7 @@ impl crate::widgets::Widget for QueryWidget {
                     let mut state = self.state.borrow_mut();
                     if !state.show_tree {
                         state.show_tree = true;
+                        state.reset_tree_scroll();
                     }
                 }
                 KeyCode::Char('/') if !input_is_active && !filter_active => {
@@ -682,6 +724,10 @@ impl crate::widgets::Widget for QueryWidget {
                 }
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(ctx.clone()),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
+                KeyCode::Char('J') if self.state.borrow().show_tree => {
+                    self.tree_next_item(ctx.clone())
+                }
+                KeyCode::Char('K') if self.state.borrow().show_tree => self.tree_prev_item(),
                 KeyCode::PageDown => self.page_down(ctx.clone()),
                 KeyCode::PageUp => self.page_up(),
                 KeyCode::Left
@@ -738,6 +784,9 @@ impl crate::widgets::Widget for QueryWidget {
                 KeyCode::Char('t') => {
                     let mut state = self.state.borrow_mut();
                     state.show_tree = !state.show_tree;
+                    if state.show_tree {
+                        state.reset_tree_scroll();
+                    }
                 }
                 KeyCode::Char('i') if !input_is_active && !filter_active => {
                     self.show_index_picker(ctx.clone());
@@ -1329,8 +1378,20 @@ impl QueryWidget {
     const HELP_TREE: &'static [help::Entry<'static>] = &[
         help::Entry {
             keys: Cow::Borrowed("j/k/↑/↓"),
-            short: Cow::Borrowed("next/prev"),
-            long: Cow::Borrowed("Next/previous item"),
+            short: Cow::Borrowed("scroll"),
+            long: Cow::Borrowed("Scroll item"),
+            ctrl: None,
+            shift: Some(help::Variant {
+                keys: Some(Cow::Borrowed("J/K")),
+                short: Some(Cow::Borrowed("next/prev")),
+                long: Some(Cow::Borrowed("Next/previous item")),
+            }),
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("PgUp/PgDn"),
+            short: Cow::Borrowed("page"),
+            long: Cow::Borrowed("Page through item"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -1892,10 +1953,11 @@ impl QueryWidget {
     fn scroll_down(&self, ctx: crate::env::WidgetCtx) {
         let should_load_more = {
             let mut state = self.state.borrow_mut();
-            state.table_state.scroll_down_by(1);
             if state.show_tree {
+                state.scroll_tree_down();
                 false
             } else {
+                state.table_state.scroll_down_by(1);
                 state.clamp_table_offset();
                 self.should_load_more(&state)
             }
@@ -1909,36 +1971,41 @@ impl QueryWidget {
     fn page_down(&self, ctx: crate::env::WidgetCtx) {
         let should_load_more = {
             let mut state = self.state.borrow_mut();
-            let total = state.filtered_indices.len();
-            if total == 0 {
-                if state.show_tree || state.is_loading_more {
-                    false
-                } else {
-                    self.should_load_more(&state)
-                }
+            if state.show_tree {
+                state.page_tree_down();
+                false
             } else {
-                let page = state.last_render_capacity.max(1);
-                let offset = state.table_state.offset();
-                let selected = state
-                    .table_state
-                    .selected()
-                    .unwrap_or(0)
-                    .min(total.saturating_sub(1));
-                let rel = selected.saturating_sub(offset).min(page.saturating_sub(1));
-                let max_offset = total.saturating_sub(page);
-                let new_offset = offset.saturating_add(page).min(max_offset);
-                let mut new_selected = new_offset.saturating_add(rel);
-                if new_selected >= total {
-                    new_selected = total.saturating_sub(1);
-                }
-                *state.table_state.offset_mut() = new_offset;
-                state.table_state.select(Some(new_selected));
-
-                if state.show_tree || state.is_loading_more {
-                    false
+                let total = state.filtered_indices.len();
+                if total == 0 {
+                    if state.is_loading_more {
+                        false
+                    } else {
+                        self.should_load_more(&state)
+                    }
                 } else {
-                    self.should_load_more(&state)
-                        || (state.last_evaluated_key.is_some() && new_offset == max_offset)
+                    let page = state.last_render_capacity.max(1);
+                    let offset = state.table_state.offset();
+                    let selected = state
+                        .table_state
+                        .selected()
+                        .unwrap_or(0)
+                        .min(total.saturating_sub(1));
+                    let rel = selected.saturating_sub(offset).min(page.saturating_sub(1));
+                    let max_offset = total.saturating_sub(page);
+                    let new_offset = offset.saturating_add(page).min(max_offset);
+                    let mut new_selected = new_offset.saturating_add(rel);
+                    if new_selected >= total {
+                        new_selected = total.saturating_sub(1);
+                    }
+                    *state.table_state.offset_mut() = new_offset;
+                    state.table_state.select(Some(new_selected));
+
+                    if state.is_loading_more {
+                        false
+                    } else {
+                        self.should_load_more(&state)
+                            || (state.last_evaluated_key.is_some() && new_offset == max_offset)
+                    }
                 }
             }
         };
@@ -1950,12 +2017,20 @@ impl QueryWidget {
 
     fn scroll_up(&self) {
         let mut state = self.state.borrow_mut();
-        state.table_state.scroll_up_by(1);
-        state.clamp_table_offset();
+        if state.show_tree {
+            state.scroll_tree_up();
+        } else {
+            state.table_state.scroll_up_by(1);
+            state.clamp_table_offset();
+        }
     }
 
     fn page_up(&self) {
         let mut state = self.state.borrow_mut();
+        if state.show_tree {
+            state.page_tree_up();
+            return;
+        }
         let total = state.filtered_indices.len();
         if total == 0 {
             return;
@@ -1975,6 +2050,33 @@ impl QueryWidget {
         }
         *state.table_state.offset_mut() = new_offset;
         state.table_state.select(Some(new_selected));
+    }
+
+    fn tree_next_item(&self, ctx: crate::env::WidgetCtx) {
+        let should_load_more = {
+            let mut state = self.state.borrow_mut();
+            if !state.show_tree {
+                return;
+            }
+            state.table_state.scroll_down_by(1);
+            state.clamp_table_offset();
+            state.reset_tree_scroll();
+            self.should_load_more(&state)
+        };
+
+        if should_load_more {
+            self.load_more(ctx);
+        }
+    }
+
+    fn tree_prev_item(&self) {
+        let mut state = self.state.borrow_mut();
+        if !state.show_tree {
+            return;
+        }
+        state.table_state.scroll_up_by(1);
+        state.clamp_table_offset();
+        state.reset_tree_scroll();
     }
 
     fn scroll_columns_left(&self) {
@@ -2099,6 +2201,9 @@ impl QueryWidget {
             state.matched_total = 0;
             state.is_prefetching = false;
             state.column_offset = 0;
+            state.reset_tree_scroll();
+            state.tree_line_count = 0;
+            state.tree_render_capacity = 0;
         }
         ctx.invalidate();
         self.start_query_page(query, None, false, ctx, request_id);
@@ -2193,6 +2298,9 @@ impl QueryWidget {
             state.matched_total = 0;
             state.is_prefetching = false;
             state.column_offset = 0;
+            state.reset_tree_scroll();
+            state.tree_line_count = 0;
+            state.tree_render_capacity = 0;
         }
         ctx.invalidate();
         self.start_index_query_page(target, None, false, ctx, request_id);
@@ -2363,6 +2471,7 @@ impl QueryWidget {
             } else if let Some(pos) = state.filtered_indices.iter().position(|idx| *idx == index) {
                 state.table_state.select(Some(pos));
                 state.show_tree = true;
+                state.reset_tree_scroll();
             } else {
                 state.show_tree = false;
                 state.table_state.select(None);
@@ -2634,8 +2743,13 @@ impl QueryWidget {
             .and_then(|idx| state.items.get(*idx))
             .map(|item| tree::item_to_lines(&item.0, theme, Some(state.item_keys.sorted())))
             .unwrap_or_else(|| vec![Line::from("No item selected")]);
-
-        let paragraph = Paragraph::new(content).block(block);
+        let inner_area = block.inner(area);
+        state.tree_render_capacity = inner_area.height as usize;
+        state.tree_line_count = content.len();
+        state.clamp_tree_offset();
+        let paragraph = Paragraph::new(content)
+            .block(block)
+            .scroll((state.tree_scroll_offset.min(u16::MAX as usize) as u16, 0));
         frame.render_widget(paragraph, area);
     }
 
@@ -2782,10 +2896,18 @@ impl QueryWidget {
         };
 
         let initial = match format {
-            EditorFormat::Plain => json::to_json_string(&item),
-            EditorFormat::DynamoDb => json::to_dynamodb_json_string(&item),
+            EditorFormat::Plain => match json::to_json_string(&item) {
+                Ok(value) => Ok((value, EditorFormat::Plain, None)),
+                Err(json::JsonConversionError::UnsupportedType { attribute_type }) => {
+                    json::to_dynamodb_json_string(&item)
+                        .map(|value| (value, EditorFormat::DynamoDb, Some(attribute_type)))
+                }
+                Err(err) => Err(err),
+            },
+            EditorFormat::DynamoDb => json::to_dynamodb_json_string(&item)
+                .map(|value| (value, EditorFormat::DynamoDb, None)),
         };
-        let initial = match initial {
+        let (initial, actual_format, fallback_attribute_type) = match initial {
             Ok(value) => value,
             Err(err) => {
                 let message = err.to_string();
@@ -2795,6 +2917,16 @@ impl QueryWidget {
                 return;
             }
         };
+        if let Some(attribute_type) = fallback_attribute_type {
+            ctx.show_toast(Toast {
+                message: format!(
+                    "Opened as DynamoDB JSON because the item contains {attribute_type}"
+                ),
+                kind: ToastKind::Info,
+                duration: Duration::from_secs(3),
+                action: None,
+            });
+        }
 
         let edited = match self.open_editor(&initial, ctx.clone()) {
             Ok(value) => value,
@@ -2807,7 +2939,7 @@ impl QueryWidget {
         };
         ctx.invalidate();
 
-        let updated = match format {
+        let updated = match actual_format {
             EditorFormat::Plain => json::from_json_string(&edited),
             EditorFormat::DynamoDb => json::from_dynamodb_json_string(&edited),
         };
@@ -3881,5 +4013,38 @@ mod tests {
         let widths = vec![80];
         let (_, fitted) = fit_table_column_widths(&widths, 200, 0, TABLE_MAX_COLUMN_WIDTH_COMPACT);
         assert_eq!(fitted, vec![TABLE_MAX_COLUMN_WIDTH_COMPACT as u16]);
+    }
+
+    #[test]
+    fn clamp_tree_offset_limits_scroll_to_last_visible_page() {
+        let mut state = QueryState {
+            tree_scroll_offset: 99,
+            tree_render_capacity: 4,
+            tree_line_count: 10,
+            ..QueryState::default()
+        };
+
+        state.clamp_tree_offset();
+
+        assert_eq!(state.tree_scroll_offset, 6);
+    }
+
+    #[test]
+    fn page_tree_scroll_uses_visible_height() {
+        let mut state = QueryState {
+            tree_scroll_offset: 0,
+            tree_render_capacity: 3,
+            tree_line_count: 10,
+            ..QueryState::default()
+        };
+
+        state.page_tree_down();
+        assert_eq!(state.tree_scroll_offset, 3);
+
+        state.page_tree_down();
+        assert_eq!(state.tree_scroll_offset, 6);
+
+        state.page_tree_up();
+        assert_eq!(state.tree_scroll_offset, 3);
     }
 }

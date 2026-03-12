@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fmt, str::FromStr};
 
-use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::{primitives::Blob, types::AttributeValue};
+use aws_smithy_types::base64;
 use serde_json::{Map, Number, Value};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -153,18 +154,10 @@ fn to_dynamodb_json_value(value: &AttributeValue) -> Result<Value> {
             }
             Ok(json_type("M", Value::Object(object)))
         }
-        AttributeValue::B(_) => Err(JsonConversionError::UnsupportedType {
-            attribute_type: "B".to_string(),
-        }),
-        AttributeValue::Bs(_) => Err(JsonConversionError::UnsupportedType {
-            attribute_type: "BS".to_string(),
-        }),
-        AttributeValue::Ns(_) => Err(JsonConversionError::UnsupportedType {
-            attribute_type: "NS".to_string(),
-        }),
-        AttributeValue::Ss(_) => Err(JsonConversionError::UnsupportedType {
-            attribute_type: "SS".to_string(),
-        }),
+        AttributeValue::B(blob) => Ok(json_type("B", Value::String(base64::encode(blob.as_ref())))),
+        AttributeValue::Bs(set) => Ok(json_type("BS", json_blob_array(set))),
+        AttributeValue::Ns(set) => Ok(json_type("NS", json_string_array(set))),
+        AttributeValue::Ss(set) => Ok(json_type("SS", json_string_array(set))),
         _ => Err(JsonConversionError::UnsupportedType {
             attribute_type: "Unknown".to_string(),
         }),
@@ -184,7 +177,11 @@ fn from_dynamodb_json_value(value: &Value) -> Result<AttributeValue> {
         });
     }
 
-    let (key, value) = map.iter().next().unwrap();
+    let Some((key, value)) = map.iter().next() else {
+        return Err(JsonConversionError::InvalidStructure {
+            message: "expected a single DynamoDB type key".to_string(),
+        });
+    };
     match key.as_str() {
         "S" => value
             .as_str()
@@ -209,6 +206,10 @@ fn from_dynamodb_json_value(value: &Value) -> Result<AttributeValue> {
             .ok_or_else(|| JsonConversionError::InvalidStructure {
                 message: "NULL must be true".to_string(),
             }),
+        "B" => parse_blob(value, "B").map(AttributeValue::B),
+        "BS" => parse_blob_array(value, "BS").map(AttributeValue::Bs),
+        "SS" => parse_string_array(value, "SS").map(AttributeValue::Ss),
+        "NS" => parse_string_array(value, "NS").map(AttributeValue::Ns),
         "L" => {
             let Value::Array(values) = value else {
                 return Err(JsonConversionError::InvalidStructure {
@@ -289,9 +290,78 @@ fn to_json_value(value: &AttributeValue) -> Result<Value> {
     }
 }
 
+fn parse_string_array(value: &Value, attribute_type: &str) -> Result<Vec<String>> {
+    let Value::Array(values) = value else {
+        return Err(JsonConversionError::InvalidStructure {
+            message: format!("{attribute_type} must be an array of strings"),
+        });
+    };
+
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| JsonConversionError::InvalidStructure {
+                    message: format!("{attribute_type} must be an array of strings"),
+                })
+        })
+        .collect()
+}
+
+fn parse_blob(value: &Value, attribute_type: &str) -> Result<Blob> {
+    let encoded = value
+        .as_str()
+        .ok_or_else(|| JsonConversionError::InvalidStructure {
+            message: format!("{attribute_type} must be a base64 string"),
+        })?;
+    base64::decode(encoded)
+        .map(Blob::new)
+        .map_err(|_| JsonConversionError::InvalidStructure {
+            message: format!("{attribute_type} must be a base64 string"),
+        })
+}
+
+fn parse_blob_array(value: &Value, attribute_type: &str) -> Result<Vec<Blob>> {
+    let Value::Array(values) = value else {
+        return Err(JsonConversionError::InvalidStructure {
+            message: format!("{attribute_type} must be an array of base64 strings"),
+        });
+    };
+
+    values
+        .iter()
+        .map(|value| match value {
+            Value::String(encoded) => base64::decode(encoded).map(Blob::new).map_err(|_| {
+                JsonConversionError::InvalidStructure {
+                    message: format!("{attribute_type} must be an array of base64 strings"),
+                }
+            }),
+            _ => Err(JsonConversionError::InvalidStructure {
+                message: format!("{attribute_type} must be an array of base64 strings"),
+            }),
+        })
+        .collect()
+}
+
+fn json_string_array(values: &[String]) -> Value {
+    Value::Array(values.iter().cloned().map(Value::String).collect())
+}
+
+fn json_blob_array(values: &[Blob]) -> Value {
+    Value::Array(
+        values
+            .iter()
+            .map(|value| Value::String(base64::encode(value.as_ref())))
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn attr_map(entries: Vec<(&str, AttributeValue)>) -> HashMap<String, AttributeValue> {
         entries
@@ -365,6 +435,59 @@ mod tests {
         assert_eq!(
             map.get("inner").unwrap(),
             &Value::String("value".to_string())
+        );
+    }
+
+    #[test]
+    fn string_and_number_sets_round_trip_in_dynamodb_json() {
+        let item = attr_map(vec![
+            (
+                "tags",
+                AttributeValue::Ss(vec!["a".to_string(), "b".to_string()]),
+            ),
+            (
+                "scores",
+                AttributeValue::Ns(vec!["42".to_string(), "3.14".to_string()]),
+            ),
+        ]);
+
+        let json = to_dynamodb_json(&item).expect("conversion succeeds");
+
+        assert_eq!(
+            json,
+            json!({
+                "scores": { "NS": ["42", "3.14"] },
+                "tags": { "SS": ["a", "b"] }
+            })
+        );
+        assert_eq!(
+            from_dynamodb_json(&json).expect("round-trip succeeds"),
+            item
+        );
+    }
+
+    #[test]
+    fn binary_values_round_trip_in_dynamodb_json() {
+        let item = attr_map(vec![
+            ("blob", AttributeValue::B(Blob::new([1_u8, 2, 3]))),
+            (
+                "blob_set",
+                AttributeValue::Bs(vec![Blob::new([0_u8]), Blob::new([255_u8, 1])]),
+            ),
+        ]);
+
+        let json = to_dynamodb_json(&item).expect("conversion succeeds");
+
+        assert_eq!(
+            json,
+            json!({
+                "blob": { "B": "AQID" },
+                "blob_set": { "BS": ["AA==", "/wE="] }
+            })
+        );
+        assert_eq!(
+            from_dynamodb_json(&json).expect("round-trip succeeds"),
+            item
         );
     }
 
