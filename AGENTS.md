@@ -50,8 +50,8 @@ Add or update tests where appropriate to cover new behavior or bug fixes.
 
 - Target the latest stable Rust. No web search needed: go directly to
   https://doc.rust-lang.org/stable/releases.html for the current stable
-  version, its release date, and changelog. As of 2026-03-12, stable is 1.94.0
-  (released 2026-03-05).
+  version, its release date, and changelog. As of 2026-06-11, stable is 1.96.0
+  (released 2026-05-28).
 - This repo uses the Rust 2024 edition (see [`Cargo.toml`](Cargo.toml)). Keep
   code compatible with the 2024 edition and prefer its idioms.
 - Before starting work, read the changelog for each release after June 2024
@@ -66,3 +66,5 @@ Add or update tests where appropriate to cover new behavior or bug fixes.
 - `#[expect]` for lint management with an audit trail (1.81).
 - `&raw const`/`&raw mut` operators and `unsafe extern` blocks for FFI (1.82).
 - Explicit const-argument inference for generics (1.89).
+- `if let` guards on `match` arms for fallible pattern guards (1.95).
+- `assert_matches!`/`debug_assert_matches!` for pattern assertions (1.96).
