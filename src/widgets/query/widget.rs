@@ -3,7 +3,9 @@ use std::{
     cell::{Cell, RefCell},
     cmp::{max, min},
     collections::{HashMap, HashSet},
-    env, fs,
+    env,
+    fs::{self, File},
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -16,8 +18,10 @@ use std::{
 use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
 use aws_sdk_dynamodb::operation::RequestId;
 use aws_sdk_dynamodb::types::{
-    AttributeValue, KeySchemaElement, KeyType, TableDescription, TimeToLiveStatus,
+    AttributeValue, DeleteRequest, KeySchemaElement, KeyType, TableDescription, TimeToLiveStatus,
+    WriteRequest,
 };
+use aws_smithy_types::Blob;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
@@ -32,10 +36,7 @@ use ratatui::{
     widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState},
 };
 
-use super::{
-    export_popup::{ExportMode, ExportPopup},
-    index_picker, input, item_keys, keys_widget, tree,
-};
+use super::{export_popup::ExportPopup, index_picker, input, item_keys, keys_widget, tree};
 use keys_widget::KeysWidget;
 
 use crate::{
@@ -63,6 +64,8 @@ use dynamate::{
     },
 };
 use humansize::{BINARY, format_size};
+use tokio::sync::mpsc;
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use unicode_width::UnicodeWidthStr;
 
 pub struct QueryWidget {
@@ -105,8 +108,14 @@ struct QueryState {
     tree_scroll_offset: usize,
     tree_render_capacity: usize,
     tree_line_count: usize,
+    selection: SelectionMode,
 }
 
+/// Width of the gutter that shows the selection bar (`▌`) for selected
+/// rows. Only rendered while a selection is active.
+const SELECTION_GUTTER_WIDTH: u16 = 1;
+/// Glyph drawn in the selection gutter for a selected row.
+const SELECTION_BAR: &str = "▌";
 const TABLE_RENDER_CHROME_WIDTH: usize = 4;
 const TABLE_COLUMN_SPACING: usize = 1;
 const TABLE_MIN_COLUMN_WIDTH: usize = 1;
@@ -147,6 +156,14 @@ struct DeleteItemEvent {
     result: Result<(), String>,
 }
 
+struct DeleteSelectionRequest {
+    selection: SelectionSnapshot,
+}
+
+struct DeleteSelectionEvent {
+    result: Result<usize, String>,
+}
+
 struct IndexQueryEvent {
     target: index_picker::IndexTarget,
 }
@@ -157,7 +174,7 @@ struct KeyVisibilityEvent {
 }
 
 struct ExportRequest {
-    mode: ExportMode,
+    mode: ExportKind,
     path: PathBuf,
     fetch_all: bool,
     overwrite_confirmed: bool,
@@ -173,9 +190,16 @@ struct ExportProgressEvent {
 }
 
 struct ExportOutcome {
-    mode: ExportMode,
+    mode: ExportKind,
     path: PathBuf,
     count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportKind {
+    Item,
+    Selection,
+    Results,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,6 +248,190 @@ impl ActiveQuery {
 struct DeleteTarget {
     key: HashMap<String, AttributeValue>,
     summary: String,
+}
+
+#[derive(Debug, Clone, Default)]
+enum SelectionMode {
+    #[default]
+    None,
+    Explicit(HashSet<ItemKey>),
+    Query {
+        excluded: HashSet<ItemKey>,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum SelectionSnapshot {
+    Explicit(HashSet<ItemKey>),
+    Query { excluded: HashSet<ItemKey> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ItemKey {
+    hash_key: String,
+    hash_value: KeyValue,
+    range: Option<(String, KeyValue)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum KeyValue {
+    String(String),
+    Number(String),
+    Binary(Vec<u8>),
+}
+
+impl SelectionMode {
+    fn is_active(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn clear(&mut self) {
+        *self = Self::None;
+    }
+
+    fn snapshot(&self) -> Option<SelectionSnapshot> {
+        match self {
+            Self::None => None,
+            Self::Explicit(keys) => Some(SelectionSnapshot::Explicit(keys.clone())),
+            Self::Query { excluded } => Some(SelectionSnapshot::Query {
+                excluded: excluded.clone(),
+            }),
+        }
+    }
+
+    fn remove_key(&mut self, key: &ItemKey) {
+        match self {
+            Self::None => {}
+            Self::Explicit(keys) => {
+                keys.remove(key);
+                if keys.is_empty() {
+                    *self = Self::None;
+                }
+            }
+            Self::Query { excluded } => {
+                excluded.remove(key);
+            }
+        }
+    }
+
+    /// Flip the selected state of every `loaded_keys` entry, leaving any
+    /// not-yet-loaded rows untouched. With no selection this selects all
+    /// loaded rows; in `Explicit` it toggles membership; in `Query` it
+    /// toggles each key's exclusion.
+    fn invert_loaded(&mut self, loaded_keys: impl IntoIterator<Item = ItemKey>) {
+        match self {
+            Self::None => {
+                let keys: HashSet<ItemKey> = loaded_keys.into_iter().collect();
+                if !keys.is_empty() {
+                    *self = Self::Explicit(keys);
+                }
+            }
+            Self::Explicit(keys) => {
+                for key in loaded_keys {
+                    if !keys.remove(&key) {
+                        keys.insert(key);
+                    }
+                }
+                if keys.is_empty() {
+                    *self = Self::None;
+                }
+            }
+            Self::Query { excluded } => {
+                for key in loaded_keys {
+                    if !excluded.remove(&key) {
+                        excluded.insert(key);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl SelectionSnapshot {
+    fn is_selected(&self, key: &ItemKey) -> bool {
+        match self {
+            Self::Explicit(keys) => keys.contains(key),
+            Self::Query { excluded } => !excluded.contains(key),
+        }
+    }
+}
+
+impl ItemKey {
+    fn from_item(
+        item: &HashMap<String, AttributeValue>,
+        table_desc: &TableDescription,
+    ) -> Result<Self, String> {
+        let (hash_key, range_key) = extract_hash_range(table_desc);
+        let Some(hash_key) = hash_key else {
+            return Err("Table is missing a partition key".to_string());
+        };
+        let hash_value = item
+            .get(&hash_key)
+            .ok_or_else(|| format!("Item is missing {hash_key}"))?;
+        let hash_value = KeyValue::from_attr(hash_value)?;
+        let range = match range_key {
+            Some(range_key) => {
+                let range_value = item
+                    .get(&range_key)
+                    .ok_or_else(|| format!("Item is missing {range_key}"))?;
+                Some((range_key, KeyValue::from_attr(range_value)?))
+            }
+            None => None,
+        };
+        Ok(Self {
+            hash_key,
+            hash_value,
+            range,
+        })
+    }
+
+    fn to_key_map(&self) -> HashMap<String, AttributeValue> {
+        let mut key = HashMap::with_capacity(2);
+        key.insert(self.hash_key.clone(), self.hash_value.to_attr());
+        if let Some((range_key, range_value)) = self.range.as_ref() {
+            key.insert(range_key.clone(), range_value.to_attr());
+        }
+        key
+    }
+
+    fn summary_line(&self) -> String {
+        let mut parts = vec![format!("{}={}", self.hash_key, self.hash_value.display())];
+        if let Some((range_key, range_value)) = self.range.as_ref() {
+            parts.push(format!("{range_key}={}", range_value.display()));
+        }
+        parts.join(" · ")
+    }
+}
+
+impl KeyValue {
+    fn from_attr(value: &AttributeValue) -> Result<Self, String> {
+        if let Ok(value) = value.as_s() {
+            return Ok(Self::String(value.clone()));
+        }
+        if let Ok(value) = value.as_n() {
+            return Ok(Self::Number(value.clone()));
+        }
+        if let Ok(value) = value.as_b() {
+            return Ok(Self::Binary(value.as_ref().to_vec()));
+        }
+        Err("Primary key values must be scalar string, number, or binary".to_string())
+    }
+
+    fn to_attr(&self) -> AttributeValue {
+        match self {
+            Self::String(value) => AttributeValue::S(value.clone()),
+            Self::Number(value) => AttributeValue::N(value.clone()),
+            Self::Binary(value) => AttributeValue::B(Blob::new(value.clone())),
+        }
+    }
+
+    fn display(&self) -> String {
+        match self {
+            Self::String(value) => value.clone(),
+            Self::Number(value) => value.clone(),
+            Self::Binary(value) => format!("<binary:{}>", value.len()),
+        }
+    }
 }
 
 fn format_sdk_error<E>(err: &SdkError<E>) -> String
@@ -689,6 +897,8 @@ impl crate::widgets::Widget for QueryWidget {
                     } else if state.filter_applied() {
                         state.filter.clear();
                         state.apply_filter();
+                    } else if state.selection.is_active() {
+                        state.selection.clear();
                     } else {
                         drop(state);
                         ctx.pop_widget();
@@ -776,10 +986,32 @@ impl crate::widgets::Widget for QueryWidget {
                 }
                 KeyCode::Char('x') if !input_is_active && !filter_active => {
                     if self.state.borrow().show_tree {
-                        self.show_export_popup(ExportMode::Item, ctx.clone());
+                        self.show_export_popup(ExportKind::Item, ctx.clone());
+                    } else if self.selection_active() {
+                        self.show_export_popup(ExportKind::Selection, ctx.clone());
                     } else {
-                        self.show_export_popup(ExportMode::Results, ctx.clone());
+                        self.show_export_popup(ExportKind::Results, ctx.clone());
                     }
+                }
+                KeyCode::Char(' ')
+                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+                {
+                    match self.toggle_selected_row() {
+                        // Advance to the next row so a run of consecutive
+                        // items can be selected by tapping space.
+                        Ok(()) => self.scroll_down(ctx.clone()),
+                        Err(err) => self.show_error(ctx.clone(), &err),
+                    }
+                }
+                KeyCode::Char('a')
+                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+                {
+                    self.select_all_query_matches();
+                }
+                KeyCode::Char('v')
+                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+                {
+                    self.invert_selection();
                 }
                 KeyCode::Char('t') => {
                     let mut state = self.state.borrow_mut();
@@ -815,12 +1047,26 @@ impl crate::widgets::Widget for QueryWidget {
                 }
                 KeyCode::Char('d')
                     if !input_is_active
-                        && !filter_active
+                        && self.state.borrow().show_tree
                         && key
                             .modifiers
                             .contains(crossterm::event::KeyModifiers::CONTROL) =>
                 {
                     self.confirm_delete(ctx.clone());
+                }
+                KeyCode::Char('d')
+                    if !input_is_active
+                        && !filter_active
+                        && !self.state.borrow().show_tree
+                        && key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    if self.selection_active() {
+                        self.confirm_delete_selection(ctx.clone());
+                    } else {
+                        self.confirm_delete(ctx.clone());
+                    }
                 }
                 KeyCode::Char('n') => {
                     self.create_item(EditorFormat::Plain, ctx.clone());
@@ -860,6 +1106,8 @@ impl crate::widgets::Widget for QueryWidget {
         }
         if state.filter.is_active() {
             Some(Self::HELP_FILTER_EDIT)
+        } else if state.selection.is_active() {
+            Some(Self::HELP_SELECTION)
         } else if state.filter_applied() {
             Some(Self::HELP_FILTER_APPLIED)
         } else {
@@ -1004,8 +1252,14 @@ impl crate::widgets::Widget for QueryWidget {
                 Ok(outcome) => {
                     let display_path = abbreviate_home(&outcome.path);
                     let message = match outcome.mode {
-                        ExportMode::Item => format!("Exported to {display_path}"),
-                        ExportMode::Results => {
+                        ExportKind::Item => format!("Exported to {display_path}"),
+                        ExportKind::Selection => {
+                            format!(
+                                "Exported {} selected items to {}",
+                                outcome.count, display_path
+                            )
+                        }
+                        ExportKind::Results => {
                             format!("Exported {} items to {}", outcome.count, display_path)
                         }
                     };
@@ -1080,11 +1334,17 @@ impl crate::widgets::Widget for QueryWidget {
             return;
         }
 
+        if let Some(delete_event) = event.payload::<DeleteSelectionRequest>() {
+            self.delete_selection(delete_event.selection.clone(), ctx);
+            return;
+        }
+
         if let Some(delete_event) = event.payload::<DeleteItemEvent>() {
             match delete_event.result.as_ref() {
                 Ok(()) => {
                     self.set_loading_state(LoadingState::Loaded);
                     self.remove_item_by_key(&delete_event.key);
+                    self.remove_selection_key(&delete_event.key);
                     ctx.show_toast(Toast {
                         message: "Item deleted".to_string(),
                         kind: ToastKind::Info,
@@ -1100,6 +1360,29 @@ impl crate::widgets::Widget for QueryWidget {
                     ctx.invalidate();
                 }
             }
+        }
+
+        if let Some(delete_event) = event.payload::<DeleteSelectionEvent>() {
+            match delete_event.result {
+                Ok(count) => {
+                    self.clear_selection();
+                    ctx.show_toast(Toast {
+                        message: format!("Deleted {count} items"),
+                        kind: ToastKind::Info,
+                        duration: Duration::from_secs(4),
+                        action: None,
+                    });
+                    let active_query = self.state.borrow().active_query.clone();
+                    self.restart_query(active_query, ctx.clone(), None);
+                }
+                Err(ref err) => {
+                    let message = format!("Failed to delete selection: {err}");
+                    self.set_loading_state(LoadingState::Error(message.clone()));
+                    self.show_error(ctx.clone(), &message);
+                    ctx.invalidate();
+                }
+            }
+            return;
         }
 
         if let Some(index_event) = event.payload::<IndexQueryEvent>() {
@@ -1157,9 +1440,17 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
+            keys: Cow::Borrowed("space/a"),
+            short: Cow::Borrowed("select"),
+            long: Cow::Borrowed("Toggle row/select all query matches"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("x"),
             short: Cow::Borrowed("export"),
-            long: Cow::Borrowed("Export"),
+            long: Cow::Borrowed("Export results/selection"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -1211,7 +1502,69 @@ impl QueryWidget {
             ctrl: Some(help::Variant {
                 keys: Some(Cow::Borrowed("^d")),
                 short: Some(Cow::Borrowed("delete")),
-                long: Some(Cow::Borrowed("Delete item")),
+                long: Some(Cow::Borrowed("Delete item/selection")),
+            }),
+            shift: None,
+            alt: None,
+        },
+    ];
+    const HELP_SELECTION: &'static [help::Entry<'static>] = &[
+        help::Entry {
+            keys: Cow::Borrowed("space"),
+            short: Cow::Borrowed("toggle"),
+            long: Cow::Borrowed("Toggle row"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("a"),
+            short: Cow::Borrowed("all"),
+            long: Cow::Borrowed("Select all query matches"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("v"),
+            short: Cow::Borrowed("invert"),
+            long: Cow::Borrowed("Invert loaded selection"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("esc"),
+            short: Cow::Borrowed("clear"),
+            long: Cow::Borrowed("Clear selection"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("x"),
+            short: Cow::Borrowed("export"),
+            long: Cow::Borrowed("Export selection"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("⏎"),
+            short: Cow::Borrowed("view"),
+            long: Cow::Borrowed("View focused item"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed(""),
+            short: Cow::Borrowed(""),
+            long: Cow::Borrowed(""),
+            ctrl: Some(help::Variant {
+                keys: Some(Cow::Borrowed("^d")),
+                short: Some(Cow::Borrowed("delete")),
+                long: Some(Cow::Borrowed("Delete selection")),
             }),
             shift: None,
             alt: None,
@@ -1303,9 +1656,17 @@ impl QueryWidget {
             alt: None,
         },
         help::Entry {
+            keys: Cow::Borrowed("space/a"),
+            short: Cow::Borrowed("select"),
+            long: Cow::Borrowed("Toggle row/select all query matches"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
             keys: Cow::Borrowed("x"),
             short: Cow::Borrowed("export"),
-            long: Cow::Borrowed("Export"),
+            long: Cow::Borrowed("Export results/selection"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -1322,14 +1683,6 @@ impl QueryWidget {
             keys: Cow::Borrowed("i"),
             short: Cow::Borrowed("indexes"),
             long: Cow::Borrowed("Query by index PK"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed("x"),
-            short: Cow::Borrowed("export"),
-            long: Cow::Borrowed("Export"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -1361,7 +1714,7 @@ impl QueryWidget {
         help::Entry {
             keys: Cow::Borrowed("^d"),
             short: Cow::Borrowed("delete"),
-            long: Cow::Borrowed("Delete item"),
+            long: Cow::Borrowed("Delete item/selection"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -1495,6 +1848,228 @@ impl QueryWidget {
         self.state.borrow_mut().loading_state = state;
     }
 
+    fn table_desc(&self) -> Result<TableDescription, String> {
+        self.table_meta
+            .borrow()
+            .as_ref()
+            .map(|meta| meta.table_desc.clone())
+            .ok_or_else(|| "Table metadata is not available yet".to_string())
+    }
+
+    fn selected_item_index(&self) -> Result<usize, String> {
+        let state = self.state.borrow();
+        state
+            .table_state
+            .selected()
+            .and_then(|idx| state.filtered_indices.get(idx).copied())
+            .ok_or_else(|| "No item selected".to_string())
+    }
+
+    fn item_key_at_index(&self, index: usize) -> Result<ItemKey, String> {
+        let table_desc = self.table_desc()?;
+        let state = self.state.borrow();
+        let item = state
+            .items
+            .get(index)
+            .ok_or_else(|| "No item selected".to_string())?;
+        ItemKey::from_item(&item.0, &table_desc)
+    }
+
+    fn selected_item_key(&self) -> Result<ItemKey, String> {
+        let index = self.selected_item_index()?;
+        self.item_key_at_index(index)
+    }
+
+    fn selection_snapshot(&self) -> Option<SelectionSnapshot> {
+        self.state.borrow().selection.snapshot()
+    }
+
+    fn selection_active(&self) -> bool {
+        self.state.borrow().selection.is_active()
+    }
+
+    fn clear_selection(&self) {
+        self.state.borrow_mut().selection.clear();
+    }
+
+    fn select_all_query_matches(&self) {
+        self.state.borrow_mut().selection = SelectionMode::Query {
+            excluded: HashSet::new(),
+        };
+    }
+
+    /// Toggle the selected state of every currently-loaded row, leaving
+    /// not-yet-loaded rows untouched. Works uniformly across modes:
+    /// with no selection it selects all loaded rows; in `Explicit` it
+    /// flips membership of each loaded key; in `Query` it flips each
+    /// loaded key's exclusion.
+    fn invert_selection(&self) {
+        let Ok(table_desc) = self.table_desc() else {
+            return;
+        };
+        let mut state = self.state.borrow_mut();
+        let loaded_keys: Vec<ItemKey> = state
+            .items
+            .iter()
+            .filter_map(|item| ItemKey::from_item(&item.0, &table_desc).ok())
+            .collect();
+        state.selection.invert_loaded(loaded_keys);
+    }
+
+    fn toggle_selected_row(&self) -> Result<(), String> {
+        let key = self.selected_item_key()?;
+        let mut state = self.state.borrow_mut();
+        let loaded_complete = state.last_evaluated_key.is_none();
+        let loaded_count = state.items.len();
+        let mut clear_selection = false;
+        match &mut state.selection {
+            SelectionMode::None => {
+                let mut keys = HashSet::new();
+                keys.insert(key);
+                state.selection = SelectionMode::Explicit(keys);
+            }
+            SelectionMode::Explicit(keys) => {
+                if !keys.remove(&key) {
+                    keys.insert(key);
+                }
+                if keys.is_empty() {
+                    state.selection = SelectionMode::None;
+                }
+            }
+            SelectionMode::Query { excluded } => {
+                if !excluded.remove(&key) {
+                    excluded.insert(key);
+                }
+                clear_selection = loaded_complete && excluded.len() >= loaded_count;
+            }
+        }
+        if clear_selection {
+            state.selection = SelectionMode::None;
+        }
+        Ok(())
+    }
+
+    fn remove_selection_key(&self, key: &HashMap<String, AttributeValue>) {
+        let Ok(table_desc) = self.table_desc() else {
+            return;
+        };
+        let Ok(item_key) = ItemKey::from_item(key, &table_desc) else {
+            return;
+        };
+        self.state.borrow_mut().selection.remove_key(&item_key);
+    }
+
+    fn selection_status(&self, state: &QueryState) -> Option<String> {
+        match &state.selection {
+            SelectionMode::None => None,
+            SelectionMode::Explicit(keys) => Some(format!("selected {}", keys.len())),
+            SelectionMode::Query { excluded } => {
+                if state.last_evaluated_key.is_none()
+                    && matches!(
+                        state.loading_state,
+                        LoadingState::Idle | LoadingState::Loaded
+                    )
+                {
+                    let total = state.items.len().saturating_sub(excluded.len());
+                    return Some(format!("selected {}", total));
+                }
+                if excluded.is_empty() {
+                    Some("all matching selected".to_string())
+                } else {
+                    Some(format!(
+                        "all matching selected · {} excluded",
+                        excluded.len()
+                    ))
+                }
+            }
+        }
+    }
+
+    fn item_is_selected(
+        &self,
+        item: &Item,
+        table_desc: Option<&TableDescription>,
+        selection: Option<&SelectionSnapshot>,
+    ) -> bool {
+        let Some(selection) = selection else {
+            return false;
+        };
+        match selection {
+            SelectionSnapshot::Query { excluded } if excluded.is_empty() => true,
+            SelectionSnapshot::Explicit(_) | SelectionSnapshot::Query { .. } => {
+                let Some(table_desc) = table_desc else {
+                    return false;
+                };
+                let Ok(item_key) = ItemKey::from_item(&item.0, table_desc) else {
+                    return false;
+                };
+                selection.is_selected(&item_key)
+            }
+        }
+    }
+
+    fn selected_loaded_items(
+        &self,
+        selection: &SelectionSnapshot,
+        table_desc: &TableDescription,
+    ) -> Vec<HashMap<String, AttributeValue>> {
+        let state = self.state.borrow();
+        state
+            .items
+            .iter()
+            .filter_map(|item| {
+                let item_key = ItemKey::from_item(&item.0, table_desc).ok()?;
+                if selection.is_selected(&item_key) {
+                    Some(item.0.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn selected_loaded_keys(
+        &self,
+        selection: &SelectionSnapshot,
+        table_desc: &TableDescription,
+    ) -> Vec<ItemKey> {
+        let state = self.state.borrow();
+        state
+            .items
+            .iter()
+            .filter_map(|item| {
+                let item_key = ItemKey::from_item(&item.0, table_desc).ok()?;
+                if selection.is_selected(&item_key) {
+                    Some(item_key)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn selection_summary(&self, selection: &SelectionSnapshot) -> String {
+        match selection {
+            SelectionSnapshot::Explicit(keys) => {
+                let mut lines = vec![format!("{} selected item(s)", keys.len())];
+                for line in keys.iter().take(5).map(ItemKey::summary_line) {
+                    lines.push(line);
+                }
+                if keys.len() > 5 {
+                    lines.push(format!("... and {} more", keys.len() - 5));
+                }
+                lines.join("\n")
+            }
+            SelectionSnapshot::Query { excluded } => {
+                let mut lines = vec!["All items matching the query will be affected.".to_string()];
+                if !excluded.is_empty() {
+                    lines.push(format!("Excluded items: {}", excluded.len()));
+                }
+                lines.join("\n")
+            }
+        }
+    }
+
     fn show_error(&self, ctx: crate::env::WidgetCtx, message: &str) {
         let is_empty = self.state.borrow().items.is_empty();
         if is_empty {
@@ -1533,6 +2108,35 @@ impl QueryWidget {
         ctx.set_popup(popup);
     }
 
+    fn confirm_delete_selection(&self, ctx: crate::env::WidgetCtx) {
+        let Some(selection) = self.selection_snapshot() else {
+            self.show_error(ctx.clone(), "No items selected");
+            return;
+        };
+        let message = self.selection_summary(&selection);
+        let ctx_for_delete = ctx.clone();
+        let popup = Box::new(ConfirmPopup::new_with_action(
+            "Delete selection",
+            message,
+            "Delete",
+            "cancel",
+            ConfirmAction::new(
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                "^d",
+                "delete",
+                "Delete selection",
+            ),
+            move || {
+                ctx_for_delete.emit_self(DeleteSelectionRequest {
+                    selection: selection.clone(),
+                });
+            },
+            self.inner.id(),
+        ));
+        ctx.set_popup(popup);
+    }
+
     fn show_index_picker(&self, ctx: crate::env::WidgetCtx) {
         let targets = match self.index_targets() {
             Ok(targets) if targets.is_empty() => {
@@ -1561,18 +2165,23 @@ impl QueryWidget {
         ctx.set_popup(popup);
     }
 
-    fn show_export_popup(&self, mode: ExportMode, ctx: crate::env::WidgetCtx) {
-        if matches!(mode, ExportMode::Item) && self.selected_item().is_err() {
+    fn show_export_popup(&self, mode: ExportKind, ctx: crate::env::WidgetCtx) {
+        if matches!(mode, ExportKind::Item) && self.selected_item().is_err() {
             self.show_error(ctx.clone(), "No item selected");
             return;
         }
+        if matches!(mode, ExportKind::Selection) && !self.selection_active() {
+            self.show_error(ctx.clone(), "No items selected");
+            return;
+        }
         let path = self.export_path(mode);
-        let fetch_all = false;
+        let option_label = matches!(mode, ExportKind::Results)
+            .then_some(Cow::Borrowed("Fetch all results before exporting"));
         let ctx_for_confirm = ctx.clone();
         let popup = Box::new(ExportPopup::new(
-            mode,
             path,
-            fetch_all,
+            option_label,
+            false,
             move |path, fetch_all| {
                 ctx_for_confirm.emit_self(ExportRequest {
                     mode,
@@ -1602,7 +2211,7 @@ impl QueryWidget {
 
     fn start_export(
         &self,
-        mode: ExportMode,
+        mode: ExportKind,
         path: PathBuf,
         fetch_all: bool,
         ctx: crate::env::WidgetCtx,
@@ -1620,7 +2229,7 @@ impl QueryWidget {
         }
 
         match mode {
-            ExportMode::Item => {
+            ExportKind::Item => {
                 let item = match self.selected_item() {
                     Ok(item) => item,
                     Err(err) => {
@@ -1632,7 +2241,10 @@ impl QueryWidget {
                     export_item_to_path(&item, &path)
                 });
             }
-            ExportMode::Results => {
+            ExportKind::Selection => {
+                self.start_selection_export(path, ctx);
+            }
+            ExportKind::Results => {
                 let items = {
                     let state = self.state.borrow();
                     state
@@ -1679,46 +2291,57 @@ impl QueryWidget {
                     });
                     return;
                 };
-                let initial_count = items.len();
-                let export_id = self.next_export_id();
                 let cancel = Arc::new(AtomicBool::new(false));
-                {
-                    let mut state = self.state.borrow_mut();
-                    state.is_prefetching = true;
-                    state.export_id = Some(export_id);
-                    state.export_cancel = Some(cancel.clone());
-                }
-                self.show_export_progress_toast(ctx.clone(), initial_count);
-                let client = self.client.clone();
-                let table_name = self.table_name.clone();
-                let cached_meta = self.table_meta.borrow().clone();
-                let ctx_for_export = ctx.clone();
-                let request = ExportResultsRequest {
-                    items,
-                    filter,
+                let request = BatchActionStreamRequest {
+                    scope: BatchActionScope::Results { filter },
                     start_key,
                     active_query,
-                    cached_meta,
-                    client,
-                    table_name,
-                    ctx: ctx_for_export.clone(),
-                    path: path.clone(),
-                    cancel,
-                    export_id,
+                    cached_meta: self.table_meta.borrow().clone(),
+                    client: self.client.clone(),
+                    table_name: self.table_name.clone(),
+                    cancel: Some(cancel.clone()),
                 };
-                tokio::spawn(async move {
-                    let result = export_results_full(request)
-                        .await
-                        .map(|count| ExportOutcome { mode, path, count });
-                    ctx_for_export.emit_self(ExportEvent { result });
-                });
+                self.spawn_stream_export(mode, path, items, request, cancel, ctx);
             }
         }
     }
 
+    fn spawn_stream_export(
+        &self,
+        mode: ExportKind,
+        path: PathBuf,
+        items: Vec<HashMap<String, AttributeValue>>,
+        request: BatchActionStreamRequest,
+        cancel: Arc<AtomicBool>,
+        ctx: crate::env::WidgetCtx,
+    ) {
+        let initial_count = items.len();
+        let export_id = self.next_export_id();
+        {
+            let mut state = self.state.borrow_mut();
+            state.is_prefetching = true;
+            state.export_id = Some(export_id);
+            state.export_cancel = Some(cancel);
+        }
+        self.show_export_progress_toast(ctx.clone(), initial_count);
+        let ctx_for_export = ctx.clone();
+        tokio::spawn(async move {
+            let result = export_batch_to_path(
+                path.clone(),
+                items,
+                Some(request),
+                ctx_for_export.clone(),
+                export_id,
+            )
+            .await
+            .map(|count| ExportOutcome { mode, path, count });
+            ctx_for_export.emit_self(ExportEvent { result });
+        });
+    }
+
     fn spawn_export_task<F>(
         &self,
-        mode: ExportMode,
+        mode: ExportKind,
         path: PathBuf,
         ctx: crate::env::WidgetCtx,
         task: F,
@@ -1732,6 +2355,86 @@ impl QueryWidget {
         });
     }
 
+    fn start_selection_export(&self, path: PathBuf, ctx: crate::env::WidgetCtx) {
+        let Some(selection) = self.selection_snapshot() else {
+            self.show_error(ctx.clone(), "No items selected");
+            return;
+        };
+        let table_desc = match self.table_desc() {
+            Ok(table_desc) => table_desc,
+            Err(err) => {
+                self.show_error(ctx.clone(), &err);
+                return;
+            }
+        };
+        let items = self.selected_loaded_items(&selection, &table_desc);
+        let start_key = {
+            let state = self.state.borrow();
+            match &selection {
+                SelectionSnapshot::Query { .. } => state.last_evaluated_key.clone(),
+                SelectionSnapshot::Explicit(_) => None,
+            }
+        };
+        let Some(start_key) = start_key else {
+            self.spawn_export_task(ExportKind::Selection, path, ctx, move |path| {
+                export_results_to_path(&items, &path)
+            });
+            return;
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let request = BatchActionStreamRequest {
+            scope: BatchActionScope::Selection {
+                selection,
+                table_desc: Box::new(table_desc),
+            },
+            start_key,
+            active_query: self.state.borrow().active_query.clone(),
+            cached_meta: None,
+            client: self.client.clone(),
+            table_name: self.table_name.clone(),
+            cancel: Some(cancel.clone()),
+        };
+        self.spawn_stream_export(ExportKind::Selection, path, items, request, cancel, ctx);
+    }
+
+    fn delete_selection(&self, selection: SelectionSnapshot, ctx: crate::env::WidgetCtx) {
+        self.set_loading_state(LoadingState::Loading);
+        ctx.invalidate();
+        let table_desc = match self.table_desc() {
+            Ok(table_desc) => table_desc,
+            Err(err) => {
+                self.set_loading_state(LoadingState::Loaded);
+                self.show_error(ctx.clone(), &err);
+                ctx.invalidate();
+                return;
+            }
+        };
+        let active_query = self.state.borrow().active_query.clone();
+        let start_key = {
+            let state = self.state.borrow();
+            match &selection {
+                SelectionSnapshot::Query { .. } => state.last_evaluated_key.clone(),
+                SelectionSnapshot::Explicit(_) => None,
+            }
+        };
+        let loaded_keys = self.selected_loaded_keys(&selection, &table_desc);
+        let client = self.client.clone();
+        let table_name = self.table_name.clone();
+        tokio::spawn(async move {
+            let request = DeleteSelectionJob {
+                selection,
+                loaded_keys,
+                table_desc,
+                start_key,
+                active_query,
+                client,
+                table_name,
+            };
+            let result = delete_selection_full(request).await;
+            ctx.emit_self(DeleteSelectionEvent { result });
+        });
+    }
+
     fn selected_item(&self) -> Result<HashMap<String, AttributeValue>, String> {
         let state = self.state.borrow();
         let selected = state.table_state.selected();
@@ -1742,14 +2445,14 @@ impl QueryWidget {
         item.ok_or_else(|| "No item selected".to_string())
     }
 
-    fn export_path(&self, mode: ExportMode) -> PathBuf {
+    fn export_path(&self, mode: ExportKind) -> PathBuf {
         let base = export_base_dir();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         match mode {
-            ExportMode::Item => {
+            ExportKind::Item => {
                 let item = self.selected_item().ok();
                 if let Some(item) = item
                     && let Some(name) = self.item_export_file_name(&item)
@@ -1758,7 +2461,8 @@ impl QueryWidget {
                 }
                 base.join(export_file_name(&self.table_name, mode, timestamp))
             }
-            ExportMode::Results => {
+            ExportKind::Selection => base.join(export_file_name(&self.table_name, mode, timestamp)),
+            ExportKind::Results => {
                 let table_desc = self
                     .table_meta
                     .borrow()
@@ -2204,6 +2908,7 @@ impl QueryWidget {
             state.reset_tree_scroll();
             state.tree_line_count = 0;
             state.tree_render_capacity = 0;
+            state.selection.clear();
         }
         ctx.invalidate();
         self.start_query_page(query, None, false, ctx, request_id);
@@ -2301,6 +3006,7 @@ impl QueryWidget {
             state.reset_tree_scroll();
             state.tree_line_count = 0;
             state.tree_render_capacity = 0;
+            state.selection.clear();
         }
         ctx.invalidate();
         self.start_index_query_page(target, None, false, ctx, request_id);
@@ -2530,9 +3236,17 @@ impl QueryWidget {
         } else {
             TABLE_MAX_COLUMN_WIDTH
         };
+        // The selection gutter only exists while a selection is active, so
+        // the data columns reclaim its width when nothing is selected.
+        let selection_active = state.selection.is_active();
+        let selection_budget = if selection_active {
+            SELECTION_GUTTER_WIDTH.saturating_add(TABLE_COLUMN_SPACING as u16)
+        } else {
+            0
+        };
         let (column_offset, fitted_widths) = fit_table_column_widths(
             &natural_widths,
-            area.width,
+            area.width.saturating_sub(selection_budget),
             state.column_offset,
             max_column_width,
         );
@@ -2542,9 +3256,15 @@ impl QueryWidget {
             .saturating_add(rendered_columns)
             .min(all_keys.len());
         let keys = &all_keys[column_offset..column_end];
-        let widths: Vec<Constraint> = fitted_widths.into_iter().map(Constraint::Length).collect();
-        let header =
-            Row::new(keys.iter().map(|key| Line::from(key.clone()))).style(Style::new().bold());
+        let mut widths = Vec::with_capacity(fitted_widths.len() + 1);
+        let mut header_cells = Vec::with_capacity(keys.len() + 1);
+        if selection_active {
+            widths.push(Constraint::Length(SELECTION_GUTTER_WIDTH));
+            header_cells.push(Line::from(""));
+        }
+        widths.extend(fitted_widths.into_iter().map(Constraint::Length));
+        header_cells.extend(keys.iter().map(|key| Line::from(key.clone())));
+        let header = Row::new(header_cells).style(Style::new().bold());
 
         // a block with a right aligned title with the loading state on the right
         let more_marker = if state.last_evaluated_key.is_some() {
@@ -2585,6 +3305,9 @@ impl QueryWidget {
         }
         if state.compact_columns {
             footer_suffix.push_str(" · compact");
+        }
+        if let Some(selection_status) = self.selection_status(state) {
+            footer_suffix.push_str(&format!(" · {selection_status}"));
         }
         let (title, title_bottom, title_style) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => (
@@ -2638,12 +3361,25 @@ impl QueryWidget {
             state.table_state.select(Some(0));
         }
 
+        let selection = state.selection.snapshot();
         let rows: Vec<Row> = visible_indices
             .iter()
             .filter_map(|idx| state.items.get(*idx))
             .map(|item| {
-                let values = keys.iter().map(|key| item.value(key));
-                Row::new(values)
+                let selected = self.item_is_selected(item, table_desc.as_ref(), selection.as_ref());
+                let mut cells: Vec<Line> = Vec::with_capacity(keys.len() + 1);
+                if selection_active {
+                    cells.push(if selected {
+                        Line::from(Span::styled(
+                            SELECTION_BAR,
+                            Style::default().fg(theme.accent()),
+                        ))
+                    } else {
+                        Line::from(" ")
+                    });
+                }
+                cells.extend(keys.iter().map(|key| Line::from(item.value(key))));
+                Row::new(cells)
             })
             .collect();
         let visible_len = rows.len();
@@ -3306,84 +4042,408 @@ fn format_ttl_value(value: &AttributeValue) -> Option<String> {
     Some(dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
 }
 
-struct ExportResultsRequest {
-    items: Vec<HashMap<String, AttributeValue>>,
-    filter: Option<String>,
+const BATCH_ACTION_CANCELED: &str = "Batch action canceled";
+
+enum BatchActionScope {
+    Results {
+        filter: Option<String>,
+    },
+    Selection {
+        selection: SelectionSnapshot,
+        table_desc: Box<TableDescription>,
+    },
+}
+
+impl BatchActionScope {
+    fn table_desc(&self) -> Option<&TableDescription> {
+        match self {
+            Self::Results { .. } => None,
+            Self::Selection { table_desc, .. } => Some(table_desc.as_ref()),
+        }
+    }
+
+    fn collect_page(
+        &self,
+        items: &[HashMap<String, AttributeValue>],
+    ) -> Result<Vec<HashMap<String, AttributeValue>>, String> {
+        match self {
+            Self::Results { filter } => Ok(items
+                .iter()
+                .filter(|item| {
+                    filter
+                        .as_deref()
+                        .map(|needle| item_matches_filter(item, needle))
+                        .unwrap_or(true)
+                })
+                .cloned()
+                .collect()),
+            Self::Selection {
+                selection,
+                table_desc,
+            } => {
+                let mut selected = Vec::new();
+                for item in items {
+                    let item_key = ItemKey::from_item(item, table_desc.as_ref())?;
+                    if selection.is_selected(&item_key) {
+                        selected.push(item.clone());
+                    }
+                }
+                Ok(selected)
+            }
+        }
+    }
+}
+
+struct BatchActionStreamRequest {
+    scope: BatchActionScope,
     start_key: HashMap<String, AttributeValue>,
     active_query: ActiveQuery,
     cached_meta: Option<TableMeta>,
     client: aws_sdk_dynamodb::Client,
     table_name: String,
-    ctx: crate::env::WidgetCtx,
-    path: PathBuf,
-    cancel: Arc<AtomicBool>,
-    export_id: u64,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
-async fn export_results_full(request: ExportResultsRequest) -> Result<usize, String> {
-    let ExportResultsRequest {
-        mut items,
-        filter,
+struct DeleteSelectionJob {
+    selection: SelectionSnapshot,
+    loaded_keys: Vec<ItemKey>,
+    table_desc: TableDescription,
+    start_key: Option<HashMap<String, AttributeValue>>,
+    active_query: ActiveQuery,
+    client: aws_sdk_dynamodb::Client,
+    table_name: String,
+}
+
+fn request_for_active_query(
+    active_query: &ActiveQuery,
+    table_desc: &TableDescription,
+) -> Result<DynamoDbRequest, String> {
+    match active_query {
+        ActiveQuery::Text(query) => {
+            let query = query.trim();
+            if query.is_empty() {
+                Ok(DynamoDbRequest::Scan(ScanBuilder::new()))
+            } else {
+                let expr = parse_query_expression(query, table_desc)?;
+                Ok(DynamoDbRequest::from_expression_and_table(
+                    &expr, table_desc,
+                ))
+            }
+        }
+        ActiveQuery::Index(target) => Ok(request_for_index_target(target)),
+    }
+}
+
+fn batch_action_was_canceled(cancel: Option<&Arc<AtomicBool>>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
+async fn request_for_batch_action(
+    active_query: &ActiveQuery,
+    table_desc: Option<&TableDescription>,
+    cached_meta: Option<TableMeta>,
+    client: aws_sdk_dynamodb::Client,
+    table_name: String,
+) -> Result<DynamoDbRequest, String> {
+    if let Some(table_desc) = table_desc {
+        return request_for_active_query(active_query, table_desc);
+    }
+
+    let request = match active_query {
+        ActiveQuery::Text(query) => {
+            let query = query.trim();
+            if query.is_empty() {
+                return Ok(DynamoDbRequest::Scan(ScanBuilder::new()));
+            }
+            let table_desc = match cached_meta {
+                Some(meta) => meta.table_desc,
+                None => {
+                    fetch_table_meta(client.clone(), table_name.clone())
+                        .await?
+                        .table_desc
+                }
+            };
+            let expr = parse_query_expression(query, &table_desc)?;
+            DynamoDbRequest::from_expression_and_table(&expr, &table_desc)
+        }
+        ActiveQuery::Index(target) => request_for_index_target(target),
+    };
+    Ok(request)
+}
+
+fn batch_action_stream(
+    request: BatchActionStreamRequest,
+) -> ReceiverStream<Result<Vec<HashMap<String, AttributeValue>>, String>> {
+    let (tx, rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        if let Err(err) = stream_batch_action_pages(request, tx.clone()).await {
+            let _ = tx.send(Err(err)).await;
+        }
+    });
+    ReceiverStream::new(rx)
+}
+
+async fn stream_batch_action_pages(
+    request: BatchActionStreamRequest,
+    tx: mpsc::Sender<Result<Vec<HashMap<String, AttributeValue>>, String>>,
+) -> Result<(), String> {
+    let BatchActionStreamRequest {
+        scope,
         start_key,
         active_query,
         cached_meta,
         client,
         table_name,
-        ctx,
-        path,
         cancel,
-        export_id,
     } = request;
 
-    if cancel.load(Ordering::Relaxed) {
-        return Err("Export canceled".to_string());
+    if batch_action_was_canceled(cancel.as_ref()) {
+        return Err(BATCH_ACTION_CANCELED.to_string());
     }
 
-    let request = match active_query {
-        ActiveQuery::Text(query) => {
-            create_request_from_query(
-                &query,
-                cached_meta,
-                client.clone(),
-                table_name.clone(),
-                ctx.clone(),
-            )
-            .await?
-        }
-        ActiveQuery::Index(target) => request_for_index_target(&target),
-    };
-
+    let request = request_for_batch_action(
+        &active_query,
+        scope.table_desc(),
+        cached_meta,
+        client.clone(),
+        table_name.clone(),
+    )
+    .await?;
     let mut next_key = Some(start_key);
     while let Some(start_key) = next_key {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("Export canceled".to_string());
+        if batch_action_was_canceled(cancel.as_ref()) {
+            return Err(BATCH_ACTION_CANCELED.to_string());
         }
         let output = execute_page(&client, &table_name, &request, Some(start_key), None)
             .await
             .map_err(|err| err.to_string())?;
-        for item in output.items() {
-            let keep = filter
-                .as_deref()
-                .map(|needle| item_matches_filter(item, needle))
-                .unwrap_or(true);
-            if keep {
-                items.push(item.clone());
-            }
-        }
-        ctx.emit_self(ExportProgressEvent {
-            export_id,
-            count: items.len(),
-        });
-        if cancel.load(Ordering::Relaxed) {
-            return Err("Export canceled".to_string());
+        let items = scope.collect_page(output.items())?;
+        if !items.is_empty() && tx.send(Ok(items)).await.is_err() {
+            return Ok(());
         }
         next_key = output.last_evaluated_key().cloned();
     }
 
-    if cancel.load(Ordering::Relaxed) {
+    if batch_action_was_canceled(cancel.as_ref()) {
+        return Err(BATCH_ACTION_CANCELED.to_string());
+    }
+    Ok(())
+}
+
+async fn export_batch_to_path(
+    path: PathBuf,
+    items: Vec<HashMap<String, AttributeValue>>,
+    stream_request: Option<BatchActionStreamRequest>,
+    ctx: crate::env::WidgetCtx,
+    export_id: u64,
+) -> Result<usize, String> {
+    let cancel = stream_request
+        .as_ref()
+        .and_then(|request| request.cancel.clone());
+    if batch_action_was_canceled(cancel.as_ref()) {
         return Err("Export canceled".to_string());
     }
-    export_results_to_path(&items, &path)
+
+    let mut writer = StreamedJsonArrayWriter::create(&path)?;
+    writer.write_items(&items)?;
+    let mut count = items.len();
+    if let Some(request) = stream_request {
+        let mut stream = batch_action_stream(request);
+        while let Some(batch) = stream.next().await {
+            let items = batch.map_err(|err| {
+                if err == BATCH_ACTION_CANCELED {
+                    "Export canceled".to_string()
+                } else {
+                    err
+                }
+            })?;
+            writer.write_items(&items)?;
+            count = count.saturating_add(items.len());
+            ctx.emit_self(ExportProgressEvent { export_id, count });
+        }
+    }
+    if batch_action_was_canceled(cancel.as_ref()) {
+        return Err("Export canceled".to_string());
+    }
+    writer.finish()
+}
+
+async fn delete_selection_full(request: DeleteSelectionJob) -> Result<usize, String> {
+    let DeleteSelectionJob {
+        selection,
+        loaded_keys,
+        table_desc,
+        start_key,
+        active_query,
+        client,
+        table_name,
+    } = request;
+
+    let keys = match &selection {
+        SelectionSnapshot::Explicit(keys) => keys.iter().cloned().collect::<Vec<_>>(),
+        SelectionSnapshot::Query { .. } => loaded_keys,
+    };
+
+    let mut deleted = batch_delete_keys(&client, &table_name, &keys).await?;
+    if let Some(start_key) = start_key {
+        let request = BatchActionStreamRequest {
+            scope: BatchActionScope::Selection {
+                selection,
+                table_desc: Box::new(table_desc.clone()),
+            },
+            start_key,
+            active_query,
+            cached_meta: None,
+            client: client.clone(),
+            table_name: table_name.clone(),
+            cancel: None,
+        };
+        let mut stream = batch_action_stream(request);
+        while let Some(batch) = stream.next().await {
+            let items = batch?;
+            let mut keys = Vec::with_capacity(items.len());
+            for item in &items {
+                keys.push(ItemKey::from_item(item, &table_desc)?);
+            }
+            deleted = deleted.saturating_add(batch_delete_keys(&client, &table_name, &keys).await?);
+        }
+    }
+
+    Ok(deleted)
+}
+
+async fn batch_delete_keys(
+    client: &aws_sdk_dynamodb::Client,
+    table_name: &str,
+    keys: &[ItemKey],
+) -> Result<usize, String> {
+    let mut deleted = 0usize;
+    for chunk in keys.chunks(25) {
+        let mut write_requests = Vec::with_capacity(chunk.len());
+        for key in chunk {
+            let delete_request = DeleteRequest::builder()
+                .set_key(Some(key.to_key_map()))
+                .build()
+                .map_err(|err| err.to_string())?;
+            write_requests.push(
+                WriteRequest::builder()
+                    .delete_request(delete_request)
+                    .build(),
+            );
+        }
+
+        let mut request_items = HashMap::new();
+        request_items.insert(table_name.to_string(), write_requests);
+        let mut pending = request_items;
+        loop {
+            let pending_count = pending
+                .get(table_name)
+                .map(|items| items.len())
+                .unwrap_or(0);
+            let span = tracing::trace_span!(
+                "BatchWriteItem",
+                table = %table_name,
+                items = pending_count
+            );
+            let result = send_dynamo_request(
+                span,
+                || {
+                    client
+                        .batch_write_item()
+                        .set_request_items(Some(pending.clone()))
+                        .send()
+                },
+                format_sdk_error,
+            )
+            .await;
+            let output = result.map_err(|err| format_sdk_error(&err))?;
+            let unprocessed = output.unprocessed_items().cloned().unwrap_or_default();
+            if unprocessed.is_empty() {
+                break;
+            }
+            pending = unprocessed;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        deleted = deleted.saturating_add(chunk.len());
+    }
+    Ok(deleted)
+}
+
+struct StreamedJsonArrayWriter {
+    path: PathBuf,
+    temp_path: PathBuf,
+    writer: Option<BufWriter<File>>,
+    count: usize,
+}
+
+impl StreamedJsonArrayWriter {
+    fn create(path: &Path) -> Result<Self, String> {
+        ensure_export_parent(path)?;
+        let temp_path = export_temp_path(path);
+        let file = File::create(&temp_path).map_err(|err| err.to_string())?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            temp_path,
+            writer: Some(BufWriter::new(file)),
+            count: 0,
+        })
+    }
+
+    fn writer(&mut self) -> Result<&mut BufWriter<File>, String> {
+        self.writer
+            .as_mut()
+            .ok_or_else(|| "Export writer is closed".to_string())
+    }
+
+    fn write_items(&mut self, items: &[HashMap<String, AttributeValue>]) -> Result<(), String> {
+        for item in items {
+            if self.count == 0 {
+                self.writer()?
+                    .write_all(b"[\n")
+                    .map_err(|err| err.to_string())?;
+            } else {
+                self.writer()?
+                    .write_all(b",\n")
+                    .map_err(|err| err.to_string())?;
+            }
+            let value = json::to_json(item)
+                .map_err(|err| format!("Failed to convert item {}: {err}", self.count + 1))?;
+            write_indented_json_value(self.writer()?, &value)?;
+            self.count += 1;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<usize, String> {
+        let count = self.count;
+        let mut writer = self
+            .writer
+            .take()
+            .ok_or_else(|| "Export writer is closed".to_string())?;
+        if count == 0 {
+            writer.write_all(b"[]").map_err(|err| err.to_string())?;
+        } else {
+            writer.write_all(b"\n]").map_err(|err| err.to_string())?;
+        }
+        writer.flush().map_err(|err| err.to_string())?;
+        drop(writer);
+        #[cfg(windows)]
+        if self.path.exists() {
+            fs::remove_file(&self.path).map_err(|err| err.to_string())?;
+        }
+        fs::rename(&self.temp_path, &self.path).map_err(|err| err.to_string())?;
+        Ok(count)
+    }
+}
+
+impl Drop for StreamedJsonArrayWriter {
+    fn drop(&mut self) {
+        self.writer.take();
+        if !self.temp_path.as_os_str().is_empty() {
+            let _ = fs::remove_file(&self.temp_path);
+        }
+    }
 }
 
 fn export_item_to_path(
@@ -3416,13 +4476,48 @@ fn items_to_json_values(
     Ok(values)
 }
 
-fn write_json_to_path(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+fn write_indented_json_value<W>(writer: &mut W, value: &serde_json::Value) -> Result<(), String>
+where
+    W: Write,
+{
+    let payload = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
+    for (idx, line) in payload.lines().enumerate() {
+        if idx > 0 {
+            writer.write_all(b"\n").map_err(|err| err.to_string())?;
+        }
+        writer.write_all(b"  ").map_err(|err| err.to_string())?;
+        writer
+            .write_all(line.as_bytes())
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn ensure_export_parent(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent)
             .map_err(|err| format!("Failed to create export directory: {err}"))?;
     }
+    Ok(())
+}
+
+fn export_temp_path(path: &Path) -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "dynamate-export.json".to_string());
+    path.with_file_name(format!(".{file_name}.{pid}.{timestamp}.tmp"))
+}
+
+fn write_json_to_path(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    ensure_export_parent(path)?;
     let payload = serde_json::to_string_pretty(value).map_err(|err| err.to_string())?;
     fs::write(path, payload).map_err(|err| err.to_string())?;
     Ok(())
@@ -3435,11 +4530,12 @@ fn export_base_dir() -> PathBuf {
     }
 }
 
-fn export_file_name(table_name: &str, mode: ExportMode, timestamp_ms: u128) -> String {
+fn export_file_name(table_name: &str, mode: ExportKind, timestamp_ms: u128) -> String {
     let table = sanitize_export_component(table_name);
     let label = match mode {
-        ExportMode::Item => "item",
-        ExportMode::Results => "results",
+        ExportKind::Item => "item",
+        ExportKind::Selection => "selection",
+        ExportKind::Results => "results",
     };
     format!("dynamate-export-{}-{}-{}.json", table, label, timestamp_ms)
 }
@@ -3869,6 +4965,24 @@ mod tests {
             .build()
     }
 
+    fn table_description_with_hash_and_range(hash_key: &str, range_key: &str) -> TableDescription {
+        let hash = KeySchemaElement::builder()
+            .attribute_name(hash_key)
+            .key_type(KeyType::Hash)
+            .build()
+            .expect("hash key schema should be valid");
+        let range = KeySchemaElement::builder()
+            .attribute_name(range_key)
+            .key_type(KeyType::Range)
+            .build()
+            .expect("range key schema should be valid");
+        TableDescription::builder()
+            .table_name("demo")
+            .key_schema(hash)
+            .key_schema(range)
+            .build()
+    }
+
     #[test]
     fn sanitize_export_component_rewrites_invalid_chars() {
         assert_eq!(sanitize_export_component("My Table"), "my_table");
@@ -3891,8 +5005,43 @@ mod tests {
 
     #[test]
     fn export_file_name_is_stable() {
-        let name = export_file_name("My Table", ExportMode::Results, 12345);
+        let name = export_file_name("My Table", ExportKind::Results, 12345);
         assert_eq!(name, "dynamate-export-my_table-results-12345.json");
+    }
+
+    #[test]
+    fn export_selection_file_name_is_stable() {
+        let name = export_file_name("My Table", ExportKind::Selection, 12345);
+        assert_eq!(name, "dynamate-export-my_table-selection-12345.json");
+    }
+
+    #[test]
+    fn streamed_json_array_writer_preserves_array_shape() {
+        let path = env::temp_dir().join(format!(
+            "dynamate-export-test-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let first = HashMap::from([("PK".to_string(), AttributeValue::S("USER#1".to_string()))]);
+        let second = HashMap::from([("PK".to_string(), AttributeValue::S("USER#2".to_string()))]);
+
+        let mut writer = StreamedJsonArrayWriter::create(&path).expect("writer should be created");
+        writer
+            .write_items(&[first, second])
+            .expect("items should be written");
+        let count = writer.finish().expect("writer should finish");
+
+        let payload = fs::read_to_string(&path).expect("export file should exist");
+        let value: serde_json::Value =
+            serde_json::from_str(&payload).expect("export payload should be json");
+
+        assert_eq!(count, 2);
+        assert_eq!(value.as_array().map(Vec::len), Some(2));
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -3961,6 +5110,107 @@ mod tests {
         let query = ActiveQuery::Text("foo".to_string());
         let normalized = normalized_query(&query, None);
         assert_eq!(normalized.as_deref(), Some("foo"));
+    }
+
+    #[test]
+    fn item_key_round_trips_to_dynamodb_key_map() {
+        let table_desc = table_description_with_hash_and_range("PK", "SK");
+        let mut item = HashMap::new();
+        item.insert("PK".to_string(), AttributeValue::S("USER#1".to_string()));
+        item.insert("SK".to_string(), AttributeValue::N("42".to_string()));
+        item.insert("name".to_string(), AttributeValue::S("Ada".to_string()));
+
+        let item_key = ItemKey::from_item(&item, &table_desc).expect("item key should parse");
+        let key_map = item_key.to_key_map();
+
+        assert_eq!(
+            key_map.get("PK"),
+            Some(&AttributeValue::S("USER#1".to_string()))
+        );
+        assert_eq!(
+            key_map.get("SK"),
+            Some(&AttributeValue::N("42".to_string()))
+        );
+        assert_eq!(key_map.len(), 2);
+    }
+
+    #[test]
+    fn query_all_selection_respects_exclusions() {
+        let selected = ItemKey {
+            hash_key: "PK".to_string(),
+            hash_value: KeyValue::String("USER#1".to_string()),
+            range: None,
+        };
+        let excluded = ItemKey {
+            hash_key: "PK".to_string(),
+            hash_value: KeyValue::String("USER#2".to_string()),
+            range: None,
+        };
+        let selection = SelectionSnapshot::Query {
+            excluded: HashSet::from([excluded.clone()]),
+        };
+
+        assert!(selection.is_selected(&selected));
+        assert!(!selection.is_selected(&excluded));
+    }
+
+    fn item_key(value: &str) -> ItemKey {
+        ItemKey {
+            hash_key: "PK".to_string(),
+            hash_value: KeyValue::String(value.to_string()),
+            range: None,
+        }
+    }
+
+    #[test]
+    fn invert_loaded_from_none_selects_all_loaded() {
+        let loaded = [item_key("A"), item_key("B")];
+        let mut selection = SelectionMode::None;
+        selection.invert_loaded(loaded.clone());
+        match selection {
+            SelectionMode::Explicit(keys) => {
+                assert_eq!(keys, loaded.into_iter().collect());
+            }
+            other => panic!("expected Explicit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invert_loaded_toggles_explicit_membership() {
+        let (a, b) = (item_key("A"), item_key("B"));
+        let mut selection = SelectionMode::Explicit(HashSet::from([a.clone()]));
+        // A was selected (drops out), B was not (gets added).
+        selection.invert_loaded([a.clone(), b.clone()]);
+        match selection {
+            SelectionMode::Explicit(keys) => {
+                assert_eq!(keys, HashSet::from([b]));
+            }
+            other => panic!("expected Explicit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invert_loaded_collapses_to_none_when_empty() {
+        let a = item_key("A");
+        let mut selection = SelectionMode::Explicit(HashSet::from([a.clone()]));
+        selection.invert_loaded([a]);
+        assert!(matches!(selection, SelectionMode::None));
+    }
+
+    #[test]
+    fn invert_loaded_toggles_query_exclusions() {
+        let (a, b) = (item_key("A"), item_key("B"));
+        // A already excluded; inverting flips A back in and excludes B.
+        let mut selection = SelectionMode::Query {
+            excluded: HashSet::from([a.clone()]),
+        };
+        selection.invert_loaded([a, b.clone()]);
+        match selection {
+            SelectionMode::Query { excluded } => {
+                assert_eq!(excluded, HashSet::from([b]));
+            }
+            other => panic!("expected Query, got {other:?}"),
+        }
     }
 
     #[test]

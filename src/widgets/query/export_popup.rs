@@ -21,12 +21,6 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExportMode {
-    Item,
-    Results,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
     Directory,
     Filename,
@@ -144,10 +138,10 @@ fn char_to_byte_idx(value: &str, char_idx: usize) -> usize {
 
 pub(crate) struct ExportPopup {
     inner: WidgetInner,
-    mode: ExportMode,
     dir_input: RefCell<FormInput>,
     file_input: RefCell<FormInput>,
-    fetch_all: Cell<bool>,
+    option_label: Option<Cow<'static, str>>,
+    option_enabled: Cell<bool>,
     focus: Cell<Focus>,
     on_confirm: Box<dyn Fn(PathBuf, bool) + Send + 'static>,
     help_entries: Vec<help::Entry<'static>>,
@@ -156,9 +150,9 @@ pub(crate) struct ExportPopup {
 impl ExportPopup {
     const LABEL_WIDTH: u16 = 10;
     pub(crate) fn new(
-        mode: ExportMode,
         path: PathBuf,
-        fetch_all: bool,
+        option_label: Option<Cow<'static, str>>,
+        option_enabled: bool,
         on_confirm: impl Fn(PathBuf, bool) + Send + 'static,
         parent: crate::env::WidgetId,
     ) -> Self {
@@ -189,13 +183,13 @@ impl ExportPopup {
                 alt: None,
             },
         ];
-        if matches!(mode, ExportMode::Results) {
+        if let Some(label) = option_label.clone() {
             help_entries.insert(
                 1,
                 help::Entry {
                     keys: Cow::Borrowed("space/f"),
                     short: Cow::Borrowed("toggle"),
-                    long: Cow::Borrowed("Fetch all results"),
+                    long: label,
                     ctrl: None,
                     shift: None,
                     alt: None,
@@ -204,10 +198,10 @@ impl ExportPopup {
         }
         Self {
             inner: WidgetInner::new::<Self>(parent),
-            mode,
             dir_input: RefCell::new(FormInput::new(dir)),
             file_input: RefCell::new(FormInput::new(file)),
-            fetch_all: Cell::new(fetch_all),
+            option_label,
+            option_enabled: Cell::new(option_enabled),
             focus: Cell::new(Focus::Export),
             on_confirm: Box::new(on_confirm),
             help_entries,
@@ -215,7 +209,7 @@ impl ExportPopup {
     }
 
     fn next_focus(&self) {
-        let has_checkbox = matches!(self.mode, ExportMode::Results);
+        let has_checkbox = self.option_label.is_some();
         let next = match (self.focus.get(), has_checkbox) {
             (Focus::Directory, _) => Focus::Filename,
             (Focus::Filename, true) => Focus::Checkbox,
@@ -228,7 +222,7 @@ impl ExportPopup {
     }
 
     fn prev_focus(&self) {
-        let has_checkbox = matches!(self.mode, ExportMode::Results);
+        let has_checkbox = self.option_label.is_some();
         let prev = match (self.focus.get(), has_checkbox) {
             (Focus::Directory, _) => Focus::Cancel,
             (Focus::Filename, _) => Focus::Directory,
@@ -240,9 +234,9 @@ impl ExportPopup {
         self.focus.set(prev);
     }
 
-    fn toggle_fetch_all(&self) {
-        if matches!(self.mode, ExportMode::Results) {
-            self.fetch_all.set(!self.fetch_all.get());
+    fn toggle_option(&self) {
+        if self.option_label.is_some() {
+            self.option_enabled.set(!self.option_enabled.get());
         }
     }
 
@@ -312,7 +306,7 @@ impl ExportPopup {
         }
     }
 
-    fn render_checkbox_row(&self, frame: &mut Frame, area: Rect, focused: bool, theme: &Theme) {
+    fn render_option_row(&self, frame: &mut Frame, area: Rect, focused: bool, theme: &Theme) {
         let label_area = Rect::new(area.x, area.y, Self::LABEL_WIDTH, 1);
         frame.render_widget(Paragraph::new(""), label_area);
         let input_area = Rect::new(
@@ -321,8 +315,15 @@ impl ExportPopup {
             area.width.saturating_sub(Self::LABEL_WIDTH + 1),
             1,
         );
-        let checked = if self.fetch_all.get() { "[x]" } else { "[ ]" };
-        let text = format!("{checked} Fetch all results before exporting");
+        let checked = if self.option_enabled.get() {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let text = format!(
+            "{checked} {}",
+            self.option_label.as_deref().unwrap_or_default()
+        );
         let style = if focused {
             Style::default()
                 .fg(theme.accent())
@@ -396,7 +397,7 @@ impl crate::widgets::Widget for ExportPopup {
 
         let mut rows = vec![Constraint::Length(1), Constraint::Length(1)];
         let mut checkbox_row = None;
-        if matches!(self.mode, ExportMode::Results) {
+        if self.option_label.is_some() {
             rows.push(Constraint::Length(1));
             rows.push(Constraint::Length(1));
             checkbox_row = Some(rows.len() - 1);
@@ -426,7 +427,7 @@ impl crate::widgets::Widget for ExportPopup {
         );
 
         if let Some(row) = checkbox_row {
-            self.render_checkbox_row(
+            self.render_option_row(
                 frame,
                 layout[row],
                 self.focus.get() == Focus::Checkbox,
@@ -481,7 +482,7 @@ impl crate::widgets::Widget for ExportPopup {
                     key.code,
                     KeyCode::Char(' ') | KeyCode::Char('f') | KeyCode::Enter
                 ) {
-                    self.toggle_fetch_all();
+                    self.toggle_option();
                     ctx.invalidate();
                     return true;
                 }
@@ -505,7 +506,7 @@ impl crate::widgets::Widget for ExportPopup {
                 if matches!(key.code, KeyCode::Enter) {
                     if self.focus.get() == Focus::Export && self.export_enabled() {
                         let path = self.build_path();
-                        (self.on_confirm)(path, self.fetch_all.get());
+                        (self.on_confirm)(path, self.option_enabled.get());
                         ctx.dismiss_popup();
                         ctx.invalidate();
                         return true;
@@ -524,11 +525,7 @@ impl crate::widgets::Widget for ExportPopup {
 
 impl Popup for ExportPopup {
     fn rect(&self, area: Rect) -> Rect {
-        let content_height = if matches!(self.mode, ExportMode::Results) {
-            7
-        } else {
-            5
-        };
+        let content_height = if self.option_label.is_some() { 7 } else { 5 };
         let min_height = content_height as u16 + 4;
         let height = min_height.min(area.height.saturating_sub(2));
         let min_width = 44;
