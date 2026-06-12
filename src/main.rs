@@ -95,6 +95,10 @@ struct Cli {
     #[arg(long, requires = "table")]
     query: Option<String>,
 
+    /// Disable all write operations (safe mode for production)
+    #[arg(long)]
+    readonly: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -117,6 +121,7 @@ async fn main() -> Result<()> {
 
     color_eyre::install()?;
     let cli = <Cli as clap::Parser>::parse();
+    dynamate::readonly::set(cli.readonly);
     let client = Arc::new(aws::new_client(cli.endpoint_url.as_deref()).await?);
     aws::validate_connection(&client).await?;
 
@@ -127,6 +132,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::CreateTable(args)) => {
+            if cli.readonly {
+                eprintln!("{}", dynamate::readonly::REJECT_MESSAGE);
+                std::process::exit(1);
+            }
             subcommands::create_table::command(&client, args).await?;
             Ok(())
         }
@@ -545,13 +554,31 @@ impl App {
             Constraint::Length(help_height),
         ]);
         let [title_area, body_area, footer_area] = frame.area().layout(&layout);
-        let title = Line::styled(
-            "dynamate",
-            Style::default()
-                .fg(theme.accent())
-                .add_modifier(Modifier::BOLD),
-        )
-        .centered();
+        let title = if dynamate::readonly::is_enabled() {
+            Line::from(vec![
+                Span::styled(
+                    "dynamate",
+                    Style::default()
+                        .fg(theme.accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "  READ-ONLY",
+                    Style::default()
+                        .fg(theme.warning())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+            .centered()
+        } else {
+            Line::styled(
+                "dynamate",
+                Style::default()
+                    .fg(theme.accent())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .centered()
+        };
         frame.render_widget(title, title_area);
         if let Some(line) = loading_line {
             let width = line.width().min(title_area.width as usize);
@@ -1266,6 +1293,18 @@ mod tests {
         assert_eq!(cli.table.as_deref(), Some("orders"));
         assert_eq!(cli.query.as_deref(), Some("status = OPEN"));
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn readonly_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["dynamate"]).unwrap();
+        assert!(!cli.readonly);
+    }
+
+    #[test]
+    fn readonly_flag_parses() {
+        let cli = Cli::try_parse_from(["dynamate", "--readonly"]).unwrap();
+        assert!(cli.readonly);
     }
 
     #[test]

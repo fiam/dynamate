@@ -2459,6 +2459,10 @@ impl QueryWidget {
     }
 
     fn confirm_delete(&self, ctx: crate::env::WidgetCtx) {
+        if dynamate::readonly::is_enabled() {
+            show_readonly_toast(&ctx);
+            return;
+        }
         let target = match self.delete_target() {
             Ok(target) => target,
             Err(err) => {
@@ -2483,6 +2487,10 @@ impl QueryWidget {
     }
 
     fn confirm_delete_selection(&self, ctx: crate::env::WidgetCtx) {
+        if dynamate::readonly::is_enabled() {
+            show_readonly_toast(&ctx);
+            return;
+        }
         let Some(selection) = self.selection_snapshot() else {
             self.show_error(ctx.clone(), "No items selected");
             return;
@@ -2772,6 +2780,10 @@ impl QueryWidget {
     }
 
     fn delete_selection(&self, selection: SelectionSnapshot, ctx: crate::env::WidgetCtx) {
+        if dynamate::readonly::is_enabled() {
+            show_readonly_toast(&ctx);
+            return;
+        }
         self.set_loading_state(LoadingState::Loading);
         ctx.invalidate();
         let table_desc = match self.table_desc() {
@@ -2972,6 +2984,10 @@ impl QueryWidget {
     }
 
     fn delete_item(&self, key: HashMap<String, AttributeValue>, ctx: crate::env::WidgetCtx) {
+        if dynamate::readonly::is_enabled() {
+            show_readonly_toast(&ctx);
+            return;
+        }
         self.set_loading_state(LoadingState::Loading);
         ctx.invalidate();
         let client = self.client.clone();
@@ -3986,6 +4002,10 @@ impl QueryWidget {
     }
 
     fn edit_selected(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
+        if dynamate::readonly::is_enabled() {
+            show_readonly_toast(&ctx);
+            return;
+        }
         let (item, active_query, reopen_tree) = {
             let state = self.state.borrow();
             let selected = state.table_state.selected();
@@ -4078,6 +4098,10 @@ impl QueryWidget {
     }
 
     fn create_item(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
+        if dynamate::readonly::is_enabled() {
+            show_readonly_toast(&ctx);
+            return;
+        }
         let active_query = self.state.borrow().active_query.clone();
         let initial = match format {
             EditorFormat::Plain => "{}\n".to_string(),
@@ -4171,6 +4195,10 @@ impl QueryWidget {
         ctx: crate::env::WidgetCtx,
         reopen_tree: Option<usize>,
     ) {
+        if dynamate::readonly::is_enabled() {
+            show_readonly_toast(&ctx);
+            return;
+        }
         self.set_loading_state(LoadingState::Loading);
         ctx.invalidate();
         let client = self.client.clone();
@@ -4203,6 +4231,15 @@ impl QueryWidget {
             });
         });
     }
+}
+
+fn show_readonly_toast(ctx: &crate::env::WidgetCtx) {
+    ctx.show_toast(Toast {
+        message: dynamate::readonly::REJECT_MESSAGE.to_string(),
+        kind: ToastKind::Warning,
+        duration: dynamate::readonly::TOAST_DURATION,
+        action: None,
+    });
 }
 
 fn request_for_index_target(target: &index_picker::IndexTarget) -> DynamoDbRequest {

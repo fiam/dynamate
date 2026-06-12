@@ -709,6 +709,10 @@ impl TablePickerWidget {
     }
 
     fn delete_table(&self, table_name: String, ctx: crate::env::WidgetCtx) {
+        if dynamate::readonly::is_enabled() {
+            show_readonly_toast(&ctx);
+            return;
+        }
         {
             let mut state = self.state.borrow_mut();
             state.loading_state = LoadingState::Busy(format!("Deleting {table_name}..."));
@@ -733,6 +737,10 @@ impl TablePickerWidget {
     }
 
     fn purge_table(&self, table_name: String, ctx: crate::env::WidgetCtx) {
+        if dynamate::readonly::is_enabled() {
+            show_readonly_toast(&ctx);
+            return;
+        }
         {
             let mut state = self.state.borrow_mut();
             state.loading_state = LoadingState::Busy(format!("Purging {table_name}..."));
@@ -747,9 +755,22 @@ impl TablePickerWidget {
     }
 
     fn show_create_table(&self, ctx: crate::env::WidgetCtx) {
+        if dynamate::readonly::is_enabled() {
+            show_readonly_toast(&ctx);
+            return;
+        }
         let popup = Box::new(CreateTablePopup::new(self.client.clone(), self.inner.id()));
         ctx.set_popup(popup);
     }
+}
+
+fn show_readonly_toast(ctx: &crate::env::WidgetCtx) {
+    ctx.show_toast(Toast {
+        message: dynamate::readonly::REJECT_MESSAGE.to_string(),
+        kind: ToastKind::Warning,
+        duration: dynamate::readonly::TOAST_DURATION,
+        action: None,
+    });
 }
 
 impl crate::widgets::Widget for TablePickerWidget {
@@ -1098,11 +1119,19 @@ impl crate::widgets::Widget for TablePickerWidget {
                     return true;
                 }
                 KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.confirm_table_action(ctx, TableAction::Delete);
+                    if dynamate::readonly::is_enabled() {
+                        show_readonly_toast(&ctx);
+                    } else {
+                        self.confirm_table_action(ctx, TableAction::Delete);
+                    }
                     return true;
                 }
                 KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.confirm_table_action(ctx, TableAction::Purge);
+                    if dynamate::readonly::is_enabled() {
+                        show_readonly_toast(&ctx);
+                    } else {
+                        self.confirm_table_action(ctx, TableAction::Purge);
+                    }
                     return true;
                 }
                 KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
