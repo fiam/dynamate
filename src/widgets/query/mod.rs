@@ -1,4 +1,5 @@
 mod completion;
+mod expr_format;
 mod export_popup;
 mod index_picker;
 mod input;
