@@ -29,11 +29,14 @@ use crossterm::terminal::{
 };
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     prelude::Widget,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState},
+    widgets::{
+        Block, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        StatefulWidget, Table, TableState,
+    },
 };
 
 use super::{
@@ -890,6 +893,63 @@ impl crate::widgets::Widget for QueryWidget {
     fn is_loading(&self) -> bool {
         let state = self.state.borrow();
         matches!(state.loading_state, LoadingState::Loading) || state.is_prefetching
+    }
+
+    fn status(&self) -> crate::widgets::StatusInfo {
+        let state = self.state.borrow();
+
+        // Title-bar context: table name · region · approximate item count.
+        let mut context_parts = vec![self.table_name.clone()];
+        if let Some(region) = env::var("AWS_REGION")
+            .or_else(|_| env::var("AWS_DEFAULT_REGION"))
+            .ok()
+            .filter(|r| !r.is_empty())
+        {
+            context_parts.push(region);
+        }
+        if let Some(count) = self
+            .table_meta
+            .borrow()
+            .as_ref()
+            .and_then(|meta| meta.table_desc.item_count())
+        {
+            context_parts.push(format!("~{count} items"));
+        }
+        let context = Some(context_parts.join(" · "));
+
+        // Mode chip reflects the dominant interaction state.
+        let mode = if matches!(state.loading_state, LoadingState::Error(_)) {
+            "ERROR"
+        } else if state.show_tree {
+            "ITEM"
+        } else if state.input.is_active() {
+            "QUERY"
+        } else if state.filter.is_active() {
+            "FILTER"
+        } else if state.selection.is_active() {
+            "SELECT"
+        } else if matches!(state.loading_state, LoadingState::Loading) {
+            "LOADING"
+        } else {
+            "BROWSE"
+        };
+
+        // Stats: result count plus any selection summary (skipped in tree view).
+        let stats = if state.show_tree {
+            None
+        } else {
+            let mut parts = vec![format!("{} results", state.filtered_indices.len())];
+            if let Some(selection) = self.selection_status(&state) {
+                parts.push(selection);
+            }
+            Some(parts.join(" · "))
+        };
+
+        crate::widgets::StatusInfo {
+            context,
+            mode: Some(mode.to_string()),
+            stats,
+        }
     }
 
     fn esc_cancels_export(&self) -> bool {
@@ -3654,7 +3714,12 @@ impl QueryWidget {
         }
         widths.extend(fitted_widths.into_iter().map(Constraint::Length));
         header_cells.extend(keys.iter().map(|key| Line::from(key.clone())));
-        let header = Row::new(header_cells).style(Style::new().bold());
+        let header = Row::new(header_cells).style(
+            Style::new()
+                .bold()
+                .bg(theme.header_bg())
+                .fg(theme.text()),
+        );
 
         // a block with a right aligned title with the loading state on the right
         let more_marker = if state.last_evaluated_key.is_some() {
@@ -3752,10 +3817,12 @@ impl QueryWidget {
         }
 
         let selection = state.selection.snapshot();
+        let row_offset = state.table_state.offset();
         let rows: Vec<Row> = visible_indices
             .iter()
             .filter_map(|idx| state.items.get(*idx))
-            .map(|item| {
+            .enumerate()
+            .map(|(row_pos, item)| {
                 let selected = self.item_is_selected(item, table_desc.as_ref(), selection.as_ref());
                 let mut cells: Vec<Line> = Vec::with_capacity(keys.len() + 1);
                 if selection_active {
@@ -3769,7 +3836,15 @@ impl QueryWidget {
                     });
                 }
                 cells.extend(keys.iter().map(|key| Line::from(item.value(key))));
-                Row::new(cells)
+                // Zebra striping keyed on the absolute row index so the bands
+                // stay stable while scrolling. Even rows keep the block bg
+                // (panel_bg_alt); odd rows get the subtle stripe.
+                let row = Row::new(cells);
+                if (row_offset + row_pos) % 2 == 1 {
+                    row.style(Style::default().bg(theme.row_stripe()))
+                } else {
+                    row
+                }
             })
             .collect();
         let visible_len = rows.len();
@@ -3777,7 +3852,7 @@ impl QueryWidget {
             .block(block)
             .header(header)
             .highlight_spacing(HighlightSpacing::Always)
-            .highlight_symbol(">>")
+            .highlight_symbol("❯ ")
             .row_highlight_style(
                 Style::default()
                     .bg(theme.selection_bg())
@@ -3791,6 +3866,23 @@ impl QueryWidget {
         let mut render_state = TableState::default();
         render_state.select(selected_visible);
         StatefulWidget::render(table, area, frame.buffer_mut(), &mut render_state);
+
+        // Vertical scrollbar on the right border, shown only when the results
+        // overflow the viewport. Inset by the block's top/bottom borders so the
+        // track lines up with the data rows.
+        if total > max_rows {
+            let mut sb_state = ScrollbarState::new(total).position(state.table_state.offset());
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::default().fg(theme.scrollbar()))
+                .track_style(Style::default().fg(theme.border()));
+            let sb_area = area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            });
+            StatefulWidget::render(scrollbar, sb_area, frame.buffer_mut(), &mut sb_state);
+        }
 
         let filter_value = state.filter.value.trim();
         if !filter_value.is_empty() {

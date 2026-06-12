@@ -18,6 +18,9 @@ pub struct Theme {
     accent: Color,
     accent_alt: Color,
     border: Color,
+    header_bg: Color,
+    row_stripe: Color,
+    scrollbar: Color,
     selection_bg: Color,
     selection_fg: Color,
     success: Color,
@@ -58,6 +61,9 @@ impl Theme {
             accent: Color::Rgb(92, 207, 230),
             accent_alt: Color::Rgb(242, 177, 110),
             border: Color::Rgb(65, 76, 92),
+            header_bg: Color::Rgb(30, 37, 46),
+            row_stripe: Color::Rgb(26, 32, 40),
+            scrollbar: Color::Rgb(88, 100, 118),
             selection_bg: Color::Rgb(37, 50, 74),
             selection_fg: Color::Rgb(230, 237, 243),
             success: Color::Rgb(158, 206, 106),
@@ -76,6 +82,9 @@ impl Theme {
             accent: Color::Rgb(31, 119, 180),
             accent_alt: Color::Rgb(180, 83, 9),
             border: Color::Rgb(156, 163, 175),
+            header_bg: Color::Rgb(229, 231, 235),
+            row_stripe: Color::Rgb(240, 241, 243),
+            scrollbar: Color::Rgb(140, 148, 160),
             selection_bg: Color::Rgb(219, 234, 254),
             selection_fg: Color::Rgb(15, 23, 42),
             success: Color::Rgb(47, 158, 68),
@@ -114,6 +123,18 @@ impl Theme {
 
     pub fn border(&self) -> Color {
         self.border
+    }
+
+    pub fn header_bg(&self) -> Color {
+        self.header_bg
+    }
+
+    pub fn row_stripe(&self) -> Color {
+        self.row_stripe
+    }
+
+    pub fn scrollbar(&self) -> Color {
+        self.scrollbar
     }
 
     pub fn selection_bg(&self) -> Color {

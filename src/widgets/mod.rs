@@ -24,6 +24,18 @@ pub struct NavContext {
     pub back_title: Option<String>,
 }
 
+/// Information the active widget can surface to the app-wide chrome (title bar
+/// and status bar). All fields are optional; widgets fill in what they have.
+#[derive(Default, Clone)]
+pub struct StatusInfo {
+    /// Right-aligned context for the title bar, e.g. "my-table · us-east-1 · ~1.2k items".
+    pub context: Option<String>,
+    /// Short mode label for the status-bar chip, e.g. "QUERY" / "FILTER" / "BROWSE".
+    pub mode: Option<String>,
+    /// Free-form stats for the status bar, e.g. "120 results · showing 1-20 · 3 selected".
+    pub stats: Option<String>,
+}
+
 pub struct WidgetInner {
     id: WidgetId,
     parent: WidgetId,
@@ -105,6 +117,11 @@ pub trait Widget: Send {
     /// Optional navigation title for this widget.
     fn navigation_title(&self) -> Option<String> {
         None
+    }
+
+    /// Optional app-wide status surfaced in the title bar and status bar.
+    fn status(&self) -> StatusInfo {
+        StatusInfo::default()
     }
 
     /// Whether the widget is currently loading data.

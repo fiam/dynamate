@@ -548,43 +548,63 @@ impl App {
         let modifiers = self.modifiers;
         let help_mode = self.help_mode;
         let help_height = help::height(&all_help, frame.area(), modifiers, help_mode);
+        let status = self.widgets.last().map(|w| w.status()).unwrap_or_default();
         let layout = Layout::vertical([
             Constraint::Length(1),
             Constraint::Fill(1),
+            Constraint::Length(1),
             Constraint::Length(help_height),
         ]);
-        let [title_area, body_area, footer_area] = frame.area().layout(&layout);
-        let title = if dynamate::readonly::is_enabled() {
-            Line::from(vec![
-                Span::styled(
-                    "dynamate",
-                    Style::default()
-                        .fg(theme.accent())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "  READ-ONLY",
-                    Style::default()
-                        .fg(theme.warning())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])
-            .centered()
-        } else {
-            Line::styled(
-                "dynamate",
+        let [title_area, body_area, status_area, footer_area] = frame.area().layout(&layout);
+
+        // Title bar: "dynamate" (+ READ-ONLY badge) on the left, table context on the right.
+        let mut title_spans = vec![Span::styled(
+            "dynamate",
+            Style::default()
+                .fg(theme.accent())
+                .add_modifier(Modifier::BOLD),
+        )];
+        if dynamate::readonly::is_enabled() {
+            title_spans.push(Span::styled(
+                "  READ-ONLY",
                 Style::default()
-                    .fg(theme.accent())
+                    .fg(theme.warning())
                     .add_modifier(Modifier::BOLD),
-            )
-            .centered()
-        };
-        frame.render_widget(title, title_area);
+            ));
+        }
+        frame.render_widget(Line::from(title_spans), title_area);
+        if let Some(context) = status.context.as_deref() {
+            frame.render_widget(
+                Line::styled(context.to_string(), Style::default().fg(theme.text_muted()))
+                    .right_aligned(),
+                title_area,
+            );
+        }
+
+        // Status bar: mode chip + stats on the left, loading throbber on the right.
+        fill_bg(frame.buffer_mut(), status_area, theme.panel_bg());
+        let mut status_spans = Vec::new();
+        if let Some(mode) = status.mode.as_deref() {
+            status_spans.push(Span::styled(
+                format!(" {mode} "),
+                Style::default()
+                    .fg(theme.bg())
+                    .bg(theme.accent())
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if let Some(stats) = status.stats.as_deref() {
+            status_spans.push(Span::raw(" "));
+            status_spans.push(Span::styled(
+                stats.to_string(),
+                Style::default().fg(theme.text_muted()),
+            ));
+        }
+        if !status_spans.is_empty() {
+            frame.render_widget(Line::from(status_spans), status_area);
+        }
         if let Some(line) = loading_line {
-            let width = line.width().min(title_area.width as usize);
-            if width > 0 {
-                frame.render_widget(line, Rect::new(title_area.x, title_area.y, width as u16, 1));
-            }
+            frame.render_widget(line.right_aligned(), status_area);
         }
         if let Some(widget) = self.widgets.last() {
             let back_title = self
@@ -604,7 +624,7 @@ impl App {
         if self.popup.is_none()
             && let Some(toast) = self.toast.as_ref()
         {
-            self.render_toast(frame, body_area, footer_area, &theme, toast);
+            self.render_toast(frame, body_area, status_area, &theme, toast);
         }
         help::render(&all_help, frame, footer_area, &theme, modifiers, help_mode);
         if self.show_frame_render_duration {
