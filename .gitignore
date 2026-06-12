@@ -5,3 +5,4 @@ dynamate.log
 !docker/seed.py
 .claude/
 .vscode/
+.argon/
