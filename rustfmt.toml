@@ -1,0 +1,5 @@
+# Pin formatting so `cargo fmt --check` is deterministic across machines and
+# when rustfmt is invoked directly (outside cargo). These match rustfmt's
+# defaults today; pinning them guards against future default changes.
+edition = "2024"
+max_width = 100

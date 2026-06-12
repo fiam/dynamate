@@ -1,0 +1,13 @@
+# Complexity gates. These ride on the existing `clippy -D warnings` CI step, so
+# a function that grows past these thresholds fails the build — the guardrail
+# that keeps the query widget (and friends) from regressing into god objects.
+#
+# Thresholds are tuned so the current, post-refactor code passes; tighten them
+# as the larger render/event functions are decomposed further.
+too-many-lines-threshold = 280
+cognitive-complexity-threshold = 40
+type-complexity-threshold = 350
+
+# `unwrap`/`expect` are fine in tests, where a panic is the failure mode.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
