@@ -9,6 +9,7 @@ use theme::Theme;
 pub mod confirm;
 pub mod create_table;
 pub mod error;
+pub(crate) mod filter_input;
 mod query;
 mod table_picker;
 pub mod theme;
