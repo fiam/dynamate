@@ -498,7 +498,10 @@ mod tests {
     fn after_path_suggests_operators() {
         let input = "status ";
         let (_, s) = suggestions(input, input.len(), &attrs(), no_values);
-        assert!(s.iter().any(|x| x.text == "=" && x.kind == SuggestionKind::Operator));
+        assert!(
+            s.iter()
+                .any(|x| x.text == "=" && x.kind == SuggestionKind::Operator)
+        );
         assert!(s.iter().any(|x| x.text == "BETWEEN"));
         // A bare path is not a complete condition, so connectors aren't offered.
         assert!(s.iter().all(|x| x.text != "AND"));
@@ -558,7 +561,10 @@ mod tests {
         assert!(texts.contains(&"USAGETHRESHOLDS#"));
         assert!(texts.contains(&"USER#"));
         // Distinct chunks are deduplicated (two values share the first chunk).
-        assert_eq!(texts.iter().filter(|t| **t == "USAGETHRESHOLDS#").count(), 1);
+        assert_eq!(
+            texts.iter().filter(|t| **t == "USAGETHRESHOLDS#").count(),
+            1
+        );
         assert!(s.iter().all(|x| x.kind != SuggestionKind::Attribute));
     }
 

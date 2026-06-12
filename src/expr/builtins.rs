@@ -153,7 +153,10 @@ pub static VALUE_FORMS: &[(&str, &str)] = &[
     ("true  false", "Boolean"),
     ("null", "Null"),
     ("active  USER_123", "Unquoted identifier (inferred type)"),
-    ("`attr name`", "Backtick path for names with spaces/punctuation"),
+    (
+        "`attr name`",
+        "Backtick path for names with spaces/punctuation",
+    ),
 ];
 
 /// Notes about the single-token partition-key shortcut, for the reference popup.
@@ -165,9 +168,7 @@ pub static PK_SHORTCUT: &[(&str, &str)] = &[
 
 /// Look up a function by name, case-insensitively.
 pub fn function_by_name(name: &str) -> Option<&'static FunctionDoc> {
-    FUNCTIONS
-        .iter()
-        .find(|f| f.name.eq_ignore_ascii_case(name))
+    FUNCTIONS.iter().find(|f| f.name.eq_ignore_ascii_case(name))
 }
 
 /// Whether `name` is a known built-in function (case-insensitive).

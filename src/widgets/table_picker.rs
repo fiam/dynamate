@@ -1,8 +1,6 @@
 use std::{borrow::Cow, cell::RefCell, collections::HashMap, time::Duration};
 
 use aws_sdk_dynamodb::Client;
-use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
-use aws_sdk_dynamodb::operation::RequestId;
 use aws_sdk_dynamodb::types::{
     AttributeValue, DeleteRequest, KeySchemaElement, KeyType, TableDescription, WriteRequest,
 };
@@ -18,7 +16,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use dynamate::dynamodb::send_dynamo_request;
+use dynamate::dynamodb::{format_sdk_error, send_dynamo_request};
 
 use crate::{
     env::{Toast, ToastKind},
@@ -1167,26 +1165,6 @@ impl crate::widgets::Widget for TablePickerWidget {
     fn suppress_global_help(&self) -> bool {
         self.state.borrow().filter.is_active()
     }
-}
-
-fn format_sdk_error<E>(err: &SdkError<E>) -> String
-where
-    E: ProvideErrorMetadata + RequestId + std::error::Error + 'static,
-{
-    if let Some(service_err) = err.as_service_error() {
-        let code = service_err.code().unwrap_or("ServiceError");
-        let message = service_err.message().unwrap_or("").trim();
-        let mut summary = if message.is_empty() {
-            code.to_string()
-        } else {
-            format!("{code}: {message}")
-        };
-        if let Some(request_id) = service_err.request_id() {
-            summary.push_str(&format!(" (request id: {request_id})"));
-        }
-        return summary;
-    }
-    DisplayErrorContext(err).to_string()
 }
 
 async fn fetch_table_meta(client: &Client, table_name: &str) -> Result<TableMeta, String> {

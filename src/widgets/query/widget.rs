@@ -15,8 +15,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
-use aws_sdk_dynamodb::operation::RequestId;
 use aws_sdk_dynamodb::types::{
     AttributeValue, DeleteRequest, KeySchemaElement, KeyType, TableDescription, TimeToLiveStatus,
     WriteRequest,
@@ -62,7 +60,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use dynamate::dynamodb::json;
 use dynamate::dynamodb::size::estimate_item_size_bytes;
-use dynamate::dynamodb::{SecondaryIndex, TableInfo, send_dynamo_request};
+use dynamate::dynamodb::{SecondaryIndex, TableInfo, format_sdk_error, send_dynamo_request};
 use dynamate::{
     dynamodb::{
         DynamoDbRequest, KeyCondition, KeyConditionType, Kind, Output, QueryBuilder, QueryType,
@@ -463,26 +461,6 @@ impl KeyValue {
             Self::Binary(value) => format!("<binary:{}>", value.len()),
         }
     }
-}
-
-fn format_sdk_error<E>(err: &SdkError<E>) -> String
-where
-    E: ProvideErrorMetadata + RequestId + std::error::Error + 'static,
-{
-    if let Some(service_err) = err.as_service_error() {
-        let code = service_err.code().unwrap_or("ServiceError");
-        let message = service_err.message().unwrap_or("").trim();
-        let mut summary = if message.is_empty() {
-            code.to_string()
-        } else {
-            format!("{code}: {message}")
-        };
-        if let Some(request_id) = service_err.request_id() {
-            summary.push_str(&format!(" (request id: {request_id})"));
-        }
-        return summary;
-    }
-    DisplayErrorContext(err).to_string()
 }
 
 #[derive(Debug, Default)]
@@ -3714,12 +3692,8 @@ impl QueryWidget {
         }
         widths.extend(fitted_widths.into_iter().map(Constraint::Length));
         header_cells.extend(keys.iter().map(|key| Line::from(key.clone())));
-        let header = Row::new(header_cells).style(
-            Style::new()
-                .bold()
-                .bg(theme.header_bg())
-                .fg(theme.text()),
-        );
+        let header = Row::new(header_cells)
+            .style(Style::new().bold().bg(theme.header_bg()).fg(theme.text()));
 
         // a block with a right aligned title with the loading state on the right
         let more_marker = if state.last_evaluated_key.is_some() {

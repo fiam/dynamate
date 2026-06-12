@@ -5,7 +5,34 @@ use std::{
     time::{Duration, Instant},
 };
 
+use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
+use aws_sdk_dynamodb::operation::RequestId;
+
 const DEBUG_DELAY_ENV: &str = "DYNAMATE_DEBUG_DYNAMO_DELAY_MS";
+
+/// Format an AWS SDK error into a concise, human-readable summary.
+///
+/// Prefers the service error's code, message, and request id when available,
+/// falling back to the SDK's [`DisplayErrorContext`] rendering otherwise.
+pub fn format_sdk_error<E>(err: &SdkError<E>) -> String
+where
+    E: ProvideErrorMetadata + RequestId + std::error::Error + 'static,
+{
+    if let Some(service_err) = err.as_service_error() {
+        let code = service_err.code().unwrap_or("ServiceError");
+        let message = service_err.message().unwrap_or("").trim();
+        let mut summary = if message.is_empty() {
+            code.to_string()
+        } else {
+            format!("{code}: {message}")
+        };
+        if let Some(request_id) = service_err.request_id() {
+            summary.push_str(&format!(" (request id: {request_id})"));
+        }
+        return summary;
+    }
+    DisplayErrorContext(err).to_string()
+}
 
 pub async fn send_dynamo_request<F, Fut, T, E, FE>(
     span: tracing::Span,

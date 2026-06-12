@@ -1,14 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use aws_sdk_dynamodb::Client;
-use aws_sdk_dynamodb::error::{DisplayErrorContext, ProvideErrorMetadata, SdkError};
-use aws_sdk_dynamodb::operation::RequestId;
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, BillingMode, GlobalSecondaryIndex, KeySchemaElement, KeyType,
     LocalSecondaryIndex, Projection, ProjectionType, ScalarAttributeType,
 };
 
-use super::send_dynamo_request;
+use super::{format_sdk_error, send_dynamo_request};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributeType {
@@ -367,26 +365,6 @@ pub async fn create_table(client: Client, spec: CreateTableSpec) -> Result<(), S
     );
     let result = send_dynamo_request(span, || request.send(), format_sdk_error).await;
     result.map(|_| ()).map_err(|err| format_sdk_error(&err))
-}
-
-fn format_sdk_error<E>(err: &SdkError<E>) -> String
-where
-    E: ProvideErrorMetadata + RequestId + std::error::Error + 'static,
-{
-    if let Some(service_err) = err.as_service_error() {
-        let code = service_err.code().unwrap_or("ServiceError");
-        let message = service_err.message().unwrap_or("").trim();
-        let mut summary = if message.is_empty() {
-            code.to_string()
-        } else {
-            format!("{code}: {message}")
-        };
-        if let Some(request_id) = service_err.request_id() {
-            summary.push_str(&format!(" (request id: {request_id})"));
-        }
-        return summary;
-    }
-    DisplayErrorContext(err).to_string()
 }
 
 fn parse_attribute_list(raw: &str) -> Vec<String> {

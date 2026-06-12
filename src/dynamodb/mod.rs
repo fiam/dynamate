@@ -11,7 +11,7 @@ pub mod table_analyzer;
 pub use create_table::{
     AttributeType, CreateTableSpec, GsiSpec, IndexProjection, KeySpec, LsiSpec, create_table,
 };
-pub use debug::send_dynamo_request;
+pub use debug::{format_sdk_error, send_dynamo_request};
 pub use executor::*;
 pub use json::*;
 pub use query::*;

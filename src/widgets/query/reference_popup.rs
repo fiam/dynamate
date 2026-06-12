@@ -41,7 +41,8 @@ impl ReferencePopup {
                     .add_modifier(Modifier::BOLD),
             ))
         };
-        let muted = |text: String| Line::from(Span::styled(text, Style::default().fg(theme.text_muted())));
+        let muted =
+            |text: String| Line::from(Span::styled(text, Style::default().fg(theme.text_muted())));
 
         let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -63,7 +64,10 @@ impl ReferencePopup {
                     format!("  {:<8}", op.symbols),
                     Style::default().fg(theme.text()),
                 ),
-                Span::styled(op.summary.to_string(), Style::default().fg(theme.text_muted())),
+                Span::styled(
+                    op.summary.to_string(),
+                    Style::default().fg(theme.text_muted()),
+                ),
             ]));
         }
         lines.push(Line::from(""));
@@ -75,7 +79,10 @@ impl ReferencePopup {
                     format!("  {:<14}", k.word),
                     Style::default().fg(theme.text()),
                 ),
-                Span::styled(k.summary.to_string(), Style::default().fg(theme.text_muted())),
+                Span::styled(
+                    k.summary.to_string(),
+                    Style::default().fg(theme.text_muted()),
+                ),
             ]));
             lines.push(muted(format!("    e.g. {}", k.example)));
         }
@@ -84,10 +91,7 @@ impl ReferencePopup {
         lines.push(heading("Value forms"));
         for (form, desc) in builtins::VALUE_FORMS {
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {:<20}", form),
-                    Style::default().fg(theme.text()),
-                ),
+                Span::styled(format!("  {:<20}", form), Style::default().fg(theme.text())),
                 Span::styled(desc.to_string(), Style::default().fg(theme.text_muted())),
             ]));
         }
@@ -110,7 +114,9 @@ impl ReferencePopup {
             ]));
         }
         lines.push(Line::from(""));
-        lines.push(muted("    A blank query runs a full table scan.".to_string()));
+        lines.push(muted(
+            "    A blank query runs a full table scan.".to_string(),
+        ));
 
         lines
     }
