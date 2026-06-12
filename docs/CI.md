@@ -16,6 +16,18 @@
 6. `cargo deny check advisories bans licenses sources`
 7. `cargo audit`
 
+## Lint config
+
+- [`Cargo.toml`](../Cargo.toml) `[lints.clippy]`: enables a curated
+  `clippy::pedantic` plus `cognitive_complexity`, with an allow-list for
+  domain noise.
+- [`clippy.toml`](../clippy.toml): function size and complexity thresholds
+  (`too-many-lines`, `cognitive-complexity`, `type-complexity`); allows
+  `unwrap`/`expect` in tests.
+- [`rustfmt.toml`](../rustfmt.toml): pins `edition` and `max_width`.
+- These are enforced by the `cargo clippy -- -D warnings` step above; no
+  separate CI step is needed.
+
 ## Dependency policy config
 
 - File: [`deny.toml`](../deny.toml)
