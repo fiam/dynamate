@@ -756,293 +756,26 @@ impl crate::widgets::Widget for QueryWidget {
     }
 
     fn handle_event(&self, ctx: crate::env::WidgetCtx, event: &Event) -> bool {
-        if event.as_key_press_event().is_some() {
-            let mut state = self.state.borrow_mut();
-            if matches!(state.loading_state, LoadingState::Error(_)) {
-                state.loading_state = if state.items.is_empty() {
-                    LoadingState::Idle
-                } else {
-                    LoadingState::Loaded
-                };
-            }
-        }
+        self.reset_error_state_on_key(event);
         let input_is_active = self.state.borrow().input.is_active();
         let filter_active = self.state.borrow().filter.is_active();
-        if input_is_active {
-            let dropdown_visible = self.state.borrow().completion.visible;
-            if let Some(key) = event.as_key_press_event() {
-                match key.code {
-                    KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        // Surface the query reference. Ctrl+G is layout- and
-                        // macOS-safe with no legacy terminal collision; intercepted
-                        // before the text input so `?` stays typable.
-                        self.open_reference_popup(ctx.clone());
-                        return true;
-                    }
-                    KeyCode::Up if dropdown_visible => {
-                        self.state.borrow_mut().completion.select_prev();
-                        return true;
-                    }
-                    KeyCode::Down if dropdown_visible => {
-                        self.state.borrow_mut().completion.select_next();
-                        return true;
-                    }
-                    KeyCode::Tab if dropdown_visible => {
-                        // Tab always completes — on the sentinel, the first item.
-                        self.state.borrow_mut().accept_completion(true);
-                        return true;
-                    }
-                    KeyCode::Enter if dropdown_visible => {
-                        // Accept the highlighted suggestion; if the sentinel row is
-                        // selected, fall through so Enter runs the query.
-                        if self.state.borrow_mut().accept_completion(false) {
-                            return true;
-                        }
-                    }
-                    KeyCode::Esc if dropdown_visible => {
-                        self.state.borrow_mut().completion.dismiss();
-                        return true;
-                    }
-                    _ => {}
-                }
-            }
-            // Delegate to the text input, then refresh suggestions on any edit.
-            let handled = self.state.borrow_mut().input.handle_event(event);
-            if handled {
-                let mut state = self.state.borrow_mut();
-                state.reset_completion_dismissal();
-                state.refresh_completion();
-                return true;
-            }
-        }
-        if filter_active {
-            let mut state = self.state.borrow_mut();
-            if state.filter.handle_event(event) {
-                state.apply_filter();
-                return true;
-            }
-        }
-        if let Some(key) = event.as_key_press_event() {
-            match key.code {
-                KeyCode::Tab | KeyCode::BackTab => self.state.borrow_mut().input.toggle_active(),
-                KeyCode::Esc if input_is_active => {
-                    let mut state = self.state.borrow_mut();
-                    state.input.toggle_active();
-                }
-                KeyCode::Esc if filter_active => {
-                    let mut state = self.state.borrow_mut();
-                    state.filter.clear();
-                    state.filter.set_active(false);
-                    state.apply_filter();
-                }
-                KeyCode::Esc => {
-                    let mut state = self.state.borrow_mut();
-                    if state.show_tree {
-                        state.show_tree = false;
-                    } else if state.is_prefetching {
-                        drop(state);
-                        self.request_export_cancel(ctx.clone(), true);
-                    } else if matches!(state.loading_state, LoadingState::Loading) {
-                        drop(state);
-                        self.cancel_active_request();
-                    } else if state.filter_applied() {
-                        state.filter.clear();
-                        state.apply_filter();
-                    } else if state.selection.is_active() {
-                        state.selection.clear();
-                    } else {
-                        drop(state);
-                        ctx.pop_widget();
-                    }
-                }
-                KeyCode::Enter if input_is_active => {
-                    let query = {
-                        let mut state = self.state.borrow_mut();
-                        let value = state.input.value().to_string();
-                        state.input.toggle_active();
-                        state.completion.visible = false;
-                        value
-                    };
-                    self.start_query(Some(&query), ctx.clone());
-                }
-                KeyCode::Enter => {
-                    let mut state = self.state.borrow_mut();
-                    if !state.show_tree {
-                        state.show_tree = true;
-                        state.reset_tree_scroll();
-                    }
-                }
-                KeyCode::Char('/') if !input_is_active && !filter_active => {
-                    let mut state = self.state.borrow_mut();
-                    if !state.show_tree {
-                        state.filter.set_active(true);
-                    }
-                }
-                KeyCode::Char('q') if !input_is_active && !filter_active => {
-                    let mut state = self.state.borrow_mut();
-                    if !state.show_tree {
-                        state.input.set_active(true);
-                        state.reset_completion_dismissal();
-                        state.refresh_completion();
-                    }
-                }
-                KeyCode::Char('j') | KeyCode::Down => self.scroll_down(ctx.clone()),
-                KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
-                KeyCode::Char('J') if self.state.borrow().show_tree => {
-                    self.tree_next_item(ctx.clone())
-                }
-                KeyCode::Char('K') if self.state.borrow().show_tree => self.tree_prev_item(),
-                KeyCode::PageDown => self.page_down(ctx.clone()),
-                KeyCode::PageUp => self.page_up(),
-                KeyCode::Left
-                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
-                {
-                    self.scroll_columns_left()
-                }
-                KeyCode::Right
-                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
-                {
-                    self.scroll_columns_right()
-                }
-                KeyCode::Char('z')
-                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
-                {
-                    self.toggle_compact_columns()
-                }
-                KeyCode::Char('f') => {
-                    let state = self.state.borrow();
-                    let keys = state
-                        .item_keys
-                        .sorted()
-                        .iter()
-                        .map(|k| keys_widget::Key {
-                            name: k.clone(),
-                            hidden: state.item_keys.is_hidden(k),
-                        })
-                        .collect::<Vec<_>>();
-                    let ctx_for_keys = ctx.clone();
-                    let popup = Box::new(KeysWidget::new(
-                        &keys,
-                        move |ev| match ev {
-                            keys_widget::Event::KeyHidden(name) => {
-                                ctx_for_keys.emit_self(KeyVisibilityEvent { name, hidden: true });
-                            }
-                            keys_widget::Event::KeyUnhidden(name) => {
-                                ctx_for_keys.emit_self(KeyVisibilityEvent {
-                                    name,
-                                    hidden: false,
-                                });
-                            }
-                        },
-                        self.inner.id(),
-                    ));
-                    ctx.set_popup(popup);
-                }
-                KeyCode::Char('x') if !input_is_active && !filter_active => {
-                    if self.state.borrow().show_tree {
-                        self.show_export_popup(ExportKind::Item, ctx.clone());
-                    } else if self.selection_active() {
-                        self.show_export_popup(ExportKind::Selection, ctx.clone());
-                    } else {
-                        self.show_export_popup(ExportKind::Results, ctx.clone());
-                    }
-                }
-                KeyCode::Char(' ')
-                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
-                {
-                    match self.toggle_selected_row() {
-                        // Advance to the next row so a run of consecutive
-                        // items can be selected by tapping space.
-                        Ok(()) => self.scroll_down(ctx.clone()),
-                        Err(err) => self.show_error(ctx.clone(), &err),
-                    }
-                }
-                KeyCode::Char('a')
-                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
-                {
-                    self.select_all_query_matches();
-                }
-                KeyCode::Char('v')
-                    if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
-                {
-                    self.invert_selection();
-                }
-                KeyCode::Char('t') => {
-                    let mut state = self.state.borrow_mut();
-                    state.show_tree = !state.show_tree;
-                    if state.show_tree {
-                        state.reset_tree_scroll();
-                    }
-                }
-                KeyCode::Char('i') if !input_is_active && !filter_active => {
-                    self.show_index_picker(ctx.clone());
-                }
-                KeyCode::Char('e')
-                    if !input_is_active
-                        && key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    self.edit_selected(EditorFormat::DynamoDb, ctx.clone());
-                }
-                KeyCode::Char('e') => {
-                    self.edit_selected(EditorFormat::Plain, ctx.clone());
-                }
-                KeyCode::Char('E') => {
-                    self.edit_selected(EditorFormat::DynamoDb, ctx.clone());
-                }
-                KeyCode::Char('n')
-                    if !input_is_active
-                        && key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    self.create_item(EditorFormat::DynamoDb, ctx.clone());
-                }
-                KeyCode::Char('d')
-                    if !input_is_active
-                        && self.state.borrow().show_tree
-                        && key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    self.confirm_delete(ctx.clone());
-                }
-                KeyCode::Char('d')
-                    if !input_is_active
-                        && !filter_active
-                        && !self.state.borrow().show_tree
-                        && key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    if self.selection_active() {
-                        self.confirm_delete_selection(ctx.clone());
-                    } else {
-                        self.confirm_delete(ctx.clone());
-                    }
-                }
-                KeyCode::Char('n') => {
-                    self.create_item(EditorFormat::Plain, ctx.clone());
-                }
-                KeyCode::Char('N') => {
-                    self.create_item(EditorFormat::DynamoDb, ctx.clone());
-                }
-                _ => {
-                    return false; // not handled
-                }
-            }
+
+        if input_is_active && self.handle_query_input_key(&ctx, event) {
             return true;
         }
-
+        if filter_active && self.handle_filter_key(event) {
+            return true;
+        }
+        if let Some(key) = event.as_key_press_event() {
+            return self.handle_browse_key(&ctx, key, input_is_active, filter_active);
+        }
         if let Some(mouse) = event.as_mouse_event() {
             match mouse.kind {
                 crossterm::event::MouseEventKind::ScrollUp => self.scroll_up(),
                 crossterm::event::MouseEventKind::ScrollDown => self.scroll_down(ctx.clone()),
-                _ => return false, // not handled
+                _ => {}
             }
         }
-
         false
     }
 
@@ -1352,6 +1085,304 @@ impl crate::widgets::Widget for QueryWidget {
 }
 
 impl QueryWidget {
+    /// On any keypress, clear a transient error banner so the next keystroke
+    /// starts from a clean state (returning to Idle or Loaded as appropriate).
+    fn reset_error_state_on_key(&self, event: &Event) {
+        if event.as_key_press_event().is_some() {
+            let mut state = self.state.borrow_mut();
+            if matches!(state.loading_state, LoadingState::Error(_)) {
+                state.loading_state = if state.items.is_empty() {
+                    LoadingState::Idle
+                } else {
+                    LoadingState::Loaded
+                };
+            }
+        }
+    }
+
+    /// Handle a key while the query input is active: completion-dropdown
+    /// navigation and text editing. Returns `true` when the key is fully
+    /// consumed; `false` lets it fall through to the browse-mode handler (e.g.
+    /// Enter on the sentinel completion row runs the query).
+    fn handle_query_input_key(&self, ctx: &crate::env::WidgetCtx, event: &Event) -> bool {
+        let dropdown_visible = self.state.borrow().completion.visible;
+        if let Some(key) = event.as_key_press_event() {
+            match key.code {
+                KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Surface the query reference. Ctrl+G is layout- and
+                    // macOS-safe with no legacy terminal collision; intercepted
+                    // before the text input so `?` stays typable.
+                    self.open_reference_popup(ctx.clone());
+                    return true;
+                }
+                KeyCode::Up if dropdown_visible => {
+                    self.state.borrow_mut().completion.select_prev();
+                    return true;
+                }
+                KeyCode::Down if dropdown_visible => {
+                    self.state.borrow_mut().completion.select_next();
+                    return true;
+                }
+                KeyCode::Tab if dropdown_visible => {
+                    // Tab always completes — on the sentinel, the first item.
+                    self.state.borrow_mut().accept_completion(true);
+                    return true;
+                }
+                KeyCode::Enter if dropdown_visible => {
+                    // Accept the highlighted suggestion; if the sentinel row is
+                    // selected, fall through so Enter runs the query.
+                    if self.state.borrow_mut().accept_completion(false) {
+                        return true;
+                    }
+                }
+                KeyCode::Esc if dropdown_visible => {
+                    self.state.borrow_mut().completion.dismiss();
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        // Delegate to the text input, then refresh suggestions on any edit.
+        let handled = self.state.borrow_mut().input.handle_event(event);
+        if handled {
+            let mut state = self.state.borrow_mut();
+            state.reset_completion_dismissal();
+            state.refresh_completion();
+            return true;
+        }
+        false
+    }
+
+    /// Handle a key while the results filter is active. Returns `true` when the
+    /// filter consumed it (and the visible rows were re-filtered).
+    fn handle_filter_key(&self, event: &Event) -> bool {
+        let mut state = self.state.borrow_mut();
+        if state.filter.handle_event(event) {
+            state.apply_filter();
+            return true;
+        }
+        false
+    }
+
+    /// Handle a key in browse/tree mode (the main keymap). Returns `true` when
+    /// the key was handled, `false` for unrecognized keys.
+    fn handle_browse_key(
+        &self,
+        ctx: &crate::env::WidgetCtx,
+        key: crossterm::event::KeyEvent,
+        input_is_active: bool,
+        filter_active: bool,
+    ) -> bool {
+        match key.code {
+            KeyCode::Tab | KeyCode::BackTab => self.state.borrow_mut().input.toggle_active(),
+            KeyCode::Esc if input_is_active => {
+                let mut state = self.state.borrow_mut();
+                state.input.toggle_active();
+            }
+            KeyCode::Esc if filter_active => {
+                let mut state = self.state.borrow_mut();
+                state.filter.clear();
+                state.filter.set_active(false);
+                state.apply_filter();
+            }
+            KeyCode::Esc => {
+                let mut state = self.state.borrow_mut();
+                if state.show_tree {
+                    state.show_tree = false;
+                } else if state.is_prefetching {
+                    drop(state);
+                    self.request_export_cancel(ctx.clone(), true);
+                } else if matches!(state.loading_state, LoadingState::Loading) {
+                    drop(state);
+                    self.cancel_active_request();
+                } else if state.filter_applied() {
+                    state.filter.clear();
+                    state.apply_filter();
+                } else if state.selection.is_active() {
+                    state.selection.clear();
+                } else {
+                    drop(state);
+                    ctx.pop_widget();
+                }
+            }
+            KeyCode::Enter if input_is_active => {
+                let query = {
+                    let mut state = self.state.borrow_mut();
+                    let value = state.input.value().to_string();
+                    state.input.toggle_active();
+                    state.completion.visible = false;
+                    value
+                };
+                self.start_query(Some(&query), ctx.clone());
+            }
+            KeyCode::Enter => {
+                let mut state = self.state.borrow_mut();
+                if !state.show_tree {
+                    state.show_tree = true;
+                    state.reset_tree_scroll();
+                }
+            }
+            KeyCode::Char('/') if !input_is_active && !filter_active => {
+                let mut state = self.state.borrow_mut();
+                if !state.show_tree {
+                    state.filter.set_active(true);
+                }
+            }
+            KeyCode::Char('q') if !input_is_active && !filter_active => {
+                let mut state = self.state.borrow_mut();
+                if !state.show_tree {
+                    state.input.set_active(true);
+                    state.reset_completion_dismissal();
+                    state.refresh_completion();
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_down(ctx.clone()),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
+            KeyCode::Char('J') if self.state.borrow().show_tree => self.tree_next_item(ctx.clone()),
+            KeyCode::Char('K') if self.state.borrow().show_tree => self.tree_prev_item(),
+            KeyCode::PageDown => self.page_down(ctx.clone()),
+            KeyCode::PageUp => self.page_up(),
+            KeyCode::Left
+                if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+            {
+                self.scroll_columns_left()
+            }
+            KeyCode::Right
+                if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+            {
+                self.scroll_columns_right()
+            }
+            KeyCode::Char('z')
+                if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+            {
+                self.toggle_compact_columns()
+            }
+            KeyCode::Char('f') => {
+                let state = self.state.borrow();
+                let keys = state
+                    .item_keys
+                    .sorted()
+                    .iter()
+                    .map(|k| keys_widget::Key {
+                        name: k.clone(),
+                        hidden: state.item_keys.is_hidden(k),
+                    })
+                    .collect::<Vec<_>>();
+                let ctx_for_keys = ctx.clone();
+                let popup = Box::new(KeysWidget::new(
+                    &keys,
+                    move |ev| match ev {
+                        keys_widget::Event::KeyHidden(name) => {
+                            ctx_for_keys.emit_self(KeyVisibilityEvent { name, hidden: true });
+                        }
+                        keys_widget::Event::KeyUnhidden(name) => {
+                            ctx_for_keys.emit_self(KeyVisibilityEvent {
+                                name,
+                                hidden: false,
+                            });
+                        }
+                    },
+                    self.inner.id(),
+                ));
+                ctx.set_popup(popup);
+            }
+            KeyCode::Char('x') if !input_is_active && !filter_active => {
+                if self.state.borrow().show_tree {
+                    self.show_export_popup(ExportKind::Item, ctx.clone());
+                } else if self.selection_active() {
+                    self.show_export_popup(ExportKind::Selection, ctx.clone());
+                } else {
+                    self.show_export_popup(ExportKind::Results, ctx.clone());
+                }
+            }
+            KeyCode::Char(' ')
+                if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+            {
+                match self.toggle_selected_row() {
+                    // Advance to the next row so a run of consecutive
+                    // items can be selected by tapping space.
+                    Ok(()) => self.scroll_down(ctx.clone()),
+                    Err(err) => self.show_error(ctx.clone(), &err),
+                }
+            }
+            KeyCode::Char('a')
+                if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+            {
+                self.select_all_query_matches();
+            }
+            KeyCode::Char('v')
+                if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
+            {
+                self.invert_selection();
+            }
+            KeyCode::Char('t') => {
+                let mut state = self.state.borrow_mut();
+                state.show_tree = !state.show_tree;
+                if state.show_tree {
+                    state.reset_tree_scroll();
+                }
+            }
+            KeyCode::Char('i') if !input_is_active && !filter_active => {
+                self.show_index_picker(ctx.clone());
+            }
+            KeyCode::Char('e')
+                if !input_is_active
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                self.edit_selected(EditorFormat::DynamoDb, ctx.clone());
+            }
+            KeyCode::Char('e') => {
+                self.edit_selected(EditorFormat::Plain, ctx.clone());
+            }
+            KeyCode::Char('E') => {
+                self.edit_selected(EditorFormat::DynamoDb, ctx.clone());
+            }
+            KeyCode::Char('n')
+                if !input_is_active
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                self.create_item(EditorFormat::DynamoDb, ctx.clone());
+            }
+            KeyCode::Char('d')
+                if !input_is_active
+                    && self.state.borrow().show_tree
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                self.confirm_delete(ctx.clone());
+            }
+            KeyCode::Char('d')
+                if !input_is_active
+                    && !filter_active
+                    && !self.state.borrow().show_tree
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                if self.selection_active() {
+                    self.confirm_delete_selection(ctx.clone());
+                } else {
+                    self.confirm_delete(ctx.clone());
+                }
+            }
+            KeyCode::Char('n') => {
+                self.create_item(EditorFormat::Plain, ctx.clone());
+            }
+            KeyCode::Char('N') => {
+                self.create_item(EditorFormat::DynamoDb, ctx.clone());
+            }
+            _ => {
+                return false; // not handled
+            }
+        }
+        true
+    }
+
     const HELP_TABLE: &'static [help::Entry<'static>] = &[
         help::Entry {
             keys: Cow::Borrowed("q"),
