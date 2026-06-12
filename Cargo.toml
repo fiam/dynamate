@@ -28,6 +28,11 @@ rustls = "0.23.31"
 serde_json = "1.0.142"
 terminal-light = "1.0.1"
 throbber-widgets-tui = "0.10.0"
+# Transitive dependency pinned: time 0.3.48 adds an impl that trips a coherence
+# conflict (E0119) against blanket `From`/`Into` impls in aws-smithy-types and
+# ratatui-widgets on the current toolchain. Holding it at 0.3.47 keeps the build
+# (and `cargo install` without --locked) working. Revisit when upstream resolves it.
+time = "=0.3.47"
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros", "sync", "signal"] }
 tokio-stream = "0.1.17"
 tracing = "0.1.41"
