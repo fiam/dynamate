@@ -11,6 +11,7 @@ use crate::widgets::theme;
 #[derive(Default)]
 pub struct Input {
     input: String,
+    /// Cursor position as a character index into `input` (not a byte offset).
     character_index: usize,
     is_active: bool,
 }
@@ -22,7 +23,7 @@ impl Input {
 
     pub fn set_value(&mut self, value: impl Into<String>) {
         self.input = value.into();
-        self.character_index = self.input.len();
+        self.character_index = self.char_len();
     }
 
     pub fn is_active(&self) -> bool {
@@ -35,6 +36,24 @@ impl Input {
 
     pub fn toggle_active(&mut self) {
         self.set_active(!self.is_active());
+    }
+
+    /// Number of characters in the input.
+    fn char_len(&self) -> usize {
+        self.input.chars().count()
+    }
+
+    /// The cursor position expressed as a byte offset into `input`.
+    pub fn cursor_byte(&self) -> usize {
+        char_to_byte_idx(&self.input, self.character_index)
+    }
+
+    /// Replace the byte range `start..end` with `replacement` and place the
+    /// cursor just after the inserted text. Used to accept a completion.
+    pub fn replace_token(&mut self, start: usize, end: usize, replacement: &str) {
+        self.input.replace_range(start..end, replacement);
+        let new_byte = start + replacement.len();
+        self.character_index = self.input[..new_byte].chars().count();
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, theme: &theme::Theme) {
@@ -80,21 +99,26 @@ impl Input {
                 event::KeyCode::Char('e')
                     if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
                 {
-                    self.character_index = self.input.len();
+                    self.character_index = self.char_len();
                 }
                 event::KeyCode::Char(c) => {
-                    self.input.insert(self.character_index, c);
+                    let idx = char_to_byte_idx(&self.input, self.character_index);
+                    self.input.insert(idx, c);
                     self.character_index += 1;
                 }
                 event::KeyCode::Backspace => {
-                    if self.character_index > 0 && !self.input.is_empty() {
-                        self.input.remove(self.character_index - 1);
+                    if self.character_index > 0 {
+                        let start = char_to_byte_idx(&self.input, self.character_index - 1);
+                        let end = char_to_byte_idx(&self.input, self.character_index);
+                        self.input.replace_range(start..end, "");
                         self.character_index -= 1;
                     }
                 }
                 event::KeyCode::Delete => {
-                    if self.character_index < self.input.len() && !self.input.is_empty() {
-                        self.input.remove(self.character_index);
+                    if self.character_index < self.char_len() {
+                        let start = char_to_byte_idx(&self.input, self.character_index);
+                        let end = char_to_byte_idx(&self.input, self.character_index + 1);
+                        self.input.replace_range(start..end, "");
                     }
                 }
                 event::KeyCode::Left => {
@@ -103,7 +127,7 @@ impl Input {
                     }
                 }
                 event::KeyCode::Right => {
-                    if self.character_index < self.input.len() {
+                    if self.character_index < self.char_len() {
                         self.character_index += 1;
                     }
                 }
@@ -111,7 +135,7 @@ impl Input {
                     self.character_index = 0;
                 }
                 event::KeyCode::End => {
-                    self.character_index = self.input.len();
+                    self.character_index = self.char_len();
                 }
                 _ => {
                     return false;
@@ -120,6 +144,14 @@ impl Input {
             return true;
         }
         false
-        //        self.input.handle_event(evt)
     }
+}
+
+/// Convert a character index into a byte offset into `value`.
+fn char_to_byte_idx(value: &str, char_idx: usize) -> usize {
+    value
+        .char_indices()
+        .nth(char_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or_else(|| value.len())
 }

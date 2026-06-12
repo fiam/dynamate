@@ -1,4 +1,5 @@
-use super::ast::{Comparator, DynamoExpression, FunctionName, Operand};
+use super::ast::{Comparator, DynamoExpression, Operand};
+use super::builtins;
 use super::error::ParseError;
 use super::lexer::{Lexer, Token};
 
@@ -106,15 +107,7 @@ pub fn parse_primary_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
 pub fn is_function_start(lexer: &mut Lexer) -> Result<bool, ParseError> {
     let saved_position = lexer.position;
     if let Ok(Token::Identifier(name)) = lexer.next_token() {
-        let is_func = matches!(
-            name.to_lowercase().as_str(),
-            "attribute_exists"
-                | "attribute_not_exists"
-                | "attribute_type"
-                | "begins_with"
-                | "contains"
-                | "size"
-        );
+        let is_func = builtins::is_function_name(&name);
         lexer.position = saved_position;
         Ok(is_func)
     } else {
@@ -126,14 +119,9 @@ pub fn is_function_start(lexer: &mut Lexer) -> Result<bool, ParseError> {
 pub fn parse_function(lexer: &mut Lexer) -> Result<DynamoExpression, ParseError> {
     let name_token = lexer.next_token()?;
     let name = if let Token::Identifier(name) = name_token {
-        match name.to_lowercase().as_str() {
-            "attribute_exists" => FunctionName::AttributeExists,
-            "attribute_not_exists" => FunctionName::AttributeNotExists,
-            "attribute_type" => FunctionName::AttributeType,
-            "begins_with" => FunctionName::BeginsWith,
-            "contains" => FunctionName::Contains,
-            "size" => FunctionName::Size,
-            _ => {
+        match builtins::function_by_name(&name) {
+            Some(doc) => doc.func.clone(),
+            None => {
                 return Err(ParseError::InvalidFunction {
                     name,
                     position: lexer.position,

@@ -31,18 +31,24 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     prelude::Widget,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, HighlightSpacing, Paragraph, Row, StatefulWidget, Table, TableState},
 };
 
-use super::{export_popup::ExportPopup, index_picker, input, item_keys, keys_widget, tree};
+use super::{
+    completion::{self, Suggestion, SuggestionKind, TokenSpan},
+    export_popup::ExportPopup,
+    index_picker, input, item_keys, keys_widget,
+    reference_popup::ReferencePopup,
+    tree,
+};
 use keys_widget::KeysWidget;
 
 use crate::{
     env::{Toast, ToastAction, ToastKind},
     help,
-    util::{abbreviate_home, env_flag, pad},
+    util::{abbreviate_home, env_flag, fill_bg, pad},
     widgets::{
         WidgetInner,
         confirm::{ConfirmAction, ConfirmPopup},
@@ -60,7 +66,8 @@ use dynamate::{
         ScanBuilder, execute_page,
     },
     expr::{
-        Comparator, DynamoExpression, Operand, parse_dynamo_expression, parse_single_value_token,
+        Comparator, DynamoExpression, Operand, ParseError, parse_dynamo_expression,
+        parse_single_value_token,
     },
 };
 use humansize::{BINARY, format_size};
@@ -109,6 +116,26 @@ struct QueryState {
     tree_render_capacity: usize,
     tree_line_count: usize,
     selection: SelectionMode,
+    completion: Completion,
+}
+
+/// Autocompletion state for the query input. Suggestions are recomputed from the
+/// input text + cursor whenever the text changes; `dismissed` suppresses the
+/// dropdown (after Esc) until the next edit.
+///
+/// When `has_sentinel` is set (the user hasn't typed a prefix the suggestions
+/// match), the dropdown shows a leading "no selection" row, highlighted by
+/// default, so pressing Enter runs the query instead of accepting a suggestion.
+/// `selected` indexes a virtual list where index 0 is the sentinel (if present)
+/// and the items follow.
+#[derive(Default)]
+struct Completion {
+    visible: bool,
+    dismissed: bool,
+    has_sentinel: bool,
+    selected: usize,
+    items: Vec<Suggestion>,
+    span: TokenSpan,
 }
 
 /// Width of the gutter that shows the selection bar (`▌`) for selected
@@ -122,6 +149,7 @@ const TABLE_MIN_COLUMN_WIDTH: usize = 1;
 const TABLE_MAX_COLUMN_WIDTH: usize = 48;
 const TABLE_MAX_COLUMN_WIDTH_COMPACT: usize = 20;
 const TABLE_MAX_RENDER_COLUMNS: usize = 24;
+const MAX_DROPDOWN_ROWS: usize = 8;
 
 struct QueryPageEvent {
     request_id: u64,
@@ -635,7 +663,94 @@ fn digits(mut value: usize) -> usize {
     count
 }
 
+impl Completion {
+    /// Number of selectable rows, including the leading sentinel when present.
+    fn row_count(&self) -> usize {
+        self.items.len() + self.has_sentinel as usize
+    }
+
+    /// The item index for the current selection, or `None` when the sentinel
+    /// ("run query / no completion") row is selected.
+    fn selected_item(&self) -> Option<usize> {
+        if self.has_sentinel {
+            self.selected.checked_sub(1)
+        } else {
+            Some(self.selected)
+        }
+    }
+
+    fn select_next(&mut self) {
+        let total = self.row_count();
+        if total > 0 {
+            self.selected = (self.selected + 1) % total;
+        }
+    }
+
+    fn select_prev(&mut self) {
+        let total = self.row_count();
+        if total > 0 {
+            self.selected = (self.selected + total - 1) % total;
+        }
+    }
+
+    fn dismiss(&mut self) {
+        self.visible = false;
+        self.dismissed = true;
+    }
+}
+
 impl QueryState {
+    /// Recompute completion suggestions from the current input text, cursor and
+    /// the attribute names seen in loaded items.
+    fn refresh_completion(&mut self) {
+        let value = self.input.value().to_string();
+        let cursor = self.input.cursor_byte();
+        let attrs: Vec<String> = self.item_keys.sorted().to_vec();
+        let items_ref = &self.items;
+        let (span, items) = completion::suggestions(&value, cursor, &attrs, |path| {
+            collect_attribute_values(items_ref, path)
+        });
+        // When the current text is already a runnable query, the user may want to
+        // run it as-is, so show the sentinel row and default to it (Enter runs).
+        // When it isn't runnable yet, default to the first suggestion so Enter
+        // makes progress instead of erroring.
+        self.completion.has_sentinel = query_is_runnable(&value);
+        self.completion.span = span;
+        self.completion.items = items;
+        self.completion.selected = 0;
+        self.completion.visible = !self.completion.dismissed && !self.completion.items.is_empty();
+    }
+
+    /// Forget any dismissal so suggestions can show again (e.g. after the input
+    /// is (re)activated or its text changes).
+    fn reset_completion_dismissal(&mut self) {
+        self.completion.dismissed = false;
+    }
+
+    /// Replace the token under the cursor with the highlighted suggestion.
+    ///
+    /// Returns false without changing anything when the sentinel row is selected
+    /// (and `fallback_first` is not set), letting the caller run the query
+    /// instead. When `fallback_first` is set (Tab), the sentinel completes the
+    /// first item.
+    fn accept_completion(&mut self, fallback_first: bool) -> bool {
+        let idx = match self.completion.selected_item() {
+            Some(idx) => idx,
+            None if fallback_first => 0,
+            None => return false,
+        };
+        let Some(suggestion) = self.completion.items.get(idx) else {
+            return false;
+        };
+        let span = self.completion.span;
+        let text = suggestion.text.clone();
+        self.input.replace_token(span.start, span.end, &text);
+        // Recompute against the new text; functions insert a trailing "(" so the
+        // next suggestion round naturally targets the first argument.
+        self.refresh_completion();
+        true
+    }
+
     fn filter_applied(&self) -> bool {
         !self.filter.value.trim().is_empty()
     }
@@ -816,9 +931,23 @@ impl crate::widgets::Widget for QueryWidget {
         } else {
             let query_active = state.input.is_active();
             let filter_active = state.filter.is_active();
+            let completion_visible = state.completion.visible;
+            let dropdown_h = if completion_visible {
+                state.completion.row_count().min(MAX_DROPDOWN_ROWS + 1) as u16
+            } else {
+                0
+            };
+            // Query region = bordered box (3) + hint line (1) + dropdown rows,
+            // clamped so it never consumes more than half the available height.
+            let mut query_region_h = 3 + 1 + dropdown_h;
+            let cap = (area.height / 2).max(4);
+            if query_region_h > cap {
+                query_region_h = cap;
+            }
+
             let mut constraints = Vec::new();
             if query_active {
-                constraints.push(Constraint::Length(3));
+                constraints.push(Constraint::Length(query_region_h));
             }
             if filter_active {
                 constraints.push(Constraint::Length(3));
@@ -828,8 +957,20 @@ impl crate::widgets::Widget for QueryWidget {
 
             let mut idx = 0;
             if query_active {
-                let query_area = areas[idx];
-                state.input.render(frame, query_area, theme);
+                let region = areas[idx];
+                let actual_dropdown = region.height.saturating_sub(4);
+                let sub = Layout::vertical([
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                    Constraint::Length(actual_dropdown),
+                ])
+                .split(region);
+                state.input.render(frame, sub[0], theme);
+                let hint = self.query_hint_line(state.input.value(), theme);
+                frame.render_widget(Paragraph::new(hint), sub[1]);
+                if completion_visible && actual_dropdown > 0 {
+                    self.render_completion(frame, sub[2], theme, &state.completion);
+                }
                 idx += 1;
             }
             if filter_active {
@@ -861,8 +1002,52 @@ impl crate::widgets::Widget for QueryWidget {
         }
         let input_is_active = self.state.borrow().input.is_active();
         let filter_active = self.state.borrow().filter.is_active();
-        if input_is_active && self.state.borrow_mut().input.handle_event(event) {
-            return true;
+        if input_is_active {
+            let dropdown_visible = self.state.borrow().completion.visible;
+            if let Some(key) = event.as_key_press_event() {
+                match key.code {
+                    KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Surface the query reference. Ctrl+G is layout- and
+                        // macOS-safe with no legacy terminal collision; intercepted
+                        // before the text input so `?` stays typable.
+                        self.open_reference_popup(ctx.clone());
+                        return true;
+                    }
+                    KeyCode::Up if dropdown_visible => {
+                        self.state.borrow_mut().completion.select_prev();
+                        return true;
+                    }
+                    KeyCode::Down if dropdown_visible => {
+                        self.state.borrow_mut().completion.select_next();
+                        return true;
+                    }
+                    KeyCode::Tab if dropdown_visible => {
+                        // Tab always completes — on the sentinel, the first item.
+                        self.state.borrow_mut().accept_completion(true);
+                        return true;
+                    }
+                    KeyCode::Enter if dropdown_visible => {
+                        // Accept the highlighted suggestion; if the sentinel row is
+                        // selected, fall through so Enter runs the query.
+                        if self.state.borrow_mut().accept_completion(false) {
+                            return true;
+                        }
+                    }
+                    KeyCode::Esc if dropdown_visible => {
+                        self.state.borrow_mut().completion.dismiss();
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            // Delegate to the text input, then refresh suggestions on any edit.
+            let handled = self.state.borrow_mut().input.handle_event(event);
+            if handled {
+                let mut state = self.state.borrow_mut();
+                state.reset_completion_dismissal();
+                state.refresh_completion();
+                return true;
+            }
         }
         if filter_active {
             let mut state = self.state.borrow_mut();
@@ -909,6 +1094,7 @@ impl crate::widgets::Widget for QueryWidget {
                         let mut state = self.state.borrow_mut();
                         let value = state.input.value().to_string();
                         state.input.toggle_active();
+                        state.completion.visible = false;
                         value
                     };
                     self.start_query(Some(&query), ctx.clone());
@@ -930,6 +1116,8 @@ impl crate::widgets::Widget for QueryWidget {
                     let mut state = self.state.borrow_mut();
                     if !state.show_tree {
                         state.input.set_active(true);
+                        state.reset_completion_dismissal();
+                        state.refresh_completion();
                     }
                 }
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_down(ctx.clone()),
@@ -1592,7 +1780,7 @@ impl QueryWidget {
         help::Entry {
             keys: Cow::Borrowed("esc"),
             short: Cow::Borrowed("cancel"),
-            long: Cow::Borrowed("Close query input"),
+            long: Cow::Borrowed("Close query input / dismiss suggestions"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -1601,6 +1789,30 @@ impl QueryWidget {
             keys: Cow::Borrowed("⏎"),
             short: Cow::Borrowed("apply"),
             long: Cow::Borrowed("Run query"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("↑/↓"),
+            short: Cow::Borrowed("suggest"),
+            long: Cow::Borrowed("Move through suggestions"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("tab"),
+            short: Cow::Borrowed("complete"),
+            long: Cow::Borrowed("Accept the highlighted suggestion"),
+            ctrl: None,
+            shift: None,
+            alt: None,
+        },
+        help::Entry {
+            keys: Cow::Borrowed("^g"),
+            short: Cow::Borrowed("reference"),
+            long: Cow::Borrowed("Open the query reference"),
             ctrl: None,
             shift: None,
             alt: None,
@@ -2067,6 +2279,168 @@ impl QueryWidget {
                 }
                 lines.join("\n")
             }
+        }
+    }
+
+    fn open_reference_popup(&self, ctx: crate::env::WidgetCtx) {
+        ctx.set_popup(Box::new(ReferencePopup::new(self.inner.id())));
+    }
+
+    /// One-line feedback shown under the query box while editing: a placeholder
+    /// when empty, otherwise whether the expression is valid and whether it will
+    /// run as a Query or a Scan.
+    fn query_hint_line(&self, value: &str, theme: &Theme) -> Line<'static> {
+        let meta = self.table_meta.borrow();
+        let Some(meta) = meta.as_ref() else {
+            return Line::from(Span::styled(
+                "  loading table metadata…".to_string(),
+                Style::default().fg(theme.text_muted()),
+            ));
+        };
+
+        if value.trim().is_empty() {
+            // Use the table's real partition-key name so the example doesn't
+            // imply a case-insensitive `pk`.
+            let hash_key = extract_hash_range(&meta.table_desc)
+                .0
+                .unwrap_or_else(|| "key".to_string());
+            return Line::from(Span::styled(
+                format!(
+                    "  {hash_key} = \"USER#123\"   ·   AND / OR / NOT / BETWEEN / IN   ·   ^g for functions & full reference"
+                ),
+                Style::default().fg(theme.text_muted()),
+            ));
+        }
+
+        let ok_line = |req: DynamoDbRequest| {
+            // A Query targets a key and is cheap; a Scan reads the whole table,
+            // so flag it as a warning to make the difference obvious.
+            if req.is_scan() {
+                Line::from(vec![
+                    Span::styled("  ⚠ ".to_string(), Style::default().fg(theme.warning())),
+                    Span::styled("Scan".to_string(), Style::default().fg(theme.warning())),
+                    Span::styled(
+                        " — reads the whole table".to_string(),
+                        Style::default().fg(theme.text_muted()),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("  ✓ ".to_string(), Style::default().fg(theme.success())),
+                    Span::styled(req.operation_type(), Style::default().fg(theme.success())),
+                ])
+            }
+        };
+
+        match parse_dynamo_expression(value) {
+            Ok(expr) => ok_line(DynamoDbRequest::from_expression_and_table(
+                &expr,
+                &meta.table_desc,
+            )),
+            Err(err) => {
+                // A single bare token targets the partition key (the PK shortcut).
+                if let Ok(operand) = parse_single_value_token(value)
+                    && let (Some(hash_key), _) = extract_hash_range(&meta.table_desc)
+                {
+                    let expr = DynamoExpression::Comparison {
+                        left: Operand::Path(hash_key),
+                        operator: Comparator::Equal,
+                        right: operand,
+                    };
+                    return ok_line(DynamoDbRequest::from_expression_and_table(
+                        &expr,
+                        &meta.table_desc,
+                    ));
+                }
+                if parse_error_is_incomplete(&err) {
+                    // The expression is unfinished, not wrong — don't cry wolf.
+                    Line::from(Span::styled(
+                        "  … keep typing".to_string(),
+                        Style::default().fg(theme.text_muted()),
+                    ))
+                } else {
+                    Line::from(vec![
+                        Span::styled("  ✗ ".to_string(), Style::default().fg(theme.error())),
+                        Span::styled(err.to_string(), Style::default().fg(theme.text_muted())),
+                    ])
+                }
+            }
+        }
+    }
+
+    fn render_completion(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        completion: &Completion,
+    ) {
+        fill_bg(frame.buffer_mut(), area, theme.panel_bg_alt());
+        let max_rows = area.height;
+        let mut drawn: u16 = 0;
+        let row_rect = |drawn: u16| Rect {
+            x: area.x,
+            y: area.y + drawn,
+            width: area.width,
+            height: 1,
+        };
+
+        // Sentinel row: selecting it (the default when no prefix is typed) and
+        // pressing Enter runs the query instead of accepting a suggestion.
+        if completion.has_sentinel && drawn < max_rows {
+            let row_area = row_rect(drawn);
+            let selected = completion.selected == 0;
+            let style = if selected {
+                fill_bg(frame.buffer_mut(), row_area, theme.accent());
+                Style::default()
+                    .fg(theme.panel_bg())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_muted())
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled("  ⏎ run query", style))),
+                row_area,
+            );
+            drawn += 1;
+        }
+
+        let offset = completion.has_sentinel as usize;
+        for (i, sug) in completion.items.iter().enumerate() {
+            if drawn >= max_rows {
+                break;
+            }
+            let row_area = row_rect(drawn);
+            let selected = completion.selected == i + offset;
+            if selected {
+                fill_bg(frame.buffer_mut(), row_area, theme.accent());
+            }
+            let (text_style, detail_style) = if selected {
+                (
+                    Style::default()
+                        .fg(theme.panel_bg())
+                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.panel_bg()),
+                )
+            } else {
+                let kind_color = match sug.kind {
+                    SuggestionKind::Attribute => theme.text(),
+                    SuggestionKind::Value => theme.success(),
+                    SuggestionKind::Function => theme.accent(),
+                    SuggestionKind::Keyword | SuggestionKind::Operator => theme.accent_alt(),
+                };
+                (
+                    Style::default().fg(kind_color),
+                    Style::default().fg(theme.text_muted()),
+                )
+            };
+            let line = Line::from(vec![
+                Span::styled(format!("  {}", sug.text), text_style),
+                Span::raw("   "),
+                Span::styled(sug.detail.clone(), detail_style),
+            ]);
+            frame.render_widget(Paragraph::new(line), row_area);
+            drawn += 1;
         }
     }
 
@@ -4872,14 +5246,41 @@ fn format_comparator(comp: &dynamate::expr::Comparator) -> &'static str {
 }
 
 fn format_function_name(name: &dynamate::expr::FunctionName) -> &'static str {
-    use dynamate::expr::FunctionName::*;
-    match name {
-        AttributeExists => "attribute_exists",
-        AttributeNotExists => "attribute_not_exists",
-        AttributeType => "attribute_type",
-        BeginsWith => "begins_with",
-        Contains => "contains",
-        Size => "size",
+    name.as_str()
+}
+
+/// Unique string values observed for `attr` across the loaded items, in sorted
+/// order. Used to autocomplete `#`-delimited key chunks.
+fn collect_attribute_values(items: &[Item], attr: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        if let Some(AttributeValue::S(value)) = item.0.get(attr)
+            && seen.insert(value.as_str())
+        {
+            out.push(value.clone());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Whether the current text is a query that can be run as-is: a parseable
+/// expression, a single-token partition-key shortcut, or a blank (full scan).
+fn query_is_runnable(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty()
+        || parse_dynamo_expression(value).is_ok()
+        || parse_single_value_token(value).is_ok()
+}
+
+/// Whether a parse error means the expression is merely unfinished (the user is
+/// still typing) rather than genuinely malformed. Used to soften the live hint.
+fn parse_error_is_incomplete(err: &ParseError) -> bool {
+    match err {
+        ParseError::UnexpectedEndOfInput { .. } | ParseError::UnterminatedQuote { .. } => true,
+        ParseError::UnexpectedToken { token, .. } => token == "EOF",
+        _ => false,
     }
 }
 
