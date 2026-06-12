@@ -69,14 +69,14 @@ fn render_value(
                 }
                 let mut remaining: Vec<&str> = map
                     .keys()
-                    .map(|key| key.as_str())
+                    .map(std::string::String::as_str)
                     .filter(|key| !seen.contains(key))
                     .collect();
-                remaining.sort();
+                remaining.sort_unstable();
                 keys.extend(remaining);
             } else {
-                let mut sorted: Vec<&str> = map.keys().map(|key| key.as_str()).collect();
-                sorted.sort();
+                let mut sorted: Vec<&str> = map.keys().map(std::string::String::as_str).collect();
+                sorted.sort_unstable();
                 keys = sorted;
             }
 
@@ -158,18 +158,18 @@ fn is_scalar(value: &Value) -> bool {
 
 fn scalar_text(value: &Value) -> String {
     match value {
-        Value::String(text) => format!("\"{}\"", text),
+        Value::String(text) => format!("\"{text}\""),
         Value::Number(number) => number.to_string(),
         Value::Bool(value) => value.to_string(),
         Value::Null => "null".to_string(),
-        _ => "".to_string(),
+        _ => String::new(),
     }
 }
 
 fn scalar_span(value: &Value, theme: &Theme) -> Span<'static> {
     match value {
         Value::String(text) => Span::styled(
-            format!("\"{}\"", text),
+            format!("\"{text}\""),
             Style::default().fg(theme.accent_alt()),
         ),
         Value::Number(number) => {

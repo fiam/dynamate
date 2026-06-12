@@ -405,7 +405,7 @@ impl TablePickerWidget {
                         .set_exclusive_start_table_name(last_evaluated_table_name)
                         .send()
                 },
-                |err| err.to_string(),
+                std::string::ToString::to_string,
             )
             .await;
             let output = result.map_err(|err| err.to_string())?;
@@ -414,7 +414,9 @@ impl TablePickerWidget {
             if output.last_evaluated_table_name().is_none() {
                 break;
             }
-            last_evaluated_table_name = output.last_evaluated_table_name().map(|s| s.to_string());
+            last_evaluated_table_name = output
+                .last_evaluated_table_name()
+                .map(std::string::ToString::to_string);
         }
 
         table_names.sort();
@@ -867,7 +869,7 @@ impl crate::widgets::Widget for TablePickerWidget {
             let mut state = self.state.borrow_mut();
             match list_event.result.as_ref() {
                 Ok(payload) => {
-                    state.tables = payload.tables.clone();
+                    state.tables.clone_from(&payload.tables);
                     state.apply_filter();
                     state.loading_state = LoadingState::Loaded;
                     if !payload.warnings.is_empty() {
@@ -1092,10 +1094,10 @@ async fn fetch_table_meta(client: &Client, table_name: &str) -> Result<TableMeta
         .table()
         .ok_or_else(|| "DescribeTable: missing table".to_string())?;
 
-    let status = table_desc
-        .table_status()
-        .map(|status| status.as_str().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let status = table_desc.table_status().map_or_else(
+        || "unknown".to_string(),
+        |status| status.as_str().to_string(),
+    );
     let item_count = table_desc.item_count();
     let size_bytes = table_desc.table_size_bytes();
     let gsi_count = table_desc.global_secondary_indexes().len();
@@ -1111,9 +1113,7 @@ async fn fetch_table_meta(client: &Client, table_name: &str) -> Result<TableMeta
 }
 
 fn format_count(count: Option<i64>) -> String {
-    count
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "—".to_string())
+    count.map_or_else(|| "—".to_string(), |value| value.to_string())
 }
 
 fn format_table_count(count: usize) -> String {
@@ -1135,8 +1135,7 @@ fn format_table_count_label(total: usize, filtered: usize) -> String {
 
 fn format_size_bytes(size: Option<i64>) -> String {
     size.and_then(|value| u64::try_from(value).ok())
-        .map(|value| format_size(value, BINARY))
-        .unwrap_or_else(|| "—".to_string())
+        .map_or_else(|| "—".to_string(), |value| format_size(value, BINARY))
 }
 
 fn status_style(status: &str, theme: &Theme) -> Style {
@@ -1272,10 +1271,7 @@ async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, St
         request_items.insert(table_name.to_string(), write_requests);
         let mut pending = request_items;
         loop {
-            let pending_count = pending
-                .get(table_name)
-                .map(|items| items.len())
-                .unwrap_or(0);
+            let pending_count = pending.get(table_name).map_or(0, std::vec::Vec::len);
             let span = tracing::trace_span!(
                 "BatchWriteItem",
                 table = %table_name,

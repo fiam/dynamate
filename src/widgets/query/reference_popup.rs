@@ -91,7 +91,7 @@ impl ReferencePopup {
         lines.push(heading("Value forms"));
         for (form, desc) in builtins::VALUE_FORMS {
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:<20}", form), Style::default().fg(theme.text())),
+                Span::styled(format!("  {form:<20}"), Style::default().fg(theme.text())),
                 Span::styled(desc.to_string(), Style::default().fg(theme.text_muted())),
             ]));
         }
@@ -104,11 +104,11 @@ impl ReferencePopup {
         for (input, expands) in builtins::PK_SHORTCUT {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("    {:<14}", input),
+                    format!("    {input:<14}"),
                     Style::default().fg(theme.text()),
                 ),
                 Span::styled(
-                    format!("→ {}", expands),
+                    format!("→ {expands}"),
                     Style::default().fg(theme.text_muted()),
                 ),
             ]));

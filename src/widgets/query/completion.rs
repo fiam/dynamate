@@ -195,7 +195,7 @@ fn comparison_value_path(before: &str) -> Option<String> {
         // Didn't end with a comparison operator (e.g. a comma, BETWEEN, IN).
         return None;
     }
-    last_bare_token(without_op).map(|s| s.to_string())
+    last_bare_token(without_op).map(std::string::ToString::to_string)
 }
 
 /// The function-argument position the cursor is in, if `before` ends inside a

@@ -132,8 +132,7 @@ fn char_to_byte_idx(value: &str, char_idx: usize) -> usize {
     value
         .char_indices()
         .nth(char_idx)
-        .map(|(idx, _)| idx)
-        .unwrap_or_else(|| value.len())
+        .map_or_else(|| value.len(), |(idx, _)| idx)
 }
 
 pub(crate) struct ExportPopup {
@@ -478,10 +477,7 @@ impl crate::widgets::Widget for ExportPopup {
                 }
             }
             Focus::Checkbox => {
-                if matches!(
-                    key.code,
-                    KeyCode::Char(' ') | KeyCode::Char('f') | KeyCode::Enter
-                ) {
+                if matches!(key.code, KeyCode::Char(' ' | 'f') | KeyCode::Enter) {
                     self.toggle_option();
                     ctx.invalidate();
                     return true;
@@ -554,14 +550,13 @@ impl Popup for ExportPopup {
 }
 
 fn split_path(path: &Path) -> (String, String) {
-    let file = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "export.json".to_string());
+    let file = path.file_name().map_or_else(
+        || "export.json".to_string(),
+        |name| name.to_string_lossy().to_string(),
+    );
     let dir = path
         .parent()
-        .map(abbreviate_home)
-        .unwrap_or_else(|| "~".to_string());
+        .map_or_else(|| "~".to_string(), abbreviate_home);
     (dir, file)
 }
 

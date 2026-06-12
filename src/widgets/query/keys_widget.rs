@@ -93,7 +93,7 @@ impl KeysWidget {
 
     fn update_all(&self, hidden: bool) {
         let mut state = self.state.borrow_mut();
-        for key in state.keys.iter_mut() {
+        for key in &mut state.keys {
             if key.hidden != hidden {
                 key.hidden = hidden;
                 let event = if hidden {

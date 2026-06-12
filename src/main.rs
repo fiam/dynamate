@@ -630,7 +630,7 @@ impl App {
         if self.show_frame_render_duration {
             let duration = start.elapsed();
             // Render duration in red at the bottom right corner
-            let duration_str = format!("{:.2?}", duration);
+            let duration_str = format!("{duration:.2?}");
             let area = frame.area();
             let len = duration_str.len();
             let x = area.x + area.width.saturating_sub(len as u16 + 1);
@@ -645,7 +645,7 @@ impl App {
             && key
                 .modifiers
                 .contains(crossterm::event::KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
+            && matches!(key.code, KeyCode::Char('c' | 'q'))
         {
             self.should_quit = true;
             return true;
@@ -754,8 +754,7 @@ impl App {
                         ModDisplay::Both,
                         self.widgets
                             .last()
-                            .map(|w| w.id())
-                            .unwrap_or_else(env::WidgetId::app),
+                            .map_or_else(env::WidgetId::app, |w| w.id()),
                     )));
                 }
                 KeyCode::Esc => {
@@ -892,16 +891,12 @@ impl App {
                 }
             }
             AppCommand::SetPopup(popup) => {
-                if self.popup.is_some() {
-                    panic!("popup is already set");
-                }
+                assert!(self.popup.is_none(), "popup is already set");
                 self.popup = Some(popup);
                 self.should_redraw = true;
             }
             AppCommand::DismissPopup => {
-                if self.popup.is_none() {
-                    panic!("popup is not set");
-                }
+                assert!(self.popup.is_some(), "popup is not set");
                 self.popup = None;
                 self.should_redraw = true;
             }
@@ -1067,8 +1062,7 @@ impl App {
         let now = Instant::now();
         let should_tick = self
             .last_throbber_tick
-            .map(|last| now.duration_since(last) >= Self::LOADING_THROBBER_TICK)
-            .unwrap_or(true);
+            .is_none_or(|last| now.duration_since(last) >= Self::LOADING_THROBBER_TICK);
         if should_tick {
             self.loading_throbber.calc_next();
             self.last_throbber_tick = Some(now);
@@ -1098,8 +1092,7 @@ impl App {
         let now = Instant::now();
         self.last_toast_throbber_tick
             .get()
-            .map(|last| now.duration_since(last) >= Self::LOADING_THROBBER_TICK)
-            .unwrap_or(true)
+            .is_none_or(|last| now.duration_since(last) >= Self::LOADING_THROBBER_TICK)
     }
 
     fn export_cancel_active(&self) -> bool {
@@ -1117,8 +1110,7 @@ impl App {
         let should_tick = self
             .last_toast_throbber_tick
             .get()
-            .map(|last| now.duration_since(last) >= Self::LOADING_THROBBER_TICK)
-            .unwrap_or(true);
+            .is_none_or(|last| now.duration_since(last) >= Self::LOADING_THROBBER_TICK);
         if should_tick {
             self.toast_throbber.borrow_mut().calc_next();
             self.last_toast_throbber_tick.set(Some(now));

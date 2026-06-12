@@ -195,7 +195,7 @@ impl QueryBuilder {
         name_counter: &mut u32,
         value_counter: &mut u32,
     ) -> String {
-        let name_placeholder = format!("#name{}", name_counter);
+        let name_placeholder = format!("#name{name_counter}");
         *name_counter += 1;
         expression_attribute_names.insert(
             name_placeholder.clone(),
@@ -204,52 +204,49 @@ impl QueryBuilder {
 
         match &key_condition.condition {
             KeyConditionType::Equal(value) => {
-                let value_placeholder = format!(":val{}", value_counter);
+                let value_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 expression_attribute_values.insert(value_placeholder.clone(), value.clone());
-                format!("{} = {}", name_placeholder, value_placeholder)
+                format!("{name_placeholder} = {value_placeholder}")
             }
             KeyConditionType::Between(lower, upper) => {
-                let lower_placeholder = format!(":val{}", value_counter);
+                let lower_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
-                let upper_placeholder = format!(":val{}", value_counter);
+                let upper_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 expression_attribute_values.insert(lower_placeholder.clone(), lower.clone());
                 expression_attribute_values.insert(upper_placeholder.clone(), upper.clone());
-                format!(
-                    "{} BETWEEN {} AND {}",
-                    name_placeholder, lower_placeholder, upper_placeholder
-                )
+                format!("{name_placeholder} BETWEEN {lower_placeholder} AND {upper_placeholder}")
             }
             KeyConditionType::LessThan(value) => {
-                let value_placeholder = format!(":val{}", value_counter);
+                let value_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 expression_attribute_values.insert(value_placeholder.clone(), value.clone());
-                format!("{} < {}", name_placeholder, value_placeholder)
+                format!("{name_placeholder} < {value_placeholder}")
             }
             KeyConditionType::LessThanOrEqual(value) => {
-                let value_placeholder = format!(":val{}", value_counter);
+                let value_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 expression_attribute_values.insert(value_placeholder.clone(), value.clone());
-                format!("{} <= {}", name_placeholder, value_placeholder)
+                format!("{name_placeholder} <= {value_placeholder}")
             }
             KeyConditionType::GreaterThan(value) => {
-                let value_placeholder = format!(":val{}", value_counter);
+                let value_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 expression_attribute_values.insert(value_placeholder.clone(), value.clone());
-                format!("{} > {}", name_placeholder, value_placeholder)
+                format!("{name_placeholder} > {value_placeholder}")
             }
             KeyConditionType::GreaterThanOrEqual(value) => {
-                let value_placeholder = format!(":val{}", value_counter);
+                let value_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 expression_attribute_values.insert(value_placeholder.clone(), value.clone());
-                format!("{} >= {}", name_placeholder, value_placeholder)
+                format!("{name_placeholder} >= {value_placeholder}")
             }
             KeyConditionType::BeginsWith(value) => {
-                let value_placeholder = format!(":val{}", value_counter);
+                let value_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 expression_attribute_values.insert(value_placeholder.clone(), value.clone());
-                format!("begins_with({}, {})", name_placeholder, value_placeholder)
+                format!("begins_with({name_placeholder}, {value_placeholder})")
             }
         }
     }

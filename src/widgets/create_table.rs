@@ -1051,8 +1051,9 @@ impl CreateTableState {
             KeyCode::Enter => picker
                 .items
                 .get(picker.selected)
-                .map(|item| RemovePickerAction::Remove(item.focus))
-                .unwrap_or(RemovePickerAction::Close),
+                .map_or(RemovePickerAction::Close, |item| {
+                    RemovePickerAction::Remove(item.focus)
+                }),
             _ => RemovePickerAction::None,
         }
     }
@@ -1524,7 +1525,7 @@ fn render_row(
         RowKind::HashKey => render_key_row(frame, area, &state.hash_key, theme),
         RowKind::SortKey => render_key_row(frame, area, &state.sort_key, theme),
         RowKind::SectionHeader(section) => {
-            render_section_header(frame, area, section.label(), theme)
+            render_section_header(frame, area, section.label(), theme);
         }
         RowKind::EmptyHint(section) => render_empty_hint(frame, area, section.empty_label(), theme),
         RowKind::GsiLabel(idx) => {
@@ -1795,8 +1796,8 @@ fn projection_from_input(kind: ProjectionKind, attrs: &str) -> Result<IndexProje
 
 fn parse_attr_list(raw: &str) -> Vec<String> {
     raw.split(',')
-        .map(|value| value.trim())
+        .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }

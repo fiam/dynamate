@@ -23,7 +23,7 @@ pub async fn command(client: &aws_sdk_dynamodb::Client, options: Options) -> Res
                     .set_exclusive_start_table_name(last_evaluated_table_name)
                     .send()
             },
-            |err| err.to_string(),
+            std::string::ToString::to_string,
         )
         .await;
         let output = result?;
@@ -32,7 +32,9 @@ pub async fn command(client: &aws_sdk_dynamodb::Client, options: Options) -> Res
         if output.last_evaluated_table_name().is_none() {
             break;
         }
-        last_evaluated_table_name = output.last_evaluated_table_name().map(|s| s.to_string());
+        last_evaluated_table_name = output
+            .last_evaluated_table_name()
+            .map(std::string::ToString::to_string);
     }
 
     if options.json {
@@ -41,7 +43,7 @@ pub async fn command(client: &aws_sdk_dynamodb::Client, options: Options) -> Res
     }
 
     for table in table_names {
-        println!("{}", table);
+        println!("{table}");
     }
     Ok(())
 }

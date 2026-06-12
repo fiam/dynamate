@@ -9,7 +9,7 @@ pub fn parse_dynamo_expression(input: &str) -> Result<DynamoExpression, ParseErr
     match lexer.next_token()? {
         Token::EOF => Ok(expr),
         token => Err(ParseError::UnexpectedToken {
-            token: format!("{:?}", token),
+            token: format!("{token:?}"),
             position: lexer.position,
         }),
     }
@@ -31,7 +31,7 @@ pub fn parse_single_value_token(input: &str) -> Result<Operand, ParseError> {
         }
         token => {
             return Err(ParseError::UnexpectedToken {
-                token: format!("{:?}", token),
+                token: format!("{token:?}"),
                 position: lexer.position,
             });
         }
@@ -40,7 +40,7 @@ pub fn parse_single_value_token(input: &str) -> Result<Operand, ParseError> {
     match lexer.next_token()? {
         Token::EOF => Ok(operand),
         token => Err(ParseError::UnexpectedToken {
-            token: format!("{:?}", token),
+            token: format!("{token:?}"),
             position: lexer.position,
         }),
     }
@@ -88,7 +88,7 @@ pub fn parse_primary_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
             match lexer.next_token()? {
                 Token::RightParen => Ok(DynamoExpression::Parentheses(Box::new(expr))),
                 token => Err(ParseError::UnexpectedToken {
-                    token: format!("{:?}", token),
+                    token: format!("{token:?}"),
                     position: lexer.position,
                 }),
             }
@@ -139,7 +139,7 @@ pub fn parse_function(lexer: &mut Lexer) -> Result<DynamoExpression, ParseError>
         Token::LeftParen => {}
         token => {
             return Err(ParseError::UnexpectedToken {
-                token: format!("{:?}", token),
+                token: format!("{token:?}"),
                 position: lexer.position,
             });
         }
@@ -170,7 +170,7 @@ pub fn parse_function(lexer: &mut Lexer) -> Result<DynamoExpression, ParseError>
             }
             token => {
                 return Err(ParseError::UnexpectedToken {
-                    token: format!("{:?}", token),
+                    token: format!("{token:?}"),
                     position: lexer.position,
                 });
             }
@@ -191,7 +191,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
                 Token::And => {}
                 token => {
                     return Err(ParseError::UnexpectedToken {
-                        token: format!("{:?}", token),
+                        token: format!("{token:?}"),
                         position: lexer.position,
                     });
                 }
@@ -209,7 +209,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
                 Token::LeftParen => {}
                 token => {
                     return Err(ParseError::UnexpectedToken {
-                        token: format!("{:?}", token),
+                        token: format!("{token:?}"),
                         position: lexer.position,
                     });
                 }
@@ -234,7 +234,7 @@ pub fn parse_operand_expression(lexer: &mut Lexer) -> Result<DynamoExpression, P
                     }
                     token => {
                         return Err(ParseError::UnexpectedToken {
-                            token: format!("{:?}", token),
+                            token: format!("{token:?}"),
                             position: lexer.position,
                         });
                     }
@@ -312,7 +312,7 @@ pub fn parse_path_operand(lexer: &mut Lexer) -> Result<Operand, ParseError> {
         Token::Identifier(name) => Ok(Operand::Path(name)),
         Token::Path(name) => Ok(Operand::Path(name)),
         token => Err(ParseError::UnexpectedToken {
-            token: format!("{:?}", token),
+            token: format!("{token:?}"),
             position: lexer.position,
         }),
     }
@@ -327,7 +327,7 @@ pub fn parse_value_operand(lexer: &mut Lexer) -> Result<Operand, ParseError> {
         Token::Boolean(b) => Ok(Operand::Boolean(b)),
         Token::Null => Ok(Operand::Null),
         token => Err(ParseError::UnexpectedToken {
-            token: format!("{:?}", token),
+            token: format!("{token:?}"),
             position: lexer.position,
         }),
     }

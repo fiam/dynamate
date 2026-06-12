@@ -84,7 +84,7 @@ impl ScanBuilder {
                     name_counter,
                     value_counter,
                 );
-                format!("{} {} {}", left_str, op_str, right_str)
+                format!("{left_str} {op_str} {right_str}")
             }
             DynamoExpression::Between {
                 operand,
@@ -112,7 +112,7 @@ impl ScanBuilder {
                     name_counter,
                     value_counter,
                 );
-                format!("{} BETWEEN {} AND {}", operand_str, lower_str, upper_str)
+                format!("{operand_str} BETWEEN {lower_str} AND {upper_str}")
             }
             DynamoExpression::In { operand, values } => {
                 let operand_str = Self::operand_to_string_static(
@@ -174,7 +174,7 @@ impl ScanBuilder {
                     name_counter,
                     value_counter,
                 );
-                format!("({}) AND ({})", left_str, right_str)
+                format!("({left_str}) AND ({right_str})")
             }
             DynamoExpression::Or(left, right) => {
                 let left_str = Self::build_filter_expression_static(
@@ -191,7 +191,7 @@ impl ScanBuilder {
                     name_counter,
                     value_counter,
                 );
-                format!("({}) OR ({})", left_str, right_str)
+                format!("({left_str}) OR ({right_str})")
             }
             DynamoExpression::Not(inner) => {
                 let inner_str = Self::build_filter_expression_static(
@@ -201,7 +201,7 @@ impl ScanBuilder {
                     name_counter,
                     value_counter,
                 );
-                format!("NOT ({})", inner_str)
+                format!("NOT ({inner_str})")
             }
             DynamoExpression::Parentheses(inner) => {
                 let inner_str = Self::build_filter_expression_static(
@@ -211,7 +211,7 @@ impl ScanBuilder {
                     name_counter,
                     value_counter,
                 );
-                format!("({})", inner_str)
+                format!("({inner_str})")
             }
         }
     }
@@ -225,19 +225,19 @@ impl ScanBuilder {
     ) -> String {
         match operand {
             Operand::Path(path) => {
-                let name_placeholder = format!("#name{}", name_counter);
+                let name_placeholder = format!("#name{name_counter}");
                 *name_counter += 1;
                 attr_names.insert(name_placeholder.clone(), path.clone());
                 name_placeholder
             }
             Operand::Value(val) => {
-                let value_placeholder = format!(":val{}", value_counter);
+                let value_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 attr_values.insert(value_placeholder.clone(), AttributeValue::S(val.clone()));
                 value_placeholder
             }
             Operand::Number(num) => {
-                let value_placeholder = format!(":val{}", value_counter);
+                let value_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 attr_values.insert(
                     value_placeholder.clone(),
@@ -246,13 +246,13 @@ impl ScanBuilder {
                 value_placeholder
             }
             Operand::Boolean(b) => {
-                let value_placeholder = format!(":val{}", value_counter);
+                let value_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 attr_values.insert(value_placeholder.clone(), AttributeValue::Bool(*b));
                 value_placeholder
             }
             Operand::Null => {
-                let value_placeholder = format!(":val{}", value_counter);
+                let value_placeholder = format!(":val{value_counter}");
                 *value_counter += 1;
                 attr_values.insert(value_placeholder.clone(), AttributeValue::Null(true));
                 value_placeholder

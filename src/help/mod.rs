@@ -149,16 +149,13 @@ impl<'a> Entry<'a> {
 
         let keys = variant
             .and_then(|v| v.keys.as_ref())
-            .map(|v| v.as_ref())
-            .unwrap_or(base_keys);
+            .map_or(base_keys, std::convert::AsRef::as_ref);
         let short = variant
             .and_then(|v| v.short.as_ref())
-            .map(|v| v.as_ref())
-            .unwrap_or(base_short);
+            .map_or(base_short, std::convert::AsRef::as_ref);
         let long = variant
             .and_then(|v| v.long.as_ref())
-            .map(|v| v.as_ref())
-            .unwrap_or(base_long);
+            .map_or(base_long, std::convert::AsRef::as_ref);
 
         DisplayEntry {
             keys: Cow::Owned(keys.to_string()),

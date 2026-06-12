@@ -125,7 +125,9 @@ impl TableInfo {
 
         if let Some(hash_key_condition) = hash_condition.to_key_condition() {
             let range_key_condition = if let Some(ref range_key) = self.primary_key.range_key {
-                conditions.get(range_key).and_then(|c| c.to_key_condition())
+                conditions
+                    .get(range_key)
+                    .and_then(ConditionInfo::to_key_condition)
             } else {
                 None
             };
@@ -148,7 +150,9 @@ impl TableInfo {
 
         if let Some(hash_key_condition) = hash_condition.to_key_condition() {
             let range_key_condition = if let Some(ref range_key) = gsi.range_key {
-                conditions.get(range_key).and_then(|c| c.to_key_condition())
+                conditions
+                    .get(range_key)
+                    .and_then(ConditionInfo::to_key_condition)
             } else {
                 None
             };
@@ -172,7 +176,9 @@ impl TableInfo {
 
         if let Some(hash_key_condition) = hash_condition.to_key_condition() {
             let range_key_condition = if let Some(ref range_key) = lsi.range_key {
-                conditions.get(range_key).and_then(|c| c.to_key_condition())
+                conditions
+                    .get(range_key)
+                    .and_then(ConditionInfo::to_key_condition)
             } else {
                 None
             };

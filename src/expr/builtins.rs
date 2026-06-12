@@ -182,9 +182,6 @@ impl FunctionName {
         FUNCTIONS
             .iter()
             .find(|f| &f.func == self)
-            .map(|f| f.name)
-            // Every FunctionName variant has a registry entry; the registry is
-            // the single source of truth, so this is unreachable in practice.
-            .unwrap_or("")
+            .map_or("", |f| f.name)
     }
 }

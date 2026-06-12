@@ -883,11 +883,10 @@ impl crate::widgets::Widget for QueryWidget {
 
         if let Some(export_request) = event.payload::<ExportRequest>() {
             if !export_request.overwrite_confirmed && export_request.path.exists() {
-                let filename = export_request
-                    .path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| export_request.path.display().to_string());
+                let filename = export_request.path.file_name().map_or_else(
+                    || export_request.path.display().to_string(),
+                    |name| name.to_string_lossy().to_string(),
+                );
                 let message = format!("{filename} already exists");
                 let ctx_for_confirm = ctx.clone();
                 let confirm_action = ConfirmAction::new(
@@ -1245,17 +1244,17 @@ impl QueryWidget {
             KeyCode::Left
                 if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
             {
-                self.scroll_columns_left()
+                self.scroll_columns_left();
             }
             KeyCode::Right
                 if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
             {
-                self.scroll_columns_right()
+                self.scroll_columns_right();
             }
             KeyCode::Char('z')
                 if !input_is_active && !filter_active && !self.state.borrow().show_tree =>
             {
-                self.toggle_compact_columns()
+                self.toggle_compact_columns();
             }
             KeyCode::Char('f') => {
                 let state = self.state.borrow();
@@ -1980,7 +1979,7 @@ impl QueryWidget {
                     )
                 {
                     let total = state.items.len().saturating_sub(excluded.len());
-                    return Some(format!("selected {}", total));
+                    return Some(format!("selected {total}"));
                 }
                 if excluded.is_empty() {
                     Some("all matching selected".to_string())
@@ -2383,7 +2382,7 @@ impl QueryWidget {
         ctx.show_toast(Toast {
             message,
             kind: ToastKind::Info,
-            duration: Duration::from_secs(3600),
+            duration: Duration::from_hours(1),
             action: None,
         });
     }
@@ -2711,7 +2710,7 @@ impl QueryWidget {
                 hash_display: item.value(&table_info.primary_key.hash_key),
             });
         }
-        for gsi in table_info.global_secondary_indexes.iter() {
+        for gsi in &table_info.global_secondary_indexes {
             if item_matches_index(item, gsi)
                 && let Some(value) = item.0.get(&gsi.hash_key)
             {
@@ -2724,7 +2723,7 @@ impl QueryWidget {
                 });
             }
         }
-        for lsi in table_info.local_secondary_indexes.iter() {
+        for lsi in &table_info.local_secondary_indexes {
             if item_matches_index(item, lsi)
                 && let Some(value) = item.0.get(&lsi.hash_key)
             {
@@ -3526,7 +3525,7 @@ impl QueryWidget {
             ),
             LoadingState::Error(_) => (
                 "Error".to_string(),
-                "".to_string(),
+                String::new(),
                 Style::default().fg(theme.error()),
             ),
         };
@@ -3668,7 +3667,7 @@ impl QueryWidget {
             ),
             LoadingState::Error(_) => (
                 "Error".to_string(),
-                "".to_string(),
+                String::new(),
                 Style::default().fg(theme.error()),
             ),
         };
@@ -3692,8 +3691,10 @@ impl QueryWidget {
             .filtered_indices
             .get(selected)
             .and_then(|idx| state.items.get(*idx))
-            .map(|item| tree::item_to_lines(&item.0, theme, Some(state.item_keys.sorted())))
-            .unwrap_or_else(|| vec![Line::from("No item selected")]);
+            .map_or_else(
+                || vec![Line::from("No item selected")],
+                |item| tree::item_to_lines(&item.0, theme, Some(state.item_keys.sorted())),
+            );
         let inner_area = block.inner(area);
         state.tree_render_capacity = inner_area.height as usize;
         state.tree_line_count = content.len();
@@ -3802,10 +3803,10 @@ impl QueryWidget {
                 .filter(|index| item_matches_index(item, index))
                 .count();
             if gsi_count > 0 {
-                parts.push(format!("GSI: {}", gsi_count));
+                parts.push(format!("GSI: {gsi_count}"));
             }
             if lsi_count > 0 {
-                parts.push(format!("LSI: {}", lsi_count));
+                parts.push(format!("LSI: {lsi_count}"));
             }
         }
 
@@ -4102,14 +4103,13 @@ async fn create_request_from_query(
     if query.is_empty() {
         return Ok(DynamoDbRequest::Scan(ScanBuilder::new()));
     }
-    let table_desc = match cached_meta {
-        Some(meta) => meta.table_desc,
-        None => {
-            let meta = fetch_table_meta(client, table_name).await?;
-            let desc = meta.table_desc.clone();
-            ctx.emit_self(TableMetaEvent { meta });
-            desc
-        }
+    let table_desc = if let Some(meta) = cached_meta {
+        meta.table_desc
+    } else {
+        let meta = fetch_table_meta(client, table_name).await?;
+        let desc = meta.table_desc.clone();
+        ctx.emit_self(TableMetaEvent { meta });
+        desc
     };
     let expr = parse_query_expression(query, &table_desc)?;
     Ok(DynamoDbRequest::from_expression_and_table(
@@ -4126,9 +4126,8 @@ fn parse_query_expression(
         Ok(expr) => Ok(expr),
         Err(parse_error) => {
             let parse_error_text = parse_error.to_string();
-            let value = match parse_single_value_token(query) {
-                Ok(value) => value,
-                Err(_) => return Err(parse_error_text),
+            let Ok(value) = parse_single_value_token(query) else {
+                return Err(parse_error_text);
             };
             let (hash_key, _) = extract_hash_range(table_desc);
             let Some(hash_key) = hash_key else {
@@ -4151,7 +4150,7 @@ async fn fetch_table_description(
     let result = send_dynamo_request(
         span,
         || client.describe_table().table_name(&table_name).send(),
-        |err| err.to_string(),
+        std::string::ToString::to_string,
     )
     .await;
     let out = result.map_err(|e| e.to_string())?;
@@ -4174,7 +4173,7 @@ async fn fetch_ttl_attribute(
                 .table_name(&table_name)
                 .send()
         },
-        |err| err.to_string(),
+        std::string::ToString::to_string,
     )
     .await;
     match output {
@@ -4184,7 +4183,7 @@ async fn fetch_ttl_attribute(
                 Some(TimeToLiveStatus::Enabled | TimeToLiveStatus::Enabling)
             );
             if enabled {
-                desc.attribute_name().map(|name| name.to_string())
+                desc.attribute_name().map(std::string::ToString::to_string)
             } else {
                 None
             }
@@ -4308,8 +4307,7 @@ impl BatchActionScope {
                 .filter(|item| {
                     filter
                         .as_deref()
-                        .map(|needle| item_matches_filter(item, needle))
-                        .unwrap_or(true)
+                        .is_none_or(|needle| item_matches_filter(item, needle))
                 })
                 .cloned()
                 .collect()),
@@ -4572,10 +4570,7 @@ async fn batch_delete_keys(
         request_items.insert(table_name.to_string(), write_requests);
         let mut pending = request_items;
         loop {
-            let pending_count = pending
-                .get(table_name)
-                .map(|items| items.len())
-                .unwrap_or(0);
+            let pending_count = pending.get(table_name).map_or(0, std::vec::Vec::len);
             let span = tracing::trace_span!(
                 "BatchWriteItem",
                 table = %table_name,
@@ -4745,10 +4740,10 @@ fn export_temp_path(path: &Path) -> PathBuf {
         .unwrap_or_default()
         .as_nanos();
     let pid = std::process::id();
-    let file_name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "dynamate-export.json".to_string());
+    let file_name = path.file_name().map_or_else(
+        || "dynamate-export.json".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
     path.with_file_name(format!(".{file_name}.{pid}.{timestamp}.tmp"))
 }
 
@@ -4773,7 +4768,7 @@ fn export_file_name(table_name: &str, mode: ExportKind, timestamp_ms: u128) -> S
         ExportKind::Selection => "selection",
         ExportKind::Results => "results",
     };
-    format!("dynamate-export-{}-{}-{}.json", table, label, timestamp_ms)
+    format!("dynamate-export-{table}-{label}-{timestamp_ms}.json")
 }
 
 fn export_results_file_name(table_name: &str, query: Option<&str>, timestamp_ms: u128) -> String {
@@ -4870,16 +4865,16 @@ fn sanitize_query_component(raw: &str) -> Option<String> {
 }
 
 fn output_info(output: Option<&Output>) -> String {
-    match output.map(|o| o.kind()) {
+    match output.map(dynamate::dynamodb::Output::kind) {
         Some(Kind::Scan) => " (Scan)".to_string(),
         Some(Kind::Query) => " (Query)".to_string(),
         Some(Kind::QueryGSI(index_name)) => {
-            format!(" (Query GSI: {})", index_name)
+            format!(" (Query GSI: {index_name})")
         }
         Some(Kind::QueryLSI(index_name)) => {
-            format!(" (Query LSI: {})", index_name)
+            format!(" (Query LSI: {index_name})")
         }
-        None => "".to_string(),
+        None => String::new(),
     }
 }
 
@@ -4888,7 +4883,7 @@ fn query_footer_label(
     active_query: &ActiveQuery,
     table_desc: Option<&TableDescription>,
 ) -> Option<String> {
-    let (prefix, allow_query) = match output.map(|o| o.kind()) {
+    let (prefix, allow_query) = match output.map(dynamate::dynamodb::Output::kind) {
         Some(Kind::Scan) => ("scan".to_string(), true),
         Some(Kind::Query) => ("query".to_string(), true),
         Some(Kind::QueryGSI(index_name)) => (format!("query@{index_name}"), true),

@@ -348,8 +348,7 @@ mod expr_tests {
         let result = parse_dynamo_expression(input);
         assert!(
             result.is_ok(),
-            "Failed to parse complex expression: {:?}",
-            result
+            "Failed to parse complex expression: {result:?}"
         );
     }
 
@@ -399,7 +398,7 @@ mod expr_tests {
                 DynamoExpression::Function { name, .. } => {
                     assert_eq!(name, expected_func);
                 }
-                _ => panic!("Expected function expression for: {}", input),
+                _ => panic!("Expected function expression for: {input}"),
             }
         }
     }
@@ -419,7 +418,7 @@ mod expr_tests {
 
         for input in invalid_inputs {
             let result = parse_dynamo_expression(input);
-            assert!(result.is_err(), "Expected error for input: {}", input);
+            assert!(result.is_err(), "Expected error for input: {input}");
         }
     }
 

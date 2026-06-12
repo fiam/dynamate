@@ -24,15 +24,18 @@ pub struct Widget {
 }
 
 impl Widget {
-    pub fn new<'a>(
-        entries: Vec<&Entry<'a>>,
+    pub fn new(
+        entries: Vec<&Entry<'_>>,
         modifiers: KeyModifiers,
         mode: ModDisplay,
         parent: WidgetId,
     ) -> Self {
         Self {
             inner: WidgetInner::new::<Self>(parent),
-            entries: entries.into_iter().map(|e| e.to_owned_entry()).collect(),
+            entries: entries
+                .into_iter()
+                .map(super::Entry::to_owned_entry)
+                .collect(),
             modifiers: RefCell::new(modifiers),
             mode: RefCell::new(mode),
         }

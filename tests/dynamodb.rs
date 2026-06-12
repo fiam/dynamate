@@ -88,7 +88,7 @@ async fn new_dynamodb_env() -> Result<DynamoDBEnv> {
     let port = container.get_host_port_ipv4(8000).await?;
     Ok(DynamoDBEnv {
         container,
-        endpoint_url: Some(format!("http://127.0.0.1:{}", port)),
+        endpoint_url: Some(format!("http://127.0.0.1:{port}")),
     })
 }
 
@@ -138,7 +138,7 @@ async fn list_tables() {
 
     let names: Vec<String> = arr
         .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
         .collect();
     assert_eq!(names, table_names);
 }

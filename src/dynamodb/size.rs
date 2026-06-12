@@ -30,7 +30,7 @@ fn estimate_value_size_bytes(value: &AttributeValue) -> usize {
             size
         }
         AttributeValue::Ss(set) => {
-            let values_size: usize = set.iter().map(|s| s.len()).sum();
+            let values_size: usize = set.iter().map(std::string::String::len).sum();
             3 + set.len() + values_size
         }
         AttributeValue::Ns(set) => {

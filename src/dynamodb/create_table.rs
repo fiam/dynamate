@@ -369,9 +369,9 @@ pub async fn create_table(client: Client, spec: CreateTableSpec) -> Result<(), S
 
 fn parse_attribute_list(raw: &str) -> Vec<String> {
     raw.split(',')
-        .map(|value| value.trim())
+        .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| value.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 

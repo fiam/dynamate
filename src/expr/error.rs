@@ -18,31 +18,26 @@ impl std::fmt::Display for ParseError {
             } => {
                 write!(
                     f,
-                    "Unterminated quote '{}' at position {}",
-                    quote_char, position
+                    "Unterminated quote '{quote_char}' at position {position}"
                 )
             }
             ParseError::InvalidEscapeSequence { position } => {
-                write!(f, "Invalid escape sequence at position {}", position)
+                write!(f, "Invalid escape sequence at position {position}")
             }
             ParseError::MissingValue { key, position } => {
-                write!(
-                    f,
-                    "Missing value for key '{}' at position {}",
-                    key, position
-                )
+                write!(f, "Missing value for key '{key}' at position {position}")
             }
             ParseError::InvalidSyntax { message, position } => {
-                write!(f, "Invalid syntax: {} at position {}", message, position)
+                write!(f, "Invalid syntax: {message} at position {position}")
             }
             ParseError::UnexpectedToken { token, position } => {
-                write!(f, "Unexpected token '{}' at position {}", token, position)
+                write!(f, "Unexpected token '{token}' at position {position}")
             }
             ParseError::UnexpectedEndOfInput { position } => {
-                write!(f, "Unexpected end of input at position {}", position)
+                write!(f, "Unexpected end of input at position {position}")
             }
             ParseError::InvalidFunction { name, position } => {
-                write!(f, "Invalid function '{}' at position {}", name, position)
+                write!(f, "Invalid function '{name}' at position {position}")
             }
         }
     }

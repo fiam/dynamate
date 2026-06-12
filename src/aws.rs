@@ -40,7 +40,7 @@ pub async fn validate_connection(client: &aws_sdk_dynamodb::Client) -> Result<()
     let result = send_dynamo_request(
         span,
         || client.list_tables().limit(1).send(),
-        |err| err.to_string(),
+        std::string::ToString::to_string,
     )
     .await;
     result.map(|_| ()).wrap_err("Failed to connect to DynamoDB")

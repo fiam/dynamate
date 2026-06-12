@@ -179,10 +179,10 @@ fn detect_terminal_luma() -> Option<f32> {
 }
 
 fn median_luma(samples: &mut [f32]) -> f32 {
-    samples.sort_by(|a, b| a.total_cmp(b));
+    samples.sort_by(f32::total_cmp);
     let mid = samples.len() / 2;
     if samples.len().is_multiple_of(2) {
-        (samples[mid - 1] + samples[mid]) / 2.0
+        f32::midpoint(samples[mid - 1], samples[mid])
     } else {
         samples[mid]
     }

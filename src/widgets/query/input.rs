@@ -152,6 +152,5 @@ fn char_to_byte_idx(value: &str, char_idx: usize) -> usize {
     value
         .char_indices()
         .nth(char_idx)
-        .map(|(idx, _)| idx)
-        .unwrap_or_else(|| value.len())
+        .map_or_else(|| value.len(), |(idx, _)| idx)
 }

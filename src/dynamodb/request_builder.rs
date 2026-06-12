@@ -50,10 +50,10 @@ impl DynamoDbRequest {
             Self::Query(builder) => match builder.query_type() {
                 QueryType::TableQuery { .. } => "Query (Table)".to_string(),
                 QueryType::GlobalSecondaryIndexQuery { index_name, .. } => {
-                    format!("Query (GSI: {})", index_name)
+                    format!("Query (GSI: {index_name})")
                 }
                 QueryType::LocalSecondaryIndexQuery { index_name, .. } => {
-                    format!("Query (LSI: {})", index_name)
+                    format!("Query (LSI: {index_name})")
                 }
                 QueryType::TableScan => "Scan".to_string(),
             },
