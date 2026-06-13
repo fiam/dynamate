@@ -1,8 +1,11 @@
 use color_eyre::eyre::{Result, eyre};
 
-use dynamate::dynamodb::{
-    AttributeType, CreateTableSpec, GsiSpec, IndexProjection, KeySpec, LsiSpec, create_table,
+use dynamate::core::datastore::Datastore;
+use dynamate::core::query::CreateCollectionSpec;
+use dynamate::core::schema::{
+    IndexKind, IndexSchema, KeyField, KeyRole, KeySchema, Projection, ScalarType,
 };
+use dynamate::dynamodb::{AttributeType, GsiSpec, IndexProjection, KeySpec, LsiSpec};
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
@@ -29,7 +32,7 @@ pub struct Args {
     pub lsi: Vec<String>,
 }
 
-pub async fn command(client: &aws_sdk_dynamodb::Client, args: Args) -> Result<()> {
+pub async fn command(db: &dyn Datastore, args: Args) -> Result<()> {
     let table_name = args.table.trim().to_string();
     let hash_key = parse_key_spec(&args.pk).map_err(|err| eyre!("Invalid --pk value: {err}"))?;
     let sort_key = match args.sk.as_deref() {
@@ -49,20 +52,71 @@ pub async fn command(client: &aws_sdk_dynamodb::Client, args: Args) -> Result<()
         lsis.push(spec);
     }
 
-    let spec = CreateTableSpec {
-        table_name,
-        hash_key,
-        sort_key,
-        gsis,
-        lsis,
+    let mut key_fields = vec![key_field(&hash_key, KeyRole::Partition)];
+    if let Some(sort_key) = sort_key.as_ref() {
+        key_fields.push(key_field(sort_key, KeyRole::Sort));
+    }
+
+    let mut indexes = Vec::new();
+    for gsi in &gsis {
+        let mut fields = vec![key_field(&gsi.hash_key, KeyRole::Partition)];
+        if let Some(sort_key) = gsi.sort_key.as_ref() {
+            fields.push(key_field(sort_key, KeyRole::Sort));
+        }
+        indexes.push(IndexSchema {
+            name: gsi.name.clone(),
+            kind: IndexKind::GlobalSecondary,
+            key: KeySchema { fields },
+            projection: projection(&gsi.projection),
+        });
+    }
+    for lsi in &lsis {
+        indexes.push(IndexSchema {
+            name: lsi.name.clone(),
+            kind: IndexKind::LocalSecondary,
+            key: KeySchema {
+                fields: vec![key_field(&lsi.sort_key, KeyRole::Sort)],
+            },
+            projection: projection(&lsi.projection),
+        });
+    }
+
+    let spec = CreateCollectionSpec {
+        name: table_name,
+        key: KeySchema { fields: key_fields },
+        indexes,
     };
 
-    create_table(client.clone(), spec.clone())
+    db.create_collection(&spec)
         .await
-        .map_err(|err| eyre!(err))?;
+        .map_err(|err| eyre!(err.to_string()))?;
 
-    println!("Created table {}", spec.table_name);
+    println!("Created table {}", spec.name);
     Ok(())
+}
+
+fn key_field(spec: &KeySpec, role: KeyRole) -> KeyField {
+    KeyField {
+        name: spec.name.clone(),
+        role,
+        ty: scalar_type(spec.attr_type),
+    }
+}
+
+fn scalar_type(ty: AttributeType) -> ScalarType {
+    match ty {
+        AttributeType::String => ScalarType::String,
+        AttributeType::Number => ScalarType::Number,
+        AttributeType::Binary => ScalarType::Binary,
+    }
+}
+
+fn projection(projection: &IndexProjection) -> Projection {
+    match projection {
+        IndexProjection::All => Projection::All,
+        IndexProjection::KeysOnly => Projection::KeysOnly,
+        IndexProjection::Include(attrs) => Projection::Include(attrs.clone()),
+    }
 }
 
 fn parse_key_spec(raw: &str) -> Result<KeySpec, String> {

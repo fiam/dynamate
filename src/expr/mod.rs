@@ -10,4 +10,4 @@ pub use ast::*;
 pub use builtins::*;
 pub use error::*;
 pub use key_value::*;
-pub use parser::{parse_dynamo_expression, parse_single_value_token};
+pub use parser::{parse_dynamo_expression, parse_dynamo_expression_with, parse_single_value_token};

@@ -49,8 +49,6 @@ use std::backtrace::Backtrace;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
-use dynamate::aws;
-
 mod env;
 mod help;
 mod input;
@@ -82,6 +80,10 @@ struct Cli {
     /// Path to config file
     #[arg(long, global = true)]
     config: Option<String>,
+
+    /// Storage backend to connect to
+    #[arg(long, value_enum, default_value_t = dynamate::core::connect::BackendKind::Dynamodb)]
+    backend: dynamate::core::connect::BackendKind,
 
     /// Endpoint URL for the DynamoDB service
     #[arg(long)]
@@ -122,31 +124,55 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = <Cli as clap::Parser>::parse();
     dynamate::readonly::set(cli.readonly);
-    let client = Arc::new(aws::new_client(cli.endpoint_url.as_deref()).await?);
-    aws::validate_connection(&client).await?;
 
     match cli.command {
         Some(Commands::ListTables { json }) => {
+            let db = open_backend(cli.backend, cli.endpoint_url.clone(), cli.readonly).await?;
             let options = subcommands::list_tables::Options { json };
-            subcommands::list_tables::command(&client, options).await?;
+            subcommands::list_tables::command(db.as_ref(), options).await?;
             Ok(())
         }
         Some(Commands::CreateTable(args)) => {
             if cli.readonly {
-                eprintln!("{}", dynamate::readonly::REJECT_MESSAGE);
+                eprintln!("{}", dynamate::core::error::DbError::READ_ONLY_MESSAGE);
                 std::process::exit(1);
             }
-            subcommands::create_table::command(&client, args).await?;
+            let db = open_backend(cli.backend, cli.endpoint_url.clone(), cli.readonly).await?;
+            subcommands::create_table::command(db.as_ref(), args).await?;
             Ok(())
         }
         None => {
+            // The interactive UI runs only against DynamoDB today; some widgets
+            // still reach the raw SDK client via the transitional downcast.
+            if cli.backend != dynamate::core::connect::BackendKind::Dynamodb {
+                return Err(color_eyre::eyre::eyre!(
+                    "the interactive UI currently supports only the DynamoDB backend"
+                ));
+            }
+            let db = open_backend(cli.backend, cli.endpoint_url.clone(), cli.readonly).await?;
             logging::initialize()?;
             App::default()
-                .run_tui(client.clone(), cli.table.as_deref(), cli.query.as_deref())
+                .run_tui(db, cli.table.as_deref(), cli.query.as_deref())
                 .await?;
             Ok(())
         }
     }
+}
+
+/// Open the configured backend and verify connectivity.
+async fn open_backend(
+    backend: dynamate::core::connect::BackendKind,
+    endpoint_url: Option<String>,
+    read_only: bool,
+) -> Result<std::sync::Arc<dyn dynamate::core::datastore::Datastore>> {
+    let options = dynamate::core::connect::ConnOptions::Dynamo { endpoint_url };
+    let db = dynamate::core::connect::open(backend, &options, read_only)
+        .await
+        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+    db.validate()
+        .await
+        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+    Ok(db)
 }
 
 struct App {
@@ -312,7 +338,7 @@ impl App {
 
     pub async fn run_tui(
         self,
-        client: Arc<aws_sdk_dynamodb::Client>,
+        db: Arc<dyn dynamate::core::datastore::Datastore>,
         table_name: Option<&str>,
         initial_query: Option<&str>,
     ) -> Result<()> {
@@ -329,7 +355,7 @@ impl App {
         // Give a short grace period so those don't trigger actions at startup.
         app.input_grace_until = Some(Instant::now() + Duration::from_millis(250));
 
-        let app_result = app.run(terminal, client, table_name, initial_query).await;
+        let app_result = app.run(terminal, db, table_name, initial_query).await;
         crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
         ratatui::restore();
         app_result
@@ -338,25 +364,31 @@ impl App {
     pub async fn run(
         mut self,
         mut terminal: DefaultTerminal,
-        client: Arc<aws_sdk_dynamodb::Client>,
+        db: Arc<dyn dynamate::core::datastore::Datastore>,
         table_name: Option<&str>,
         initial_query: Option<&str>,
     ) -> Result<()> {
         let event_driven_render = env_flag("DYNAMATE_EVENT_DRIVEN_RENDER");
+        // The query widget still consumes the raw SDK client; derive it from the
+        // datastore transitionally until that widget is migrated to the trait.
+        let client = || {
+            dynamate::dynamodb::dynamo_client(db.as_ref())
+                .expect("interactive UI requires the DynamoDB backend")
+        };
         let widget: Box<dyn crate::widgets::Widget> = match (table_name, initial_query) {
             (Some(name), Some(query)) => Box::new(widgets::QueryWidget::new_with_text_query(
-                client.as_ref().clone(),
+                client(),
                 name,
                 query,
                 env::WidgetId::app(),
             )),
             (Some(name), None) => Box::new(widgets::QueryWidget::new(
-                client.as_ref().clone(),
+                client(),
                 name,
                 env::WidgetId::app(),
             )),
             (None, _) => Box::new(widgets::TablePickerWidget::new(
-                client.as_ref().clone(),
+                db.clone(),
                 env::WidgetId::app(),
             )),
         };

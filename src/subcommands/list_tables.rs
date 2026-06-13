@@ -1,41 +1,12 @@
 use color_eyre::Result;
-use dynamate::dynamodb::send_dynamo_request;
+use dynamate::core::datastore::Datastore;
 
 pub struct Options {
     pub json: bool,
 }
 
-pub async fn command(client: &aws_sdk_dynamodb::Client, options: Options) -> Result<()> {
-    // Collect all tables.table_names, because there might be multiple pages
-    let mut table_names = Vec::new();
-    let mut last_evaluated_table_name = None;
-
-    loop {
-        let span = tracing::trace_span!(
-            "ListTables",
-            start_table = ?last_evaluated_table_name.as_deref()
-        );
-        let result = send_dynamo_request(
-            span,
-            || {
-                client
-                    .list_tables()
-                    .set_exclusive_start_table_name(last_evaluated_table_name)
-                    .send()
-            },
-            std::string::ToString::to_string,
-        )
-        .await;
-        let output = result?;
-        table_names.extend(output.table_names().iter().cloned());
-
-        if output.last_evaluated_table_name().is_none() {
-            break;
-        }
-        last_evaluated_table_name = output
-            .last_evaluated_table_name()
-            .map(std::string::ToString::to_string);
-    }
+pub async fn command(db: &dyn Datastore, options: Options) -> Result<()> {
+    let table_names = db.list_collections().await.map_err(|err| eyre(&err))?;
 
     if options.json {
         println!("{}", serde_json::to_string(&table_names)?);
@@ -46,4 +17,8 @@ pub async fn command(client: &aws_sdk_dynamodb::Client, options: Options) -> Res
         println!("{table}");
     }
     Ok(())
+}
+
+fn eyre(err: &dynamate::core::error::DbError) -> color_eyre::eyre::Error {
+    color_eyre::eyre::eyre!(err.to_string())
 }

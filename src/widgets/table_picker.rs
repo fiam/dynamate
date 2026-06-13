@@ -1,9 +1,5 @@
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, time::Duration};
+use std::{borrow::Cow, cell::RefCell, sync::Arc, time::Duration};
 
-use aws_sdk_dynamodb::Client;
-use aws_sdk_dynamodb::types::{
-    AttributeValue, DeleteRequest, KeySchemaElement, KeyType, TableDescription, WriteRequest,
-};
 use crossterm::event::{Event, KeyCode, KeyModifiers};
 use humansize::{BINARY, format_size};
 use ratatui::{
@@ -15,7 +11,10 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use dynamate::dynamodb::{format_sdk_error, send_dynamo_request};
+use dynamate::core::datastore::Datastore;
+use dynamate::core::query::{Key, Page, QueryPlan};
+use dynamate::core::value::Item;
+use dynamate::dynamodb::dynamo_client;
 
 use crate::{
     env::{Toast, ToastKind},
@@ -33,7 +32,7 @@ use crate::{
 
 pub struct TablePickerWidget {
     inner: WidgetInner,
-    client: Client,
+    db: Arc<dyn Datastore>,
     state: RefCell<TablePickerState>,
 }
 
@@ -380,51 +379,23 @@ impl TablePickerWidget {
         },
     ];
 
-    pub fn new(client: Client, parent: crate::env::WidgetId) -> Self {
+    pub fn new(db: Arc<dyn Datastore>, parent: crate::env::WidgetId) -> Self {
         Self {
             inner: WidgetInner::new::<Self>(parent),
-            client,
+            db,
             state: RefCell::new(TablePickerState::default()),
         }
     }
 
-    async fn fetch_tables(client: Client) -> Result<TableListPayload, String> {
-        let mut table_names = Vec::new();
-        let mut last_evaluated_table_name = None;
-
-        loop {
-            let span = tracing::trace_span!(
-                "ListTables",
-                start_table = ?last_evaluated_table_name.as_deref()
-            );
-            let result = send_dynamo_request(
-                span,
-                || {
-                    client
-                        .list_tables()
-                        .set_exclusive_start_table_name(last_evaluated_table_name)
-                        .send()
-                },
-                std::string::ToString::to_string,
-            )
-            .await;
-            let output = result.map_err(|err| err.to_string())?;
-            table_names.extend(output.table_names().iter().cloned());
-
-            if output.last_evaluated_table_name().is_none() {
-                break;
-            }
-            last_evaluated_table_name = output
-                .last_evaluated_table_name()
-                .map(std::string::ToString::to_string);
-        }
-
+    async fn fetch_tables(db: Arc<dyn Datastore>) -> Result<TableListPayload, String> {
+        let mut table_names = db.list_collections().await.map_err(|err| err.to_string())?;
         table_names.sort();
+
         let mut tables = Vec::with_capacity(table_names.len());
         let mut warnings = Vec::new();
         for name in table_names {
-            match fetch_table_meta(&client, &name).await {
-                Ok(meta) => tables.push(TableEntry::new(name, meta)),
+            match db.describe_collection(&name).await {
+                Ok(schema) => tables.push(TableEntry::new(name, table_meta_from(&schema))),
                 Err(err) => {
                     warnings.push(format!("{name}: {err}"));
                     tables.push(TableEntry::new(name, TableMeta::placeholder()));
@@ -519,7 +490,7 @@ impl TablePickerWidget {
         };
         if let Some(table_name) = selected {
             let widget = Box::new(QueryWidget::new(
-                self.client.clone(),
+                self.dynamo_client(),
                 &table_name,
                 self.inner.id(),
             ));
@@ -529,16 +500,21 @@ impl TablePickerWidget {
         false
     }
 
+    /// Transitional: the query/create-table widgets still take a raw SDK client.
+    fn dynamo_client(&self) -> aws_sdk_dynamodb::Client {
+        dynamo_client(self.db.as_ref()).expect("table picker requires the DynamoDB backend")
+    }
+
     fn reload_tables(&self, ctx: crate::env::WidgetCtx) {
         {
             let mut state = self.state.borrow_mut();
             state.loading_state = LoadingState::Loading;
         }
         ctx.invalidate();
-        let client = self.client.clone();
+        let db = self.db.clone();
         let ctx_clone = ctx.clone();
         tokio::spawn(async move {
-            let result = Self::fetch_tables(client).await;
+            let result = Self::fetch_tables(db).await;
             ctx_clone.emit_self(TableListEvent { result });
         });
     }
@@ -621,7 +597,7 @@ impl TablePickerWidget {
     }
 
     fn delete_table(&self, table_name: String, ctx: crate::env::WidgetCtx) {
-        if dynamate::readonly::is_enabled() {
+        if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
         }
@@ -630,17 +606,13 @@ impl TablePickerWidget {
             state.loading_state = LoadingState::Busy(format!("Deleting {table_name}..."));
         }
         ctx.invalidate();
-        let client = self.client.clone();
+        let db = self.db.clone();
         let ctx_clone = ctx.clone();
         tokio::spawn(async move {
-            let span = tracing::trace_span!("DeleteTable", table = %table_name);
-            let result = send_dynamo_request(
-                span,
-                || client.delete_table().table_name(&table_name).send(),
-                format_sdk_error,
-            )
-            .await;
-            let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
+            let event_result = db
+                .drop_collection(&table_name)
+                .await
+                .map_err(|err| err.to_string());
             ctx_clone.emit_self(DeleteTableEvent {
                 table_name,
                 result: event_result,
@@ -649,7 +621,7 @@ impl TablePickerWidget {
     }
 
     fn purge_table(&self, table_name: String, ctx: crate::env::WidgetCtx) {
-        if dynamate::readonly::is_enabled() {
+        if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
         }
@@ -658,20 +630,20 @@ impl TablePickerWidget {
             state.loading_state = LoadingState::Busy(format!("Purging {table_name}..."));
         }
         ctx.invalidate();
-        let client = self.client.clone();
+        let db = self.db.clone();
         let ctx_clone = ctx.clone();
         tokio::spawn(async move {
-            let result = purge_table_items(client, &table_name).await;
+            let result = purge_table_items(db, &table_name).await;
             ctx_clone.emit_self(PurgeTableEvent { result });
         });
     }
 
     fn show_create_table(&self, ctx: crate::env::WidgetCtx) {
-        if dynamate::readonly::is_enabled() {
+        if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
         }
-        let popup = Box::new(CreateTablePopup::new(self.client.clone(), self.inner.id()));
+        let popup = Box::new(CreateTablePopup::new(self.dynamo_client(), self.inner.id()));
         ctx.set_popup(popup);
     }
 }
@@ -1031,7 +1003,7 @@ impl crate::widgets::Widget for TablePickerWidget {
                     return true;
                 }
                 KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if dynamate::readonly::is_enabled() {
+                    if self.db.is_read_only() {
                         show_readonly_toast(&ctx);
                     } else {
                         self.confirm_table_action(ctx, TableAction::Delete);
@@ -1039,7 +1011,7 @@ impl crate::widgets::Widget for TablePickerWidget {
                     return true;
                 }
                 KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if dynamate::readonly::is_enabled() {
+                    if self.db.is_read_only() {
                         show_readonly_toast(&ctx);
                     } else {
                         self.confirm_table_action(ctx, TableAction::Purge);
@@ -1081,35 +1053,17 @@ impl crate::widgets::Widget for TablePickerWidget {
     }
 }
 
-async fn fetch_table_meta(client: &Client, table_name: &str) -> Result<TableMeta, String> {
-    let span = tracing::trace_span!("DescribeTable", table = %table_name);
-    let result = send_dynamo_request(
-        span,
-        || client.describe_table().table_name(table_name).send(),
-        format_sdk_error,
-    )
-    .await;
-    let output = result.map_err(|err| format_sdk_error(&err))?;
-    let table_desc = output
-        .table()
-        .ok_or_else(|| "DescribeTable: missing table".to_string())?;
-
-    let status = table_desc.table_status().map_or_else(
-        || "unknown".to_string(),
-        |status| status.as_str().to_string(),
-    );
-    let item_count = table_desc.item_count();
-    let size_bytes = table_desc.table_size_bytes();
-    let gsi_count = table_desc.global_secondary_indexes().len();
-    let lsi_count = table_desc.local_secondary_indexes().len();
-
-    Ok(TableMeta {
-        status,
-        item_count,
-        size_bytes,
-        gsi_count,
-        lsi_count,
-    })
+fn table_meta_from(schema: &dynamate::core::schema::CollectionSchema) -> TableMeta {
+    TableMeta {
+        status: schema
+            .status
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+        item_count: schema.item_count,
+        size_bytes: schema.size_bytes,
+        gsi_count: schema.global_secondary_index_count(),
+        lsi_count: schema.local_secondary_index_count(),
+    }
 }
 
 fn format_count(count: Option<i64>) -> String {
@@ -1151,156 +1105,54 @@ fn status_style(status: &str, theme: &Theme) -> Style {
     }
 }
 
-fn extract_hash_range(table: &TableDescription) -> (Option<String>, Option<String>) {
-    let mut hash = None;
-    let mut range = None;
-    for KeySchemaElement {
-        attribute_name,
-        key_type,
-        ..
-    } in table.key_schema()
-    {
-        match key_type {
-            KeyType::Hash => hash = Some(attribute_name.clone()),
-            KeyType::Range => range = Some(attribute_name.clone()),
-            _ => {}
-        }
-    }
-    (hash, range)
-}
-
-async fn purge_table_items(client: Client, table_name: &str) -> Result<usize, String> {
-    let span = tracing::trace_span!("DescribeTable", table = %table_name);
-    let result = send_dynamo_request(
-        span,
-        || client.describe_table().table_name(table_name).send(),
-        format_sdk_error,
-    )
-    .await;
-    let output = result.map_err(|err| format_sdk_error(&err))?;
-    let table_desc = output
-        .table()
-        .ok_or_else(|| "DescribeTable: missing table".to_string())?;
-    let (hash_key, range_key) = extract_hash_range(table_desc);
-    let Some(hash_key) = hash_key else {
+async fn purge_table_items(db: Arc<dyn Datastore>, table_name: &str) -> Result<usize, String> {
+    let schema = db
+        .describe_collection(table_name)
+        .await
+        .map_err(|err| err.to_string())?;
+    let key_fields: Vec<String> = schema.key.fields.iter().map(|f| f.name.clone()).collect();
+    if key_fields.is_empty() {
         return Err("Table is missing a partition key".to_string());
-    };
+    }
 
     let mut deleted = 0usize;
-    let mut last_evaluated_key: Option<HashMap<String, AttributeValue>> = None;
-
+    let mut cursor = None;
     loop {
-        let mut expr_names = HashMap::new();
-        expr_names.insert("#hk".to_string(), hash_key.clone());
-        let mut projection = "#hk".to_string();
-        if let Some(range_key) = range_key.as_ref() {
-            expr_names.insert("#rk".to_string(), range_key.clone());
-            projection.push_str(", #rk");
-        }
-
-        let start_key_present = last_evaluated_key.is_some();
-        if let Some(start_key) = last_evaluated_key.as_ref() {
-            tracing::trace!(
-                table=%table_name,
-                start_key=?start_key,
-                "Scan pagination start key"
-            );
-        }
-        let span = tracing::trace_span!(
-            "Scan",
-            table = %table_name,
-            projection = %projection,
-            start_key = ?last_evaluated_key,
-            start_key_present = start_key_present,
-            limit = 25
-        );
-        let result = send_dynamo_request(
-            span,
-            || {
-                client
-                    .scan()
-                    .table_name(table_name)
-                    .projection_expression(projection)
-                    .set_expression_attribute_names(Some(expr_names))
-                    .limit(25)
-                    .set_exclusive_start_key(last_evaluated_key.clone())
-                    .send()
-            },
-            format_sdk_error,
-        )
-        .await;
-        let output = result.map_err(|err| format_sdk_error(&err))?;
-
-        let items = output.items();
-        if items.is_empty() {
-            if output.last_evaluated_key().is_none() {
-                break;
-            }
-            last_evaluated_key = output.last_evaluated_key().cloned();
-            continue;
-        }
-
-        let mut write_requests = Vec::with_capacity(items.len());
-        for item in items {
-            let hash_value = item
-                .get(&hash_key)
-                .ok_or_else(|| format!("Missing {hash_key} in item"))?
-                .clone();
-            let mut key = HashMap::new();
-            key.insert(hash_key.clone(), hash_value);
-            if let Some(range_key) = range_key.as_ref() {
-                let range_value = item
-                    .get(range_key)
-                    .ok_or_else(|| format!("Missing {range_key} in item"))?
-                    .clone();
-                key.insert(range_key.clone(), range_value);
-            }
-            let delete_request = DeleteRequest::builder()
-                .set_key(Some(key))
-                .build()
-                .map_err(|err| err.to_string())?;
-            write_requests.push(
-                WriteRequest::builder()
-                    .delete_request(delete_request)
-                    .build(),
-            );
-        }
-
-        let batch_count = write_requests.len();
-        let mut request_items = HashMap::new();
-        request_items.insert(table_name.to_string(), write_requests);
-        let mut pending = request_items;
-        loop {
-            let pending_count = pending.get(table_name).map_or(0, std::vec::Vec::len);
-            let span = tracing::trace_span!(
-                "BatchWriteItem",
-                table = %table_name,
-                items = pending_count
-            );
-            let result = send_dynamo_request(
-                span,
-                || {
-                    client
-                        .batch_write_item()
-                        .set_request_items(Some(pending.clone()))
-                        .send()
+        let page = db
+            .query(
+                table_name,
+                &QueryPlan::default(),
+                Page {
+                    cursor,
+                    limit: Some(25),
                 },
-                format_sdk_error,
             )
-            .await;
-            let output = result.map_err(|err| format_sdk_error(&err))?;
-            let unprocessed = output.unprocessed_items().cloned().unwrap_or_default();
-            if unprocessed.is_empty() {
-                break;
+            .await
+            .map_err(|err| err.to_string())?;
+
+        let mut keys = Vec::with_capacity(page.items.len());
+        for item in &page.items {
+            let mut key_item = Item::new();
+            for field in &key_fields {
+                let value = item
+                    .get(field)
+                    .ok_or_else(|| format!("Missing {field} in item"))?
+                    .clone();
+                key_item.insert(field.clone(), value);
             }
-            pending = unprocessed;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            keys.push(Key(key_item));
         }
 
-        deleted = deleted.saturating_add(batch_count);
+        if !keys.is_empty() {
+            let outcome = db
+                .batch_delete(table_name, keys)
+                .await
+                .map_err(|err| err.to_string())?;
+            deleted = deleted.saturating_add(outcome.deleted as usize);
+        }
 
-        last_evaluated_key = output.last_evaluated_key().cloned();
-        if last_evaluated_key.is_none() {
+        cursor = page.next;
+        if cursor.is_none() {
             break;
         }
     }

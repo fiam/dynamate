@@ -95,6 +95,39 @@ impl TableInfo {
         }
     }
 
+    /// Build a query type forced onto the primary table key, falling back to a
+    /// scan if the expression has no usable key condition.
+    pub fn primary_query_type(&self, expression: &DynamoExpression) -> QueryType {
+        extract_equality_conditions(expression)
+            .and_then(|conditions| self.try_table_query(&conditions))
+            .unwrap_or(QueryType::TableScan)
+    }
+
+    /// Build a query type forced onto the named secondary index, falling back to
+    /// a scan if the index is unknown or the expression lacks its key condition.
+    pub fn index_query_type(&self, index_name: &str, expression: &DynamoExpression) -> QueryType {
+        let Some(conditions) = extract_equality_conditions(expression) else {
+            return QueryType::TableScan;
+        };
+        if let Some(gsi) = self
+            .global_secondary_indexes
+            .iter()
+            .find(|gsi| gsi.name == index_name)
+            && let Some(query_type) = self.try_gsi_query(gsi, &conditions)
+        {
+            return query_type;
+        }
+        if let Some(lsi) = self
+            .local_secondary_indexes
+            .iter()
+            .find(|lsi| lsi.name == index_name)
+            && let Some(query_type) = self.try_lsi_query(lsi, &conditions)
+        {
+            return query_type;
+        }
+        QueryType::TableScan
+    }
+
     pub fn analyze_query_type(&self, expression: &DynamoExpression) -> QueryType {
         if let Some(conditions) = extract_equality_conditions(expression) {
             // Try primary table first

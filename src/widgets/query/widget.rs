@@ -416,7 +416,8 @@ impl QueryState {
         let cursor = self.input.cursor_byte();
         let attrs: Vec<String> = self.item_keys.sorted().to_vec();
         let items_ref = &self.items;
-        let (span, items) = completion::suggestions(&value, cursor, &attrs, |path| {
+        let dialect = dynamate::expr::builtins::default_dialect();
+        let (span, items) = completion::suggestions(&value, cursor, &attrs, dialect, |path| {
             collect_attribute_values(items_ref, path)
         });
         // When the current text is already a runnable query, the user may want to

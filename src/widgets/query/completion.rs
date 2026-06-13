@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use dynamate::expr::builtins;
+use dynamate::expr::builtins::Dialect;
 
 /// Byte offsets into the input string delimiting the token under the cursor.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -129,7 +129,7 @@ fn last_token_and_rest(s: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn detect_context(before: &str) -> Context {
+fn detect_context(before: &str, dialect: &Dialect) -> Context {
     let before = before.trim_end();
     let Some(last) = before.chars().last() else {
         return Context::PathStart;
@@ -146,7 +146,7 @@ fn detect_context(before: &str) -> Context {
             Some((tok, rest)) => match tok.to_ascii_uppercase().as_str() {
                 "AND" | "OR" | "NOT" => Context::PathStart,
                 "BETWEEN" | "IN" => Context::ValueStart,
-                _ if builtins::is_function_name(tok) => Context::PathStart,
+                _ if dialect.is_function_name(tok) => Context::PathStart,
                 _ => {
                     // A bare token preceded by an operator (or `)`) is a value
                     // that completes a condition; otherwise it's a fresh path.
@@ -169,9 +169,6 @@ fn prefix_matches(candidate: &str, prefix: &str) -> bool {
             .to_ascii_lowercase()
             .starts_with(&prefix.to_ascii_lowercase())
 }
-
-/// DynamoDB attribute type codes accepted by `attribute_type(path, type)`.
-const ATTR_TYPES: &[&str] = &["S", "N", "B", "BOOL", "M", "L", "SS", "NS", "BS", "NULL"];
 
 /// Drop a trailing opening quote that the value token directly follows (the
 /// start of a string literal being typed), so the text before it can be
@@ -201,15 +198,15 @@ fn comparison_value_path(before: &str) -> Option<String> {
 /// The function-argument position the cursor is in, if `before` ends inside a
 /// known `func(...)` call.
 struct FuncArg {
-    /// Lowercased function name.
-    name: String,
+    /// Whether a later argument is a type code (e.g. `attribute_type`).
+    takes_type_code: bool,
     /// False while typing the first argument; true once past the first comma.
     past_first: bool,
     /// The first argument (a path), when past the first argument.
     first_path: Option<String>,
 }
 
-fn function_arg(before: &str) -> Option<FuncArg> {
+fn function_arg(before: &str, dialect: &Dialect) -> Option<FuncArg> {
     let s = strip_trailing_quote(before);
     // Find the nearest unmatched '(' to the left of the cursor.
     let mut depth = 0i32;
@@ -229,9 +226,7 @@ fn function_arg(before: &str) -> Option<FuncArg> {
     }
     let open = open?;
     let func = last_bare_token(s[..open].trim_end())?;
-    if !builtins::is_function_name(func) {
-        return None;
-    }
+    let doc = dialect.function_by_name(func)?;
     let inner = &s[open + 1..];
     let (past_first, first_path) = match inner.find(',') {
         Some(c) => {
@@ -241,7 +236,7 @@ fn function_arg(before: &str) -> Option<FuncArg> {
         None => (false, None),
     };
     Some(FuncArg {
-        name: func.to_ascii_lowercase(),
+        takes_type_code: doc.takes_type_code,
         past_first,
         first_path,
     })
@@ -287,10 +282,12 @@ fn push_value_chunks(out: &mut Vec<Suggestion>, values: &[String], prefix: &str)
 ///
 /// `attrs` are the known attribute names; `value_lookup` returns the observed
 /// values for a given attribute (used to complete `#`-delimited key chunks).
+/// `dialect` supplies the function set and type codes to complete.
 pub fn suggestions(
     input: &str,
     cursor: usize,
     attrs: &[String],
+    dialect: &Dialect,
     value_lookup: impl Fn(&str) -> Vec<String>,
 ) -> (TokenSpan, Vec<Suggestion>) {
     let span = token_under_cursor(input, cursor);
@@ -311,7 +308,7 @@ pub fn suggestions(
         }
     };
     let push_functions = |out: &mut Vec<Suggestion>| {
-        for f in builtins::FUNCTIONS {
+        for f in dialect.functions {
             if prefix_matches(f.name, prefix) {
                 out.push(Suggestion {
                     text: format!("{}(", f.name),
@@ -351,14 +348,14 @@ pub fn suggestions(
     // Inside a known function call: the first argument is a path; later
     // arguments are values — `attribute_type` expects a type code, the rest
     // (begins_with, contains, …) expect a value we can complete from the data.
-    if let Some(func_arg) = function_arg(before) {
+    if let Some(func_arg) = function_arg(before, dialect) {
         if !func_arg.past_first {
             push_attrs(&mut out);
-        } else if func_arg.name == "attribute_type" {
-            for ty in ATTR_TYPES {
+        } else if func_arg.takes_type_code {
+            for ty in dialect.type_codes {
                 if prefix_matches(ty, prefix) {
                     out.push(Suggestion {
-                        text: ty.to_string(),
+                        text: (*ty).to_string(),
                         kind: SuggestionKind::Value,
                         detail: "type".to_string(),
                     });
@@ -382,7 +379,7 @@ pub fn suggestions(
         return (span, out);
     }
 
-    match detect_context(before) {
+    match detect_context(before, dialect) {
         Context::AfterPath => {
             // A bare path awaits a comparison — not a connector.
             push_operators(&mut out);
@@ -417,6 +414,10 @@ pub fn suggestions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dialect() -> &'static Dialect {
+        dynamate::expr::builtins::default_dialect()
+    }
 
     fn attrs() -> Vec<String> {
         vec![
@@ -469,7 +470,7 @@ mod tests {
     #[test]
     fn suggests_functions_and_attrs_by_prefix() {
         let input = "sta";
-        let (_, s) = suggestions(input, 3, &attrs(), no_values);
+        let (_, s) = suggestions(input, 3, &attrs(), dialect(), no_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"status"));
         assert!(texts.contains(&"started_at"));
@@ -478,7 +479,7 @@ mod tests {
     #[test]
     fn suggests_function_prefix() {
         let input = "beg";
-        let (_, s) = suggestions(input, 3, &attrs(), no_values);
+        let (_, s) = suggestions(input, 3, &attrs(), dialect(), no_values);
         assert!(s.iter().any(|x| x.text == "begins_with("));
     }
 
@@ -486,7 +487,7 @@ mod tests {
     fn inside_function_suggests_attributes() {
         let input = "begins_with(S";
         let cursor = input.len();
-        let (span, s) = suggestions(input, cursor, &attrs(), no_values);
+        let (span, s) = suggestions(input, cursor, &attrs(), dialect(), no_values);
         assert_eq!(&input[span.start..span.end], "S");
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"SK"));
@@ -497,7 +498,7 @@ mod tests {
     #[test]
     fn after_path_suggests_operators() {
         let input = "status ";
-        let (_, s) = suggestions(input, input.len(), &attrs(), no_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), no_values);
         assert!(
             s.iter()
                 .any(|x| x.text == "=" && x.kind == SuggestionKind::Operator)
@@ -511,7 +512,7 @@ mod tests {
     fn after_completed_comparison_suggests_connectors() {
         // `PK=value ` is a finished condition: offer AND/OR, never operators.
         let input = "PK=ACCOUNT#minervaproject ";
-        let (_, s) = suggestions(input, input.len(), &attrs(), pk_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), pk_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"AND"));
         assert!(texts.contains(&"OR"));
@@ -521,7 +522,7 @@ mod tests {
     #[test]
     fn after_closed_function_suggests_connectors() {
         let input = "begins_with(SK, \"ORDER#\") ";
-        let (_, s) = suggestions(input, input.len(), &attrs(), pk_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), pk_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"AND"));
         assert!(s.iter().all(|x| x.kind != SuggestionKind::Operator));
@@ -530,7 +531,7 @@ mod tests {
     #[test]
     fn after_keyword_suggests_operands() {
         let input = "verified = true AND sta";
-        let (_, s) = suggestions(input, input.len(), &attrs(), no_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), no_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"status"));
         assert!(texts.contains(&"started_at"));
@@ -540,14 +541,14 @@ mod tests {
     fn value_position_offers_no_attributes() {
         // After `=` the user is typing a value, not a field name.
         let input = "PK=AC";
-        let (_, s) = suggestions(input, input.len(), &attrs(), no_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), no_values);
         assert!(s.iter().all(|x| x.kind != SuggestionKind::Attribute));
     }
 
     #[test]
     fn value_position_offers_literals_by_prefix() {
         let input = "verified = tr";
-        let (_, s) = suggestions(input, input.len(), &attrs(), no_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), no_values);
         assert!(s.iter().any(|x| x.text == "true"));
         assert!(s.iter().all(|x| x.kind != SuggestionKind::Attribute));
     }
@@ -556,7 +557,7 @@ mod tests {
     fn value_chunks_advance_by_hash() {
         // Typing the start of a key value suggests up to the next `#`.
         let input = "PK = US";
-        let (_, s) = suggestions(input, input.len(), &attrs(), pk_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), pk_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"USAGETHRESHOLDS#"));
         assert!(texts.contains(&"USER#"));
@@ -571,7 +572,7 @@ mod tests {
     #[test]
     fn value_chunks_complete_next_segment() {
         let input = "PK = USAGETHRESHOLDS#";
-        let (_, s) = suggestions(input, input.len(), &attrs(), pk_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), pk_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"USAGETHRESHOLDS#hilti"));
         assert!(texts.contains(&"USAGETHRESHOLDS#acme"));
@@ -582,7 +583,7 @@ mod tests {
     #[test]
     fn value_chunks_empty_prefix_offers_first_segments() {
         let input = "PK = ";
-        let (_, s) = suggestions(input, input.len(), &attrs(), pk_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), pk_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"USAGETHRESHOLDS#"));
         assert!(texts.contains(&"USER#"));
@@ -592,7 +593,7 @@ mod tests {
     fn begins_with_value_arg_offers_value_chunks() {
         // The value argument of begins_with completes like a comparison value.
         let input = "begins_with(SK, \"US";
-        let (_, s) = suggestions(input, input.len(), &attrs(), pk_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), pk_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"USAGETHRESHOLDS#"));
         assert!(texts.contains(&"USER#"));
@@ -605,7 +606,7 @@ mod tests {
     #[test]
     fn begins_with_first_arg_offers_attributes() {
         let input = "begins_with(S";
-        let (_, s) = suggestions(input, input.len(), &attrs(), pk_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), pk_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"SK"));
         assert!(s.iter().all(|x| x.kind != SuggestionKind::Function));
@@ -615,7 +616,7 @@ mod tests {
     fn combined_with_and_completes_function_value() {
         // `... AND begins_with(SK, "US` still completes the value chunk.
         let input = "PK = \"USER#1\" AND begins_with(SK, \"USAGETHRESHOLDS#";
-        let (_, s) = suggestions(input, input.len(), &attrs(), pk_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), pk_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"USAGETHRESHOLDS#hilti"));
         assert!(texts.contains(&"USAGETHRESHOLDS#acme"));
@@ -624,7 +625,7 @@ mod tests {
     #[test]
     fn attribute_type_offers_type_codes() {
         let input = "attribute_type(age, \"N";
-        let (_, s) = suggestions(input, input.len(), &attrs(), no_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), no_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"N"));
         assert!(texts.contains(&"NULL"));
@@ -635,20 +636,20 @@ mod tests {
     #[test]
     fn quoted_comparison_value_offers_chunks() {
         let input = "PK = \"US";
-        let (_, s) = suggestions(input, input.len(), &attrs(), pk_values);
+        let (_, s) = suggestions(input, input.len(), &attrs(), dialect(), pk_values);
         let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
         assert!(texts.contains(&"USAGETHRESHOLDS#"));
     }
 
     #[test]
     fn empty_input_no_suggestions() {
-        let (_, s) = suggestions("", 0, &attrs(), no_values);
+        let (_, s) = suggestions("", 0, &attrs(), dialect(), no_values);
         assert!(s.is_empty());
     }
 
     #[test]
     fn empty_attrs_still_offers_functions() {
-        let (_, s) = suggestions("att", 3, &[], no_values);
+        let (_, s) = suggestions("att", 3, &[], dialect(), no_values);
         assert!(s.iter().any(|x| x.text == "attribute_exists("));
     }
 }
