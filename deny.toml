@@ -4,10 +4,7 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = [
-    { id = "RUSTSEC-2025-0111", reason = "Transitive via testcontainers dev dependency; no fixed upstream release available." },
-    { id = "RUSTSEC-2025-0134", reason = "Transitive via aws-smithy/testcontainers; advisory has no safe upgrade path yet." },
-]
+ignore = []
 
 [bans]
 multiple-versions = "warn"
