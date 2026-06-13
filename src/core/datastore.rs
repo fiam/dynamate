@@ -38,10 +38,6 @@ pub trait Datastore: Send + Sync {
     /// [`DbError::ReadOnly`]: super::error::DbError::ReadOnly
     fn is_read_only(&self) -> bool;
 
-    /// Downcasting hook used transitionally while UI widgets are migrated off the
-    /// raw SDK client. Will be removed once no widget needs the concrete backend.
-    fn as_any(&self) -> &dyn std::any::Any;
-
     /// Verify connectivity/credentials. Called once at startup.
     async fn validate(&self) -> Result<()>;
 
@@ -78,5 +74,11 @@ pub trait Datastore: Send + Sync {
     /// Predict how a query would run, when the backend can. Defaults to unknown.
     async fn explain(&self, _name: &str, _plan: &QueryPlan) -> PlanExplanation {
         PlanExplanation::Unknown
+    }
+
+    /// Synchronously predict how a query would run, for UI hints (no I/O). The
+    /// default is conservative; backends override using cached metadata.
+    fn predict_plan_kind(&self, _name: &str, _plan: &QueryPlan) -> super::query::PlanKind {
+        super::query::PlanKind::Scan
     }
 }

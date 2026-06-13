@@ -369,21 +369,15 @@ impl App {
         initial_query: Option<&str>,
     ) -> Result<()> {
         let event_driven_render = env_flag("DYNAMATE_EVENT_DRIVEN_RENDER");
-        // The query widget still consumes the raw SDK client; derive it from the
-        // datastore transitionally until that widget is migrated to the trait.
-        let client = || {
-            dynamate::dynamodb::dynamo_client(db.as_ref())
-                .expect("interactive UI requires the DynamoDB backend")
-        };
         let widget: Box<dyn crate::widgets::Widget> = match (table_name, initial_query) {
             (Some(name), Some(query)) => Box::new(widgets::QueryWidget::new_with_text_query(
-                client(),
+                db.clone(),
                 name,
                 query,
                 env::WidgetId::app(),
             )),
             (Some(name), None) => Box::new(widgets::QueryWidget::new(
-                client(),
+                db.clone(),
                 name,
                 env::WidgetId::app(),
             )),

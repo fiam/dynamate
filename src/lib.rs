@@ -1,4 +1,3 @@
-pub mod aws;
 pub mod core;
 pub mod dynamodb;
 pub mod expr;

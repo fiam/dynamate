@@ -1,7 +1,7 @@
 use std::{borrow::Cow, cell::RefCell};
 
-use aws_sdk_dynamodb::types::AttributeValue;
 use crossterm::event::KeyCode;
+use dynamate::core::value::Value;
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
@@ -38,7 +38,7 @@ pub struct IndexTarget {
     pub name: String,
     pub kind: IndexKind,
     pub hash_key: String,
-    pub hash_value: AttributeValue,
+    pub hash_value: Value,
     pub hash_display: String,
 }
 

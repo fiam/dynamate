@@ -14,7 +14,6 @@ use unicode_width::UnicodeWidthStr;
 use dynamate::core::datastore::Datastore;
 use dynamate::core::query::{Key, Page, QueryPlan};
 use dynamate::core::value::Item;
-use dynamate::dynamodb::dynamo_client;
 
 use crate::{
     env::{Toast, ToastKind},
@@ -490,7 +489,7 @@ impl TablePickerWidget {
         };
         if let Some(table_name) = selected {
             let widget = Box::new(QueryWidget::new(
-                self.dynamo_client(),
+                self.db.clone(),
                 &table_name,
                 self.inner.id(),
             ));
@@ -498,11 +497,6 @@ impl TablePickerWidget {
             return true;
         }
         false
-    }
-
-    /// Transitional: the query/create-table widgets still take a raw SDK client.
-    fn dynamo_client(&self) -> aws_sdk_dynamodb::Client {
-        dynamo_client(self.db.as_ref()).expect("table picker requires the DynamoDB backend")
     }
 
     fn reload_tables(&self, ctx: crate::env::WidgetCtx) {
@@ -643,7 +637,7 @@ impl TablePickerWidget {
             show_readonly_toast(&ctx);
             return;
         }
-        let popup = Box::new(CreateTablePopup::new(self.dynamo_client(), self.inner.id()));
+        let popup = Box::new(CreateTablePopup::new(self.db.clone(), self.inner.id()));
         ctx.set_popup(popup);
     }
 }

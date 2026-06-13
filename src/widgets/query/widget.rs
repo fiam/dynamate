@@ -15,10 +15,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use aws_sdk_dynamodb::types::{
-    AttributeValue, DeleteRequest, KeySchemaElement, KeyType, TableDescription, TimeToLiveStatus,
-    WriteRequest,
-};
+use aws_sdk_dynamodb::types::AttributeValue;
 use crossterm::cursor::MoveTo;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{
@@ -58,18 +55,18 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
+use dynamate::core::datastore::Datastore;
+use dynamate::core::query::{Cursor, IndexHint, Key, Page, PlanKind, QueryPlan, QueryResult};
+use dynamate::core::schema::{CollectionSchema, IndexKind, IndexSchema};
+use dynamate::core::value::Value;
+use dynamate::dynamodb::convert::{
+    attribute_map_from_item, attribute_value_to_value, item_from_attribute_map,
+};
 use dynamate::dynamodb::json;
 use dynamate::dynamodb::size::estimate_item_size_bytes;
-use dynamate::dynamodb::{SecondaryIndex, TableInfo, format_sdk_error, send_dynamo_request};
-use dynamate::{
-    dynamodb::{
-        DynamoDbRequest, KeyCondition, KeyConditionType, Kind, Output, QueryBuilder, QueryType,
-        ScanBuilder, execute_page,
-    },
-    expr::{
-        Comparator, DynamoExpression, Operand, ParseError, parse_dynamo_expression,
-        parse_single_value_token,
-    },
+use dynamate::expr::{
+    Comparator, DynamoExpression, Operand, ParseError, parse_dynamo_expression,
+    parse_single_value_token,
 };
 use humansize::{BINARY, format_size};
 use tokio::sync::mpsc;
@@ -78,7 +75,7 @@ use unicode_width::UnicodeWidthStr;
 
 pub struct QueryWidget {
     inner: WidgetInner,
-    client: aws_sdk_dynamodb::Client,
+    db: Arc<dyn Datastore>,
     table_name: String,
     initial_query: Option<ActiveQuery>,
     state: RefCell<QueryState>,
@@ -94,12 +91,12 @@ struct QueryState {
     input: input::Input,
     filter: FilterInput,
     loading_state: LoadingState,
-    query_output: Option<Output>,
+    query_output: Option<QueryResult>,
     items: Vec<Item>,
     filtered_indices: Vec<usize>,
     item_keys: item_keys::ItemKeys,
     table_state: TableState,
-    last_evaluated_key: Option<HashMap<String, AttributeValue>>,
+    last_evaluated_key: Option<Cursor>,
     last_query: String,
     active_query: ActiveQuery,
     is_loading_more: bool,
@@ -156,12 +153,12 @@ struct QueryPageEvent {
     request_id: u64,
     append: bool,
     start_key_present: bool,
-    result: Result<Output, String>,
+    result: Result<QueryResult, String>,
 }
 
 #[derive(Clone)]
 struct TableMeta {
-    table_desc: TableDescription,
+    schema: CollectionSchema,
     ttl_attr: Option<String>,
 }
 
@@ -618,7 +615,7 @@ impl crate::widgets::Widget for QueryWidget {
             .table_meta
             .borrow()
             .as_ref()
-            .and_then(|meta| meta.table_desc.item_count())
+            .and_then(|meta| meta.schema.item_count)
         {
             context_parts.push(format!("~{count} items"));
         }
@@ -822,15 +819,15 @@ impl crate::widgets::Widget for QueryWidget {
                         "execute_page_ok"
                     );
                     let (scanned_total, matched_total) = self.record_query_progress(&output);
-                    let next_key = output.last_evaluated_key().cloned();
+                    let next_key_present = output.next.is_some();
                     tracing::debug!(
                         table = %self.table_name,
                         request_id = page_event.request_id,
                         start_key_present = page_event.start_key_present,
-                        next_key_present = next_key.is_some(),
-                        items = output.items().len(),
-                        scanned = output.scanned_count(),
-                        matched = output.count(),
+                        next_key_present,
+                        items = output.items.len(),
+                        scanned = output.scanned_count.unwrap_or(0),
+                        matched = output.count,
                         "query_page"
                     );
                     self.process_query_output(output, page_event.append);
@@ -866,7 +863,7 @@ impl crate::widgets::Widget for QueryWidget {
             let meta = meta_event.meta.clone();
             self.table_meta.borrow_mut().replace(meta.clone());
             let mut state = self.state.borrow_mut();
-            state.item_keys.rebuild_with_schema(&meta.table_desc);
+            state.item_keys.rebuild_with_schema(&meta.schema);
             ctx.invalidate();
             return;
         }
@@ -1074,7 +1071,7 @@ impl crate::widgets::Widget for QueryWidget {
 
         if let Some(index_event) = event.payload::<IndexQueryEvent>() {
             let widget = Box::new(QueryWidget::new_with_query(
-                self.client.clone(),
+                self.db.clone(),
                 &self.table_name,
                 self.inner.id(),
                 Some(ActiveQuery::Index(index_event.target.clone())),
@@ -1807,22 +1804,18 @@ impl QueryWidget {
             alt: None,
         },
     ];
-    pub fn new(
-        client: aws_sdk_dynamodb::Client,
-        table_name: &str,
-        parent: crate::env::WidgetId,
-    ) -> Self {
-        Self::new_with_query(client, table_name, parent, None)
+    pub fn new(db: Arc<dyn Datastore>, table_name: &str, parent: crate::env::WidgetId) -> Self {
+        Self::new_with_query(db, table_name, parent, None)
     }
 
     pub fn new_with_text_query(
-        client: aws_sdk_dynamodb::Client,
+        db: Arc<dyn Datastore>,
         table_name: &str,
         query: &str,
         parent: crate::env::WidgetId,
     ) -> Self {
         Self::new_with_query(
-            client,
+            db,
             table_name,
             parent,
             Some(ActiveQuery::Text(query.to_string())),
@@ -1830,7 +1823,7 @@ impl QueryWidget {
     }
 
     fn new_with_query(
-        client: aws_sdk_dynamodb::Client,
+        db: Arc<dyn Datastore>,
         table_name: &str,
         parent: crate::env::WidgetId,
         initial_query: Option<ActiveQuery>,
@@ -1841,7 +1834,7 @@ impl QueryWidget {
             .unwrap_or(100);
         Self {
             inner: WidgetInner::new::<Self>(parent),
-            client,
+            db,
             table_name: table_name.to_string(),
             initial_query,
             state: RefCell::new(QueryState::default()),
@@ -1857,11 +1850,11 @@ impl QueryWidget {
         self.state.borrow_mut().loading_state = state;
     }
 
-    fn table_desc(&self) -> Result<TableDescription, String> {
+    fn schema(&self) -> Result<CollectionSchema, String> {
         self.table_meta
             .borrow()
             .as_ref()
-            .map(|meta| meta.table_desc.clone())
+            .map(|meta| meta.schema.clone())
             .ok_or_else(|| "Table metadata is not available yet".to_string())
     }
 
@@ -1875,13 +1868,13 @@ impl QueryWidget {
     }
 
     fn item_key_at_index(&self, index: usize) -> Result<ItemKey, String> {
-        let table_desc = self.table_desc()?;
+        let schema = self.schema()?;
         let state = self.state.borrow();
         let item = state
             .items
             .get(index)
             .ok_or_else(|| "No item selected".to_string())?;
-        ItemKey::from_item(&item.0, &table_desc)
+        ItemKey::from_item(&item.0, &schema)
     }
 
     fn selected_item_key(&self) -> Result<ItemKey, String> {
@@ -1913,14 +1906,14 @@ impl QueryWidget {
     /// flips membership of each loaded key; in `Query` it flips each
     /// loaded key's exclusion.
     fn invert_selection(&self) {
-        let Ok(table_desc) = self.table_desc() else {
+        let Ok(schema) = self.schema() else {
             return;
         };
         let mut state = self.state.borrow_mut();
         let loaded_keys: Vec<ItemKey> = state
             .items
             .iter()
-            .filter_map(|item| ItemKey::from_item(&item.0, &table_desc).ok())
+            .filter_map(|item| ItemKey::from_item(&item.0, &schema).ok())
             .collect();
         state.selection.invert_loaded(loaded_keys);
     }
@@ -1959,10 +1952,10 @@ impl QueryWidget {
     }
 
     fn remove_selection_key(&self, key: &HashMap<String, AttributeValue>) {
-        let Ok(table_desc) = self.table_desc() else {
+        let Ok(schema) = self.schema() else {
             return;
         };
-        let Ok(item_key) = ItemKey::from_item(key, &table_desc) else {
+        let Ok(item_key) = ItemKey::from_item(key, &schema) else {
             return;
         };
         self.state.borrow_mut().selection.remove_key(&item_key);
@@ -1997,7 +1990,7 @@ impl QueryWidget {
     fn item_is_selected(
         &self,
         item: &Item,
-        table_desc: Option<&TableDescription>,
+        schema: Option<&CollectionSchema>,
         selection: Option<&SelectionSnapshot>,
     ) -> bool {
         let Some(selection) = selection else {
@@ -2006,10 +1999,10 @@ impl QueryWidget {
         match selection {
             SelectionSnapshot::Query { excluded } if excluded.is_empty() => true,
             SelectionSnapshot::Explicit(_) | SelectionSnapshot::Query { .. } => {
-                let Some(table_desc) = table_desc else {
+                let Some(schema) = schema else {
                     return false;
                 };
-                let Ok(item_key) = ItemKey::from_item(&item.0, table_desc) else {
+                let Ok(item_key) = ItemKey::from_item(&item.0, schema) else {
                     return false;
                 };
                 selection.is_selected(&item_key)
@@ -2020,14 +2013,14 @@ impl QueryWidget {
     fn selected_loaded_items(
         &self,
         selection: &SelectionSnapshot,
-        table_desc: &TableDescription,
+        schema: &CollectionSchema,
     ) -> Vec<HashMap<String, AttributeValue>> {
         let state = self.state.borrow();
         state
             .items
             .iter()
             .filter_map(|item| {
-                let item_key = ItemKey::from_item(&item.0, table_desc).ok()?;
+                let item_key = ItemKey::from_item(&item.0, schema).ok()?;
                 if selection.is_selected(&item_key) {
                     Some(item.0.clone())
                 } else {
@@ -2040,14 +2033,14 @@ impl QueryWidget {
     fn selected_loaded_keys(
         &self,
         selection: &SelectionSnapshot,
-        table_desc: &TableDescription,
+        schema: &CollectionSchema,
     ) -> Vec<ItemKey> {
         let state = self.state.borrow();
         state
             .items
             .iter()
             .filter_map(|item| {
-                let item_key = ItemKey::from_item(&item.0, table_desc).ok()?;
+                let item_key = ItemKey::from_item(&item.0, schema).ok()?;
                 if selection.is_selected(&item_key) {
                     Some(item_key)
                 } else {
@@ -2098,7 +2091,7 @@ impl QueryWidget {
         if value.trim().is_empty() {
             // Use the table's real partition-key name so the example doesn't
             // imply a case-insensitive `pk`.
-            let hash_key = extract_hash_range(&meta.table_desc)
+            let hash_key = extract_hash_range(&meta.schema)
                 .0
                 .unwrap_or_else(|| "key".to_string());
             return Line::from(Span::styled(
@@ -2109,45 +2102,50 @@ impl QueryWidget {
             ));
         }
 
-        let ok_line = |req: DynamoDbRequest| {
+        let ok_line = |kind: PlanKind| {
             // A Query targets a key and is cheap; a Scan reads the whole table,
             // so flag it as a warning to make the difference obvious.
-            if req.is_scan() {
-                Line::from(vec![
+            match kind {
+                PlanKind::Scan => Line::from(vec![
                     Span::styled("  ⚠ ".to_string(), Style::default().fg(theme.warning())),
                     Span::styled("Scan".to_string(), Style::default().fg(theme.warning())),
                     Span::styled(
                         " — reads the whole table".to_string(),
                         Style::default().fg(theme.text_muted()),
                     ),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::styled("  ✓ ".to_string(), Style::default().fg(theme.success())),
-                    Span::styled(req.operation_type(), Style::default().fg(theme.success())),
-                ])
+                ]),
+                PlanKind::IndexedQuery { index } => {
+                    let label = match index {
+                        Some(name) => format!("Query ({name})"),
+                        None => "Query".to_string(),
+                    };
+                    Line::from(vec![
+                        Span::styled("  ✓ ".to_string(), Style::default().fg(theme.success())),
+                        Span::styled(label, Style::default().fg(theme.success())),
+                    ])
+                }
             }
         };
 
         match parse_dynamo_expression(value) {
-            Ok(expr) => ok_line(DynamoDbRequest::from_expression_and_table(
-                &expr,
-                &meta.table_desc,
-            )),
+            Ok(expr) => ok_line(
+                self.db
+                    .predict_plan_kind(&self.table_name, &QueryPlan::new(Some(expr), None)),
+            ),
             Err(err) => {
                 // A single bare token targets the partition key (the PK shortcut).
                 if let Ok(operand) = parse_single_value_token(value)
-                    && let (Some(hash_key), _) = extract_hash_range(&meta.table_desc)
+                    && let (Some(hash_key), _) = extract_hash_range(&meta.schema)
                 {
                     let expr = DynamoExpression::Comparison {
                         left: Operand::Path(hash_key),
                         operator: Comparator::Equal,
                         right: operand,
                     };
-                    return ok_line(DynamoDbRequest::from_expression_and_table(
-                        &expr,
-                        &meta.table_desc,
-                    ));
+                    return ok_line(
+                        self.db
+                            .predict_plan_kind(&self.table_name, &QueryPlan::new(Some(expr), None)),
+                    );
                 }
                 if parse_error_is_incomplete(&err) {
                     // The expression is unfinished, not wrong — don't cry wolf.
@@ -2256,7 +2254,7 @@ impl QueryWidget {
     }
 
     fn confirm_delete(&self, ctx: crate::env::WidgetCtx) {
-        if dynamate::readonly::is_enabled() {
+        if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
         }
@@ -2284,7 +2282,7 @@ impl QueryWidget {
     }
 
     fn confirm_delete_selection(&self, ctx: crate::env::WidgetCtx) {
-        if dynamate::readonly::is_enabled() {
+        if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
         }
@@ -2476,7 +2474,7 @@ impl QueryWidget {
                     start_key,
                     active_query,
                     cached_meta: self.table_meta.borrow().clone(),
-                    client: self.client.clone(),
+                    db: self.db.clone(),
                     table_name: self.table_name.clone(),
                     cancel: Some(cancel.clone()),
                 };
@@ -2539,14 +2537,14 @@ impl QueryWidget {
             self.show_error(ctx.clone(), "No items selected");
             return;
         };
-        let table_desc = match self.table_desc() {
-            Ok(table_desc) => table_desc,
+        let schema = match self.schema() {
+            Ok(schema) => schema,
             Err(err) => {
                 self.show_error(ctx.clone(), &err);
                 return;
             }
         };
-        let items = self.selected_loaded_items(&selection, &table_desc);
+        let items = self.selected_loaded_items(&selection, &schema);
         let start_key = {
             let state = self.state.borrow();
             match &selection {
@@ -2564,12 +2562,12 @@ impl QueryWidget {
         let request = BatchActionStreamRequest {
             scope: BatchActionScope::Selection {
                 selection,
-                table_desc: Box::new(table_desc),
+                schema: Box::new(schema),
             },
             start_key,
             active_query: self.state.borrow().active_query.clone(),
             cached_meta: None,
-            client: self.client.clone(),
+            db: self.db.clone(),
             table_name: self.table_name.clone(),
             cancel: Some(cancel.clone()),
         };
@@ -2577,14 +2575,14 @@ impl QueryWidget {
     }
 
     fn delete_selection(&self, selection: SelectionSnapshot, ctx: crate::env::WidgetCtx) {
-        if dynamate::readonly::is_enabled() {
+        if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
         }
         self.set_loading_state(LoadingState::Loading);
         ctx.invalidate();
-        let table_desc = match self.table_desc() {
-            Ok(table_desc) => table_desc,
+        let schema = match self.schema() {
+            Ok(schema) => schema,
             Err(err) => {
                 self.set_loading_state(LoadingState::Loaded);
                 self.show_error(ctx.clone(), &err);
@@ -2600,17 +2598,17 @@ impl QueryWidget {
                 SelectionSnapshot::Explicit(_) => None,
             }
         };
-        let loaded_keys = self.selected_loaded_keys(&selection, &table_desc);
-        let client = self.client.clone();
+        let loaded_keys = self.selected_loaded_keys(&selection, &schema);
+        let db = self.db.clone();
         let table_name = self.table_name.clone();
         tokio::spawn(async move {
             let request = DeleteSelectionJob {
                 selection,
                 loaded_keys,
-                table_desc,
+                schema,
                 start_key,
                 active_query,
-                client,
+                db,
                 table_name,
             };
             let result = delete_selection_full(request).await;
@@ -2646,14 +2644,14 @@ impl QueryWidget {
             }
             ExportKind::Selection => base.join(export_file_name(&self.table_name, mode, timestamp)),
             ExportKind::Results => {
-                let table_desc = self
+                let schema = self
                     .table_meta
                     .borrow()
                     .as_ref()
-                    .map(|meta| meta.table_desc.clone());
+                    .map(|meta| meta.schema.clone());
                 let query = {
                     let state = self.state.borrow();
-                    normalized_query(&state.active_query, table_desc.as_ref())
+                    normalized_query(&state.active_query, schema.as_ref())
                 };
                 base.join(export_results_file_name(
                     &self.table_name,
@@ -2667,14 +2665,14 @@ impl QueryWidget {
     fn item_export_file_name(&self, item: &HashMap<String, AttributeValue>) -> Option<String> {
         let meta = self.table_meta.borrow();
         let meta = meta.as_ref()?;
-        let table_info = TableInfo::from_table_description(&meta.table_desc);
-        let pk_name = table_info.primary_key.hash_key.as_str();
-        let pk_value = item.get(pk_name)?;
-        let pk_component = sanitize_filename_component(pk_name, "pk");
+        let (hash_key, range_key) = extract_hash_range(&meta.schema);
+        let pk_name = hash_key?;
+        let pk_value = item.get(&pk_name)?;
+        let pk_component = sanitize_filename_component(&pk_name, "pk");
         let pk_value_component =
             sanitize_filename_component(&attribute_value_for_filename(pk_value), "value");
         let mut name = format!("{pk_component}_{pk_value_component}");
-        if let Some(sk_name) = table_info.primary_key.range_key.as_deref()
+        if let Some(sk_name) = range_key.as_deref()
             && let Some(sk_value) = item.get(sk_name)
         {
             let sk_component = sanitize_filename_component(sk_name, "sk");
@@ -2700,40 +2698,35 @@ impl QueryWidget {
             .items
             .get(selected)
             .ok_or_else(|| "No item selected".to_string())?;
-        let table_info = TableInfo::from_table_description(&meta.table_desc);
         let mut targets = Vec::new();
-        if let Some(value) = item.0.get(&table_info.primary_key.hash_key) {
+        if let Some(hash_key) = meta.schema.key.partition_key()
+            && let Some(value) = item.0.get(hash_key)
+        {
             targets.push(index_picker::IndexTarget {
                 name: "Table".to_string(),
                 kind: index_picker::IndexKind::Primary,
-                hash_key: table_info.primary_key.hash_key.clone(),
-                hash_value: value.clone(),
-                hash_display: item.value(&table_info.primary_key.hash_key),
+                hash_key: hash_key.to_string(),
+                hash_value: attribute_value_to_value(value),
+                hash_display: item.value(hash_key),
             });
         }
-        for gsi in &table_info.global_secondary_indexes {
-            if item_matches_index(item, gsi)
-                && let Some(value) = item.0.get(&gsi.hash_key)
+        for index in &meta.schema.indexes {
+            let Some(index_hash) = index.key.partition_key() else {
+                continue;
+            };
+            if item_has_index_keys(item, index)
+                && let Some(value) = item.0.get(index_hash)
             {
+                let kind = match index.kind {
+                    IndexKind::LocalSecondary => index_picker::IndexKind::Local,
+                    _ => index_picker::IndexKind::Global,
+                };
                 targets.push(index_picker::IndexTarget {
-                    name: gsi.name.clone(),
-                    kind: index_picker::IndexKind::Global,
-                    hash_key: gsi.hash_key.clone(),
-                    hash_value: value.clone(),
-                    hash_display: item.value(&gsi.hash_key),
-                });
-            }
-        }
-        for lsi in &table_info.local_secondary_indexes {
-            if item_matches_index(item, lsi)
-                && let Some(value) = item.0.get(&lsi.hash_key)
-            {
-                targets.push(index_picker::IndexTarget {
-                    name: lsi.name.clone(),
-                    kind: index_picker::IndexKind::Local,
-                    hash_key: lsi.hash_key.clone(),
-                    hash_value: value.clone(),
-                    hash_display: item.value(&lsi.hash_key),
+                    name: index.name.clone(),
+                    kind,
+                    hash_key: index_hash.to_string(),
+                    hash_value: attribute_value_to_value(value),
+                    hash_display: item.value(index_hash),
                 });
             }
         }
@@ -2745,7 +2738,7 @@ impl QueryWidget {
         let Some(meta) = meta.as_ref() else {
             return Err("Table metadata is not available yet".to_string());
         };
-        let (hash_key, range_key) = extract_hash_range(&meta.table_desc);
+        let (hash_key, range_key) = extract_hash_range(&meta.schema);
         let Some(hash_key) = hash_key else {
             return Err("Table is missing a partition key".to_string());
         };
@@ -2781,34 +2774,20 @@ impl QueryWidget {
     }
 
     fn delete_item(&self, key: HashMap<String, AttributeValue>, ctx: crate::env::WidgetCtx) {
-        if dynamate::readonly::is_enabled() {
+        if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
         }
         self.set_loading_state(LoadingState::Loading);
         ctx.invalidate();
-        let client = self.client.clone();
+        let db = self.db.clone();
         let table_name = self.table_name.clone();
         tokio::spawn(async move {
-            let key_len = key.len();
-            let span = tracing::trace_span!(
-                "DeleteItem",
-                table = %table_name,
-                key_len = key_len
-            );
-            let result = send_dynamo_request(
-                span,
-                || {
-                    client
-                        .delete_item()
-                        .table_name(&table_name)
-                        .set_key(Some(key.clone()))
-                        .send()
-                },
-                format_sdk_error,
-            )
-            .await;
-            let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
+            let neutral_key = Key(item_from_attribute_map(&key));
+            let event_result = db
+                .delete_item(&table_name, neutral_key)
+                .await
+                .map_err(|err| err.to_string());
             ctx.emit_self(DeleteItemEvent {
                 key,
                 result: event_result,
@@ -2822,7 +2801,7 @@ impl QueryWidget {
             let Some(meta) = meta.as_ref() else {
                 return;
             };
-            extract_hash_range(&meta.table_desc)
+            extract_hash_range(&meta.schema)
         };
         let Some(hash_key) = hash_key else {
             return;
@@ -3104,51 +3083,52 @@ impl QueryWidget {
     fn start_query_page(
         &self,
         query: String,
-        start_key: Option<HashMap<String, AttributeValue>>,
+        start_key: Option<Cursor>,
         append: bool,
         ctx: crate::env::WidgetCtx,
         request_id: u64,
     ) {
-        let client = self.client.clone();
+        let db = self.db.clone();
         let table_name = self.table_name.clone();
         let page_size = self.page_size;
         let cached_meta = self.table_meta.borrow().clone();
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            let request_result = create_request_from_query(
+            let plan_result = create_request_from_query(
                 &query,
                 cached_meta,
-                client.clone(),
+                db.clone(),
                 table_name.clone(),
                 ctx.clone(),
             )
             .await;
-            let result = match request_result {
-                Ok(request) => {
-                    let request_start_key = start_key.clone();
+            let start_key_present = start_key.is_some();
+            let result = match plan_result {
+                Ok(plan) => {
                     tracing::trace!(
                         table = %table_name,
                         request_id,
                         append,
-                        start_key_present = request_start_key.is_some(),
+                        start_key_present,
                         "execute_page_start"
                     );
-                    execute_page(
-                        &client,
+                    db.query(
                         &table_name,
-                        &request,
-                        request_start_key,
-                        Some(page_size),
+                        &plan,
+                        Page {
+                            cursor: start_key,
+                            limit: Some(page_size as u32),
+                        },
                     )
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|err| err.to_string())
                 }
                 Err(e) => Err(e),
             };
             ctx.emit_self(QueryPageEvent {
                 request_id,
                 append,
-                start_key_present: start_key.is_some(),
+                start_key_present,
                 result,
             });
         });
@@ -3202,49 +3182,51 @@ impl QueryWidget {
     fn start_index_query_page(
         &self,
         target: index_picker::IndexTarget,
-        start_key: Option<HashMap<String, AttributeValue>>,
+        start_key: Option<Cursor>,
         append: bool,
         ctx: crate::env::WidgetCtx,
         request_id: u64,
     ) {
-        let client = self.client.clone();
+        let db = self.db.clone();
         let table_name = self.table_name.clone();
         let page_size = self.page_size;
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            let request = request_for_index_target(&target);
-            let request_start_key = start_key.clone();
+            let plan = plan_for_index_target(&target);
+            let start_key_present = start_key.is_some();
             tracing::trace!(
                 table = %table_name,
                 request_id,
                 append,
-                start_key_present = request_start_key.is_some(),
+                start_key_present,
                 "execute_page_start"
             );
-            let result = execute_page(
-                &client,
-                &table_name,
-                &request,
-                request_start_key,
-                Some(page_size),
-            )
-            .await
-            .map_err(|e| e.to_string());
+            let result = db
+                .query(
+                    &table_name,
+                    &plan,
+                    Page {
+                        cursor: start_key,
+                        limit: Some(page_size as u32),
+                    },
+                )
+                .await
+                .map_err(|err| err.to_string());
             ctx.emit_self(QueryPageEvent {
                 request_id,
                 append,
-                start_key_present: start_key.is_some(),
+                start_key_present,
                 result,
             });
         });
     }
 
-    fn format_query_value(value: &AttributeValue) -> Option<String> {
+    fn format_query_value(value: &Value) -> Option<String> {
         match value {
-            AttributeValue::S(text) => serde_json::to_string(text).ok(),
-            AttributeValue::N(num) => Some(num.clone()),
-            AttributeValue::Bool(value) => Some(value.to_string()),
-            AttributeValue::Null(_) => Some("null".to_string()),
+            Value::Str(text) => serde_json::to_string(text).ok(),
+            Value::Num(num) => Some(num.as_str().to_string()),
+            Value::Bool(value) => Some(value.to_string()),
+            Value::Null => Some("null".to_string()),
             _ => None,
         }
     }
@@ -3307,51 +3289,52 @@ impl QueryWidget {
             return;
         }
         self.meta_started.set(true);
-        let client = self.client.clone();
+        let db = self.db.clone();
         let table_name = self.table_name.clone();
         tokio::spawn(async move {
-            if let Ok(meta) = fetch_table_meta(client, table_name).await {
+            if let Ok(meta) = fetch_table_meta(db, table_name).await {
                 ctx.emit_self(TableMetaEvent { meta });
             }
         });
     }
 
-    fn record_query_progress(&self, output: &Output) -> (i64, i64) {
+    fn record_query_progress(&self, output: &QueryResult) -> (i64, i64) {
         let mut state = self.state.borrow_mut();
-        state.scanned_total += output.scanned_count() as i64;
-        state.matched_total += output.count() as i64;
+        state.scanned_total += output.scanned_count.unwrap_or(0) as i64;
+        state.matched_total += output.count as i64;
         (state.scanned_total, state.matched_total)
     }
 
-    fn process_query_output(&self, output: Output, append: bool) {
+    fn process_query_output(&self, output: QueryResult, append: bool) {
         let mut item_keys = HashSet::new();
 
-        let items = output.items();
-        let new_items: Vec<Item> = items
+        let new_items: Vec<Item> = output
+            .items
             .iter()
             .map(|item| {
-                item_keys.extend(item.keys().cloned());
-                Item(item.clone())
+                let map = attribute_map_from_item(item);
+                item_keys.extend(map.keys().cloned());
+                Item(map)
             })
             .collect();
 
         let keys_for_update: Vec<String> = item_keys.into_iter().collect();
-        let table_desc = self
+        let schema = self
             .table_meta
             .borrow()
             .as_ref()
-            .map(|meta| meta.table_desc.clone());
+            .map(|meta| meta.schema.clone());
 
         let mut state = self.state.borrow_mut();
         if !append {
             state.items.clear();
         }
         state.items.extend(new_items);
-        state.last_evaluated_key = output.last_evaluated_key().cloned();
+        state.last_evaluated_key.clone_from(&output.next);
         state.is_loading_more = false;
 
-        if let Some(table_desc) = table_desc.as_ref() {
-            state.item_keys.extend(keys_for_update, table_desc);
+        if let Some(schema) = schema.as_ref() {
+            state.item_keys.extend(keys_for_update, schema);
         } else {
             state.item_keys.extend_unordered(keys_for_update);
         }
@@ -3464,21 +3447,21 @@ impl QueryWidget {
             .table_meta
             .borrow()
             .as_ref()
-            .and_then(|meta| meta.table_desc.item_count())
+            .and_then(|meta| meta.schema.item_count)
             .map(|count| format!("~{count} items"));
         let mut footer_suffix = String::new();
         if let Some(value) = approx_total.as_ref() {
             footer_suffix.push_str(&format!(" · {value}"));
         }
-        let table_desc = self
+        let schema = self
             .table_meta
             .borrow()
             .as_ref()
-            .map(|meta| meta.table_desc.clone());
+            .map(|meta| meta.schema.clone());
         if let Some(value) = query_footer_label(
             state.query_output.as_ref(),
             &state.active_query,
-            table_desc.as_ref(),
+            schema.as_ref(),
         ) {
             footer_suffix.push_str(&format!(" · {value}"));
         }
@@ -3556,7 +3539,7 @@ impl QueryWidget {
             .filter_map(|idx| state.items.get(*idx))
             .enumerate()
             .map(|(row_pos, item)| {
-                let selected = self.item_is_selected(item, table_desc.as_ref(), selection.as_ref());
+                let selected = self.item_is_selected(item, schema.as_ref(), selection.as_ref());
                 let mut cells: Vec<Line> = Vec::with_capacity(keys.len() + 1);
                 if selection_active {
                     cells.push(if selected {
@@ -3711,7 +3694,7 @@ impl QueryWidget {
         let Some(meta) = meta_ref.as_ref() else {
             return " Item ".to_string();
         };
-        let (hash_key, range_key) = extract_hash_range(&meta.table_desc);
+        let (hash_key, range_key) = extract_hash_range(&meta.schema);
 
         let selected = state.table_state.selected().unwrap_or(0);
         let Some(item) = state
@@ -3792,17 +3775,17 @@ impl QueryWidget {
 
         let meta_ref = self.table_meta.borrow();
         if let Some(meta) = meta_ref.as_ref() {
-            let table_info = TableInfo::from_table_description(&meta.table_desc);
-            let gsi_count = table_info
-                .global_secondary_indexes
-                .iter()
-                .filter(|index| item_matches_index(item, index))
-                .count();
-            let lsi_count = table_info
-                .local_secondary_indexes
-                .iter()
-                .filter(|index| item_matches_index(item, index))
-                .count();
+            let mut gsi_count = 0;
+            let mut lsi_count = 0;
+            for index in &meta.schema.indexes {
+                if !item_has_index_keys(item, index) {
+                    continue;
+                }
+                match index.kind {
+                    IndexKind::LocalSecondary => lsi_count += 1,
+                    _ => gsi_count += 1,
+                }
+            }
             if gsi_count > 0 {
                 parts.push(format!("GSI: {gsi_count}"));
             }
@@ -3829,7 +3812,7 @@ impl QueryWidget {
     }
 
     fn edit_selected(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
-        if dynamate::readonly::is_enabled() {
+        if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
         }
@@ -3925,7 +3908,7 @@ impl QueryWidget {
     }
 
     fn create_item(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
-        if dynamate::readonly::is_enabled() {
+        if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
         }
@@ -4022,34 +4005,20 @@ impl QueryWidget {
         ctx: crate::env::WidgetCtx,
         reopen_tree: Option<usize>,
     ) {
-        if dynamate::readonly::is_enabled() {
+        if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
         }
         self.set_loading_state(LoadingState::Loading);
         ctx.invalidate();
-        let client = self.client.clone();
+        let db = self.db.clone();
         let table_name = self.table_name.clone();
         tokio::spawn(async move {
-            let item_len = item.len();
-            let span = tracing::trace_span!(
-                "PutItem",
-                table = %table_name,
-                item_len = item_len
-            );
-            let result = send_dynamo_request(
-                span,
-                || {
-                    client
-                        .put_item()
-                        .table_name(&table_name)
-                        .set_item(Some(item))
-                        .send()
-                },
-                format_sdk_error,
-            )
-            .await;
-            let event_result = result.map(|_| ()).map_err(|err| format_sdk_error(&err));
+            let neutral_item = item_from_attribute_map(&item);
+            let event_result = db
+                .put_item(&table_name, neutral_item)
+                .await
+                .map_err(|err| err.to_string());
             ctx.emit_self(PutItemEvent {
                 active_query,
                 reopen_tree,
@@ -4069,59 +4038,42 @@ fn show_readonly_toast(ctx: &crate::env::WidgetCtx) {
     });
 }
 
-fn request_for_index_target(target: &index_picker::IndexTarget) -> DynamoDbRequest {
-    let hash_condition = KeyCondition {
-        attribute_name: target.hash_key.clone(),
-        condition: KeyConditionType::Equal(target.hash_value.clone()),
+fn plan_for_index_target(target: &index_picker::IndexTarget) -> QueryPlan {
+    let hint = match target.kind {
+        index_picker::IndexKind::Primary => IndexHint::Primary,
+        index_picker::IndexKind::Global | index_picker::IndexKind::Local => {
+            IndexHint::Named(target.name.clone())
+        }
     };
-    let query_type = match target.kind {
-        index_picker::IndexKind::Primary => QueryType::TableQuery {
-            hash_key_condition: hash_condition,
-            range_key_condition: None,
-        },
-        index_picker::IndexKind::Global => QueryType::GlobalSecondaryIndexQuery {
-            index_name: target.name.clone(),
-            hash_key_condition: hash_condition,
-            range_key_condition: None,
-        },
-        index_picker::IndexKind::Local => QueryType::LocalSecondaryIndexQuery {
-            index_name: target.name.clone(),
-            hash_key_condition: hash_condition,
-            range_key_condition: None,
-        },
-    };
-    DynamoDbRequest::Query(Box::new(QueryBuilder::from_query_type(query_type)))
+    QueryPlan::key_lookup(target.hash_key.clone(), target.hash_value.clone(), hint)
 }
 
 async fn create_request_from_query(
     query: &str,
     cached_meta: Option<TableMeta>,
-    client: aws_sdk_dynamodb::Client,
+    db: Arc<dyn Datastore>,
     table_name: String,
     ctx: crate::env::WidgetCtx,
-) -> Result<DynamoDbRequest, String> {
+) -> Result<QueryPlan, String> {
     let query = query.trim();
     if query.is_empty() {
-        return Ok(DynamoDbRequest::Scan(ScanBuilder::new()));
+        return Ok(QueryPlan::default());
     }
-    let table_desc = if let Some(meta) = cached_meta {
-        meta.table_desc
+    let schema = if let Some(meta) = cached_meta {
+        meta.schema
     } else {
-        let meta = fetch_table_meta(client, table_name).await?;
-        let desc = meta.table_desc.clone();
+        let meta = fetch_table_meta(db, table_name).await?;
+        let schema = meta.schema.clone();
         ctx.emit_self(TableMetaEvent { meta });
-        desc
+        schema
     };
-    let expr = parse_query_expression(query, &table_desc)?;
-    Ok(DynamoDbRequest::from_expression_and_table(
-        &expr,
-        &table_desc,
-    ))
+    let expr = parse_query_expression(query, &schema)?;
+    Ok(QueryPlan::new(Some(expr), None))
 }
 
 fn parse_query_expression(
     query: &str,
-    table_desc: &TableDescription,
+    schema: &CollectionSchema,
 ) -> Result<DynamoExpression, String> {
     match parse_dynamo_expression(query) {
         Ok(expr) => Ok(expr),
@@ -4130,7 +4082,7 @@ fn parse_query_expression(
             let Ok(value) = parse_single_value_token(query) else {
                 return Err(parse_error_text);
             };
-            let (hash_key, _) = extract_hash_range(table_desc);
+            let (hash_key, _) = extract_hash_range(schema);
             let Some(hash_key) = hash_key else {
                 return Err(parse_error_text);
             };
@@ -4143,66 +4095,17 @@ fn parse_query_expression(
     }
 }
 
-async fn fetch_table_description(
-    client: aws_sdk_dynamodb::Client,
-    table_name: String,
-) -> Result<TableDescription, String> {
-    let span = tracing::trace_span!("DescribeTable", table = %table_name);
-    let result = send_dynamo_request(
-        span,
-        || client.describe_table().table_name(&table_name).send(),
-        std::string::ToString::to_string,
-    )
-    .await;
-    let out = result.map_err(|e| e.to_string())?;
-    let table = out
-        .table()
-        .ok_or_else(|| "DescribeTable: missing table".to_string())?;
-    Ok(table.clone())
+async fn fetch_ttl_attribute(db: &Arc<dyn Datastore>, table_name: &str) -> Option<String> {
+    db.describe_ttl(table_name).await.ok().flatten()
 }
 
-async fn fetch_ttl_attribute(
-    client: aws_sdk_dynamodb::Client,
-    table_name: String,
-) -> Option<String> {
-    let span = tracing::trace_span!("DescribeTimeToLive", table = %table_name);
-    let output = send_dynamo_request(
-        span,
-        || {
-            client
-                .describe_time_to_live()
-                .table_name(&table_name)
-                .send()
-        },
-        std::string::ToString::to_string,
-    )
-    .await;
-    match output {
-        Ok(out) => out.time_to_live_description().and_then(|desc| {
-            let enabled = matches!(
-                desc.time_to_live_status(),
-                Some(TimeToLiveStatus::Enabled | TimeToLiveStatus::Enabling)
-            );
-            if enabled {
-                desc.attribute_name().map(std::string::ToString::to_string)
-            } else {
-                None
-            }
-        }),
-        Err(_) => None,
-    }
-}
-
-async fn fetch_table_meta(
-    client: aws_sdk_dynamodb::Client,
-    table_name: String,
-) -> Result<TableMeta, String> {
-    let table_desc = fetch_table_description(client.clone(), table_name.clone()).await?;
-    let ttl_attr = fetch_ttl_attribute(client, table_name).await;
-    Ok(TableMeta {
-        table_desc,
-        ttl_attr,
-    })
+async fn fetch_table_meta(db: Arc<dyn Datastore>, table_name: String) -> Result<TableMeta, String> {
+    let schema = db
+        .describe_collection(&table_name)
+        .await
+        .map_err(|err| err.to_string())?;
+    let ttl_attr = fetch_ttl_attribute(&db, &table_name).await;
+    Ok(TableMeta { schema, ttl_attr })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4211,22 +4114,11 @@ enum EditorFormat {
     DynamoDb,
 }
 
-pub(super) fn extract_hash_range(table: &TableDescription) -> (Option<String>, Option<String>) {
-    let mut hash = None;
-    let mut range = None;
-    for KeySchemaElement {
-        attribute_name,
-        key_type,
-        ..
-    } in table.key_schema()
-    {
-        match key_type {
-            KeyType::Hash => hash = Some(attribute_name.clone()),
-            KeyType::Range => range = Some(attribute_name.clone()),
-            _ => {}
-        }
-    }
-    (hash, range)
+pub(super) fn extract_hash_range(schema: &CollectionSchema) -> (Option<String>, Option<String>) {
+    (
+        schema.key.partition_key().map(str::to_owned),
+        schema.key.sort_key().map(str::to_owned),
+    )
 }
 
 fn env_u64(name: &str) -> Option<u64> {
@@ -4235,14 +4127,13 @@ fn env_u64(name: &str) -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
-fn item_matches_index(item: &Item, index: &SecondaryIndex) -> bool {
-    if !item.0.contains_key(&index.hash_key) {
-        return false;
-    }
-    match &index.range_key {
-        Some(range_key) => item.0.contains_key(range_key),
-        None => true,
-    }
+/// Whether `item` carries every key attribute of `index`.
+fn item_has_index_keys(item: &Item, index: &IndexSchema) -> bool {
+    index
+        .key
+        .fields
+        .iter()
+        .all(|field| item.0.contains_key(&field.name))
 }
 
 fn item_matches_filter(item: &HashMap<String, AttributeValue>, needle: &str) -> bool {
@@ -4286,15 +4177,15 @@ enum BatchActionScope {
     },
     Selection {
         selection: SelectionSnapshot,
-        table_desc: Box<TableDescription>,
+        schema: Box<CollectionSchema>,
     },
 }
 
 impl BatchActionScope {
-    fn table_desc(&self) -> Option<&TableDescription> {
+    fn schema(&self) -> Option<&CollectionSchema> {
         match self {
             Self::Results { .. } => None,
-            Self::Selection { table_desc, .. } => Some(table_desc.as_ref()),
+            Self::Selection { schema, .. } => Some(schema.as_ref()),
         }
     }
 
@@ -4312,13 +4203,10 @@ impl BatchActionScope {
                 })
                 .cloned()
                 .collect()),
-            Self::Selection {
-                selection,
-                table_desc,
-            } => {
+            Self::Selection { selection, schema } => {
                 let mut selected = Vec::new();
                 for item in items {
-                    let item_key = ItemKey::from_item(item, table_desc.as_ref())?;
+                    let item_key = ItemKey::from_item(item, schema.as_ref())?;
                     if selection.is_selected(&item_key) {
                         selected.push(item.clone());
                     }
@@ -4331,10 +4219,10 @@ impl BatchActionScope {
 
 struct BatchActionStreamRequest {
     scope: BatchActionScope,
-    start_key: HashMap<String, AttributeValue>,
+    start_key: Cursor,
     active_query: ActiveQuery,
     cached_meta: Option<TableMeta>,
-    client: aws_sdk_dynamodb::Client,
+    db: Arc<dyn Datastore>,
     table_name: String,
     cancel: Option<Arc<AtomicBool>>,
 }
@@ -4342,30 +4230,28 @@ struct BatchActionStreamRequest {
 struct DeleteSelectionJob {
     selection: SelectionSnapshot,
     loaded_keys: Vec<ItemKey>,
-    table_desc: TableDescription,
-    start_key: Option<HashMap<String, AttributeValue>>,
+    schema: CollectionSchema,
+    start_key: Option<Cursor>,
     active_query: ActiveQuery,
-    client: aws_sdk_dynamodb::Client,
+    db: Arc<dyn Datastore>,
     table_name: String,
 }
 
-fn request_for_active_query(
+fn plan_for_active_query(
     active_query: &ActiveQuery,
-    table_desc: &TableDescription,
-) -> Result<DynamoDbRequest, String> {
+    schema: &CollectionSchema,
+) -> Result<QueryPlan, String> {
     match active_query {
         ActiveQuery::Text(query) => {
             let query = query.trim();
             if query.is_empty() {
-                Ok(DynamoDbRequest::Scan(ScanBuilder::new()))
+                Ok(QueryPlan::default())
             } else {
-                let expr = parse_query_expression(query, table_desc)?;
-                Ok(DynamoDbRequest::from_expression_and_table(
-                    &expr, table_desc,
-                ))
+                let expr = parse_query_expression(query, schema)?;
+                Ok(QueryPlan::new(Some(expr), None))
             }
         }
-        ActiveQuery::Index(target) => Ok(request_for_index_target(target)),
+        ActiveQuery::Index(target) => Ok(plan_for_index_target(target)),
     }
 }
 
@@ -4373,37 +4259,37 @@ fn batch_action_was_canceled(cancel: Option<&Arc<AtomicBool>>) -> bool {
     cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
-async fn request_for_batch_action(
+async fn plan_for_batch_action(
     active_query: &ActiveQuery,
-    table_desc: Option<&TableDescription>,
+    schema: Option<&CollectionSchema>,
     cached_meta: Option<TableMeta>,
-    client: aws_sdk_dynamodb::Client,
-    table_name: String,
-) -> Result<DynamoDbRequest, String> {
-    if let Some(table_desc) = table_desc {
-        return request_for_active_query(active_query, table_desc);
+    db: &Arc<dyn Datastore>,
+    table_name: &str,
+) -> Result<QueryPlan, String> {
+    if let Some(schema) = schema {
+        return plan_for_active_query(active_query, schema);
     }
 
-    let request = match active_query {
+    let plan = match active_query {
         ActiveQuery::Text(query) => {
             let query = query.trim();
             if query.is_empty() {
-                return Ok(DynamoDbRequest::Scan(ScanBuilder::new()));
+                return Ok(QueryPlan::default());
             }
-            let table_desc = match cached_meta {
-                Some(meta) => meta.table_desc,
+            let schema = match cached_meta {
+                Some(meta) => meta.schema,
                 None => {
-                    fetch_table_meta(client.clone(), table_name.clone())
+                    fetch_table_meta(db.clone(), table_name.to_string())
                         .await?
-                        .table_desc
+                        .schema
                 }
             };
-            let expr = parse_query_expression(query, &table_desc)?;
-            DynamoDbRequest::from_expression_and_table(&expr, &table_desc)
+            let expr = parse_query_expression(query, &schema)?;
+            QueryPlan::new(Some(expr), None)
         }
-        ActiveQuery::Index(target) => request_for_index_target(target),
+        ActiveQuery::Index(target) => plan_for_index_target(target),
     };
-    Ok(request)
+    Ok(plan)
 }
 
 fn batch_action_stream(
@@ -4427,7 +4313,7 @@ async fn stream_batch_action_pages(
         start_key,
         active_query,
         cached_meta,
-        client,
+        db,
         table_name,
         cancel,
     } = request;
@@ -4436,27 +4322,31 @@ async fn stream_batch_action_pages(
         return Err(BATCH_ACTION_CANCELED.to_string());
     }
 
-    let request = request_for_batch_action(
-        &active_query,
-        scope.table_desc(),
-        cached_meta,
-        client.clone(),
-        table_name.clone(),
-    )
-    .await?;
+    let plan =
+        plan_for_batch_action(&active_query, scope.schema(), cached_meta, &db, &table_name).await?;
     let mut next_key = Some(start_key);
-    while let Some(start_key) = next_key {
+    while let Some(cursor) = next_key {
         if batch_action_was_canceled(cancel.as_ref()) {
             return Err(BATCH_ACTION_CANCELED.to_string());
         }
-        let output = execute_page(&client, &table_name, &request, Some(start_key), None)
+        let output = db
+            .query(
+                &table_name,
+                &plan,
+                Page {
+                    cursor: Some(cursor),
+                    limit: None,
+                },
+            )
             .await
             .map_err(|err| err.to_string())?;
-        let items = scope.collect_page(output.items())?;
+        let page_items: Vec<HashMap<String, AttributeValue>> =
+            output.items.iter().map(attribute_map_from_item).collect();
+        let items = scope.collect_page(&page_items)?;
         if !items.is_empty() && tx.send(Ok(items)).await.is_err() {
             return Ok(());
         }
-        next_key = output.last_evaluated_key().cloned();
+        next_key = output.next;
     }
 
     if batch_action_was_canceled(cancel.as_ref()) {
@@ -4507,10 +4397,10 @@ async fn delete_selection_full(request: DeleteSelectionJob) -> Result<usize, Str
     let DeleteSelectionJob {
         selection,
         loaded_keys,
-        table_desc,
+        schema,
         start_key,
         active_query,
-        client,
+        db,
         table_name,
     } = request;
 
@@ -4519,17 +4409,17 @@ async fn delete_selection_full(request: DeleteSelectionJob) -> Result<usize, Str
         SelectionSnapshot::Query { .. } => loaded_keys,
     };
 
-    let mut deleted = batch_delete_keys(&client, &table_name, &keys).await?;
+    let mut deleted = batch_delete_keys(&db, &table_name, &keys).await?;
     if let Some(start_key) = start_key {
         let request = BatchActionStreamRequest {
             scope: BatchActionScope::Selection {
                 selection,
-                table_desc: Box::new(table_desc.clone()),
+                schema: Box::new(schema.clone()),
             },
             start_key,
             active_query,
             cached_meta: None,
-            client: client.clone(),
+            db: db.clone(),
             table_name: table_name.clone(),
             cancel: None,
         };
@@ -4538,9 +4428,9 @@ async fn delete_selection_full(request: DeleteSelectionJob) -> Result<usize, Str
             let items = batch?;
             let mut keys = Vec::with_capacity(items.len());
             for item in &items {
-                keys.push(ItemKey::from_item(item, &table_desc)?);
+                keys.push(ItemKey::from_item(item, &schema)?);
             }
-            deleted = deleted.saturating_add(batch_delete_keys(&client, &table_name, &keys).await?);
+            deleted = deleted.saturating_add(batch_delete_keys(&db, &table_name, &keys).await?);
         }
     }
 
@@ -4548,58 +4438,22 @@ async fn delete_selection_full(request: DeleteSelectionJob) -> Result<usize, Str
 }
 
 async fn batch_delete_keys(
-    client: &aws_sdk_dynamodb::Client,
+    db: &Arc<dyn Datastore>,
     table_name: &str,
     keys: &[ItemKey],
 ) -> Result<usize, String> {
-    let mut deleted = 0usize;
-    for chunk in keys.chunks(25) {
-        let mut write_requests = Vec::with_capacity(chunk.len());
-        for key in chunk {
-            let delete_request = DeleteRequest::builder()
-                .set_key(Some(key.to_key_map()))
-                .build()
-                .map_err(|err| err.to_string())?;
-            write_requests.push(
-                WriteRequest::builder()
-                    .delete_request(delete_request)
-                    .build(),
-            );
-        }
-
-        let mut request_items = HashMap::new();
-        request_items.insert(table_name.to_string(), write_requests);
-        let mut pending = request_items;
-        loop {
-            let pending_count = pending.get(table_name).map_or(0, std::vec::Vec::len);
-            let span = tracing::trace_span!(
-                "BatchWriteItem",
-                table = %table_name,
-                items = pending_count
-            );
-            let result = send_dynamo_request(
-                span,
-                || {
-                    client
-                        .batch_write_item()
-                        .set_request_items(Some(pending.clone()))
-                        .send()
-                },
-                format_sdk_error,
-            )
-            .await;
-            let output = result.map_err(|err| format_sdk_error(&err))?;
-            let unprocessed = output.unprocessed_items().cloned().unwrap_or_default();
-            if unprocessed.is_empty() {
-                break;
-            }
-            pending = unprocessed;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        deleted = deleted.saturating_add(chunk.len());
+    if keys.is_empty() {
+        return Ok(0);
     }
-    Ok(deleted)
+    let neutral_keys: Vec<Key> = keys
+        .iter()
+        .map(|key| Key(item_from_attribute_map(&key.to_key_map())))
+        .collect();
+    let outcome = db
+        .batch_delete(table_name, neutral_keys)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(outcome.deleted as usize)
 }
 
 struct StreamedJsonArrayWriter {
@@ -4865,38 +4719,27 @@ fn sanitize_query_component(raw: &str) -> Option<String> {
     }
 }
 
-fn output_info(output: Option<&Output>) -> String {
-    match output.map(dynamate::dynamodb::Output::kind) {
-        Some(Kind::Scan) => " (Scan)".to_string(),
-        Some(Kind::Query) => " (Query)".to_string(),
-        Some(Kind::QueryGSI(index_name)) => {
-            format!(" (Query GSI: {index_name})")
-        }
-        Some(Kind::QueryLSI(index_name)) => {
-            format!(" (Query LSI: {index_name})")
-        }
+fn output_info(output: Option<&QueryResult>) -> String {
+    match output.map(|result| &result.plan_kind) {
+        Some(PlanKind::Scan) => " (Scan)".to_string(),
+        Some(PlanKind::IndexedQuery { index: None }) => " (Query)".to_string(),
+        Some(PlanKind::IndexedQuery { index: Some(name) }) => format!(" (Query: {name})"),
         None => String::new(),
     }
 }
 
 fn query_footer_label(
-    output: Option<&Output>,
+    output: Option<&QueryResult>,
     active_query: &ActiveQuery,
-    table_desc: Option<&TableDescription>,
+    schema: Option<&CollectionSchema>,
 ) -> Option<String> {
-    let (prefix, allow_query) = match output.map(dynamate::dynamodb::Output::kind) {
-        Some(Kind::Scan) => ("scan".to_string(), true),
-        Some(Kind::Query) => ("query".to_string(), true),
-        Some(Kind::QueryGSI(index_name)) => (format!("query@{index_name}"), true),
-        Some(Kind::QueryLSI(index_name)) => (format!("query@{index_name}"), true),
+    let prefix = match output.map(|result| &result.plan_kind) {
+        Some(PlanKind::Scan) => "scan".to_string(),
+        Some(PlanKind::IndexedQuery { index: None }) => "query".to_string(),
+        Some(PlanKind::IndexedQuery { index: Some(name) }) => format!("query@{name}"),
         None => return None,
     };
-    let query = if allow_query {
-        normalized_query(active_query, table_desc)
-    } else {
-        None
-    };
-    match query {
+    match normalized_query(active_query, schema) {
         Some(text) if !text.is_empty() => Some(format!("{prefix} {text}")),
         _ => Some(prefix),
     }
@@ -4904,15 +4747,15 @@ fn query_footer_label(
 
 fn normalized_query(
     active_query: &ActiveQuery,
-    table_desc: Option<&TableDescription>,
+    schema: Option<&CollectionSchema>,
 ) -> Option<String> {
     let raw = active_query.input_value()?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let parsed = match table_desc {
-        Some(table_desc) => parse_query_expression(trimmed, table_desc).ok(),
+    let parsed = match schema {
+        Some(schema) => parse_query_expression(trimmed, schema).ok(),
         None => parse_dynamo_expression(trimmed).ok(),
     };
     match parsed {
@@ -5007,34 +4850,41 @@ mod tests {
     use super::super::selection::KeyValue;
     use super::*;
 
-    fn table_description_with_hash_key(hash_key: &str) -> TableDescription {
-        let key = KeySchemaElement::builder()
-            .attribute_name(hash_key)
-            .key_type(KeyType::Hash)
-            .build()
-            .expect("hash key schema should be valid");
-        TableDescription::builder()
-            .table_name("demo")
-            .key_schema(key)
-            .build()
+    fn schema_with_hash_key(hash_key: &str) -> CollectionSchema {
+        use dynamate::core::schema::{KeyField, KeyRole, KeySchema, ScalarType};
+        CollectionSchema {
+            name: "demo".to_string(),
+            key: KeySchema {
+                fields: vec![KeyField {
+                    name: hash_key.to_string(),
+                    role: KeyRole::Partition,
+                    ty: ScalarType::String,
+                }],
+            },
+            ..CollectionSchema::default()
+        }
     }
 
-    fn table_description_with_hash_and_range(hash_key: &str, range_key: &str) -> TableDescription {
-        let hash = KeySchemaElement::builder()
-            .attribute_name(hash_key)
-            .key_type(KeyType::Hash)
-            .build()
-            .expect("hash key schema should be valid");
-        let range = KeySchemaElement::builder()
-            .attribute_name(range_key)
-            .key_type(KeyType::Range)
-            .build()
-            .expect("range key schema should be valid");
-        TableDescription::builder()
-            .table_name("demo")
-            .key_schema(hash)
-            .key_schema(range)
-            .build()
+    fn schema_with_hash_and_range(hash_key: &str, range_key: &str) -> CollectionSchema {
+        use dynamate::core::schema::{KeyField, KeyRole, KeySchema, ScalarType};
+        CollectionSchema {
+            name: "demo".to_string(),
+            key: KeySchema {
+                fields: vec![
+                    KeyField {
+                        name: hash_key.to_string(),
+                        role: KeyRole::Partition,
+                        ty: ScalarType::String,
+                    },
+                    KeyField {
+                        name: range_key.to_string(),
+                        role: KeyRole::Sort,
+                        ty: ScalarType::String,
+                    },
+                ],
+            },
+            ..CollectionSchema::default()
+        }
     }
 
     #[test]
@@ -5118,7 +4968,7 @@ mod tests {
 
     #[test]
     fn parse_query_expression_uses_primary_hash_key_shortcut() {
-        let table_desc = table_description_with_hash_key("PK");
+        let table_desc = schema_with_hash_key("PK");
         let parsed = parse_query_expression("customer_123", &table_desc).unwrap();
         assert_eq!(
             parsed,
@@ -5132,7 +4982,7 @@ mod tests {
 
     #[test]
     fn parse_query_expression_shortcut_supports_quoted_scalars() {
-        let table_desc = table_description_with_hash_key("PK");
+        let table_desc = schema_with_hash_key("PK");
         let parsed = parse_query_expression(r#""foo bar""#, &table_desc).unwrap();
         assert_eq!(
             parsed,
@@ -5146,14 +4996,14 @@ mod tests {
 
     #[test]
     fn parse_query_expression_shortcut_rejects_backticks() {
-        let table_desc = table_description_with_hash_key("PK");
+        let table_desc = schema_with_hash_key("PK");
         let err = parse_query_expression("`other field`", &table_desc).unwrap_err();
         assert!(err.contains("Expected comparison operator"));
     }
 
     #[test]
     fn normalized_query_applies_pk_shortcut_with_table_metadata() {
-        let table_desc = table_description_with_hash_key("PK");
+        let table_desc = schema_with_hash_key("PK");
         let query = ActiveQuery::Text("foo".to_string());
         let normalized = normalized_query(&query, Some(&table_desc));
         assert_eq!(normalized.as_deref(), Some("PK=\"foo\""));
@@ -5168,7 +5018,7 @@ mod tests {
 
     #[test]
     fn item_key_round_trips_to_dynamodb_key_map() {
-        let table_desc = table_description_with_hash_and_range("PK", "SK");
+        let table_desc = schema_with_hash_and_range("PK", "SK");
         let mut item = HashMap::new();
         item.insert("PK".to_string(), AttributeValue::S("USER#1".to_string()));
         item.insert("SK".to_string(), AttributeValue::N("42".to_string()));

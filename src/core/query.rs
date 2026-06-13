@@ -3,7 +3,7 @@
 use crate::expr::DynamoExpression;
 
 use super::schema::{IndexSchema, KeySchema};
-use super::value::Item;
+use super::value::{Item, Value};
 
 /// A filter expression handed to a backend to compile to its own dialect.
 ///
@@ -21,19 +21,46 @@ pub enum IndexHint {
     Named(String),
 }
 
-/// A backend-neutral query: an optional filter plus an optional index hint.
+/// An exact equality on a key attribute, preserving the precise value.
 ///
-/// The backend is responsible for compiling the filter to its native query
-/// language and deciding how to execute it (an indexed lookup vs. a full scan).
+/// Used for index/primary lookups built programmatically from a selected item,
+/// where the key value may be a number or binary that the text-filter AST
+/// ([`FilterExpr`]) can't carry losslessly.
+#[derive(Debug, Clone)]
+pub struct KeyEquals {
+    pub attribute: String,
+    pub value: Value,
+}
+
+/// A backend-neutral query: an optional text filter, an optional index hint, and
+/// an optional exact key equality.
+///
+/// The backend is responsible for compiling this to its native query language
+/// and deciding how to execute it (an indexed lookup vs. a full scan).
 #[derive(Debug, Clone, Default)]
 pub struct QueryPlan {
     pub filter: Option<FilterExpr>,
     pub index_hint: Option<IndexHint>,
+    pub key_equals: Option<KeyEquals>,
 }
 
 impl QueryPlan {
+    /// A text-filter query (no explicit index).
     pub fn new(filter: Option<FilterExpr>, index_hint: Option<IndexHint>) -> Self {
-        Self { filter, index_hint }
+        Self {
+            filter,
+            index_hint,
+            key_equals: None,
+        }
+    }
+
+    /// An exact key-equality lookup against the given index target.
+    pub fn key_lookup(attribute: String, value: Value, index_hint: IndexHint) -> Self {
+        Self {
+            filter: None,
+            index_hint: Some(index_hint),
+            key_equals: Some(KeyEquals { attribute, value }),
+        }
     }
 }
 

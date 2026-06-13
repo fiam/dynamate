@@ -34,9 +34,9 @@ pub async fn open(
     match kind {
         BackendKind::Dynamodb => {
             let ConnOptions::Dynamo { endpoint_url } = options;
-            let client = crate::aws::new_client(endpoint_url.as_deref())
+            let client = crate::dynamodb::connect::new_client(endpoint_url.as_deref())
                 .await
-                .map_err(|err| DbError::Backend(err.to_string()))?;
+                .map_err(DbError::Backend)?;
             Ok(Arc::new(crate::dynamodb::DynamoBackend::new(
                 client, read_only,
             )))

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use aws_sdk_dynamodb::types::{KeySchemaElement, KeyType, TableDescription};
+use dynamate::core::schema::{CollectionSchema, IndexKind, KeySchema};
 
 #[derive(Debug, Default, Clone)]
 pub struct ItemKeys {
@@ -16,12 +16,12 @@ impl ItemKeys {
     ///  - GSI HASH, GSI RANGE
     ///  - LSI HASH, LSI RANGE
     ///  - Others alphabetical
-    pub fn extend<I>(&mut self, keys: I, table: &TableDescription)
+    pub fn extend<I>(&mut self, keys: I, schema: &CollectionSchema)
     where
         I: IntoIterator<Item = String>,
     {
         self.set.extend(keys);
-        self.rebuild_with_schema(table);
+        self.rebuild_with_schema(schema);
     }
 
     /// Insert many keys and rebuild the cached order without table schema info.
@@ -34,10 +34,10 @@ impl ItemKeys {
         self.rebuild_unordered();
     }
 
-    /// Rebuild ordering using the table schema.
-    pub fn rebuild_with_schema(&mut self, table: &TableDescription) {
+    /// Rebuild ordering using the collection schema.
+    pub fn rebuild_with_schema(&mut self, schema: &CollectionSchema) {
         let mut keys: Vec<String> = self.set.iter().cloned().collect();
-        let ordering = extract_key_ordering(table);
+        let ordering = extract_key_ordering(schema);
         keys.sort_by(|a, b| {
             rank(a, &ordering)
                 .cmp(&rank(b, &ordering))
@@ -106,54 +106,36 @@ struct KeyOrdering {
     lsi_range: HashSet<String>,
 }
 
-fn extract_key_ordering(table: &TableDescription) -> KeyOrdering {
-    let (table_hash, table_range) = extract_hash_range_from_schema(table.key_schema());
+fn extract_key_ordering(schema: &CollectionSchema) -> KeyOrdering {
     let mut ordering = KeyOrdering {
-        table_hash,
-        table_range,
+        table_hash: schema.key.partition_key().map(str::to_owned),
+        table_range: schema.key.sort_key().map(str::to_owned),
         ..KeyOrdering::default()
     };
 
-    for gsi in table.global_secondary_indexes() {
-        let (hash, range) = extract_hash_range_from_schema(gsi.key_schema());
+    for index in &schema.indexes {
+        let (hash, range) = key_names(&index.key);
+        let (hashes, ranges) = match index.kind {
+            IndexKind::LocalSecondary => (&mut ordering.lsi_hash, &mut ordering.lsi_range),
+            _ => (&mut ordering.gsi_hash, &mut ordering.gsi_range),
+        };
         if let Some(hash) = hash {
-            ordering.gsi_hash.insert(hash);
+            hashes.insert(hash);
         }
         if let Some(range) = range {
-            ordering.gsi_range.insert(range);
-        }
-    }
-
-    for lsi in table.local_secondary_indexes() {
-        let (hash, range) = extract_hash_range_from_schema(lsi.key_schema());
-        if let Some(hash) = hash {
-            ordering.lsi_hash.insert(hash);
-        }
-        if let Some(range) = range {
-            ordering.lsi_range.insert(range);
+            ranges.insert(range);
         }
     }
 
     ordering
 }
 
-/// Return (HASH_name, RANGE_name) from a key schema (None if absent).
-fn extract_hash_range_from_schema(schema: &[KeySchemaElement]) -> (Option<String>, Option<String>) {
-    let mut hash = None;
-    let mut range = None;
-    for KeySchemaElement {
-        attribute_name,
-        key_type,
-        ..
-    } in schema
-    {
-        match key_type {
-            KeyType::Hash => hash = Some(attribute_name.clone()),
-            KeyType::Range => range = Some(attribute_name.clone()),
-            _ => {}
-        }
-    }
-    (hash, range)
+/// Return (partition_name, sort_name) from a key schema (None if absent).
+fn key_names(schema: &KeySchema) -> (Option<String>, Option<String>) {
+    (
+        schema.partition_key().map(str::to_owned),
+        schema.sort_key().map(str::to_owned),
+    )
 }
 
 /// Rank:

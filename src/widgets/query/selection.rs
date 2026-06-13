@@ -7,8 +7,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use aws_sdk_dynamodb::types::{AttributeValue, TableDescription};
+use aws_sdk_dynamodb::types::AttributeValue;
 use aws_smithy_types::Blob;
+use dynamate::core::schema::CollectionSchema;
 
 use super::widget::extract_hash_range;
 
@@ -121,9 +122,9 @@ impl SelectionSnapshot {
 impl ItemKey {
     pub(super) fn from_item(
         item: &HashMap<String, AttributeValue>,
-        table_desc: &TableDescription,
+        schema: &CollectionSchema,
     ) -> Result<Self, String> {
-        let (hash_key, range_key) = extract_hash_range(table_desc);
+        let (hash_key, range_key) = extract_hash_range(schema);
         let Some(hash_key) = hash_key else {
             return Err("Table is missing a partition key".to_string());
         };

@@ -1,6 +1,5 @@
-use std::{borrow::Cow, cell::RefCell, time::Duration};
+use std::{borrow::Cow, cell::RefCell, sync::Arc, time::Duration};
 
-use aws_sdk_dynamodb::Client;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
@@ -10,8 +9,13 @@ use ratatui::{
     widgets::{Block, BorderType, Clear, Paragraph},
 };
 
+use dynamate::core::datastore::Datastore;
+use dynamate::core::query::CreateCollectionSpec;
+use dynamate::core::schema::{
+    IndexKind, IndexSchema, KeyField, KeyRole, KeySchema, Projection, ScalarType,
+};
 use dynamate::dynamodb::{
-    AttributeType, CreateTableSpec, GsiSpec, IndexProjection, KeySpec, LsiSpec, create_table,
+    AttributeType, CreateTableSpec, GsiSpec, IndexProjection, KeySpec, LsiSpec,
 };
 
 use crate::{
@@ -28,13 +32,13 @@ pub struct TableCreatedEvent {
 
 pub struct CreateTablePopup {
     inner: WidgetInner,
-    client: Client,
+    db: Arc<dyn Datastore>,
     state: RefCell<CreateTableState>,
     help_entries: Vec<help::Entry<'static>>,
 }
 
 impl CreateTablePopup {
-    pub fn new(client: Client, parent: crate::env::WidgetId) -> Self {
+    pub fn new(db: Arc<dyn Datastore>, parent: crate::env::WidgetId) -> Self {
         let help_entries = vec![
             help::Entry {
                 keys: Cow::Borrowed("tab/shift+tab"),
@@ -105,7 +109,7 @@ impl CreateTablePopup {
         state.sync_active();
         Self {
             inner: WidgetInner::new::<Self>(parent),
-            client,
+            db,
             state: RefCell::new(state),
             help_entries,
         }
@@ -134,10 +138,14 @@ impl CreateTablePopup {
         }
         ctx.invalidate();
 
-        let client = self.client.clone();
+        let db = self.db.clone();
+        let collection_spec = to_collection_spec(&spec);
         let ctx_clone = ctx.clone();
         tokio::spawn(async move {
-            let result = create_table(client, spec).await;
+            let result = db
+                .create_collection(&collection_spec)
+                .await
+                .map_err(|err| err.to_string());
             ctx_clone.emit_self(CreateTableResult { table_name, result });
         });
     }
@@ -1702,6 +1710,71 @@ fn remove_picker_rect(area: Rect, item_count: usize) -> Rect {
 struct CreateTableResult {
     table_name: String,
     result: Result<(), String>,
+}
+
+/// Convert the widget's DynamoDB-flavored spec into the neutral spec the
+/// datastore trait accepts.
+fn to_collection_spec(spec: &CreateTableSpec) -> CreateCollectionSpec {
+    let mut fields = vec![key_field(&spec.hash_key, KeyRole::Partition)];
+    if let Some(sort_key) = spec.sort_key.as_ref() {
+        fields.push(key_field(sort_key, KeyRole::Sort));
+    }
+
+    let mut indexes = Vec::new();
+    for gsi in &spec.gsis {
+        let mut index_fields = vec![key_field(&gsi.hash_key, KeyRole::Partition)];
+        if let Some(sort_key) = gsi.sort_key.as_ref() {
+            index_fields.push(key_field(sort_key, KeyRole::Sort));
+        }
+        indexes.push(IndexSchema {
+            name: gsi.name.clone(),
+            kind: IndexKind::GlobalSecondary,
+            key: KeySchema {
+                fields: index_fields,
+            },
+            projection: projection(&gsi.projection),
+        });
+    }
+    for lsi in &spec.lsis {
+        indexes.push(IndexSchema {
+            name: lsi.name.clone(),
+            kind: IndexKind::LocalSecondary,
+            key: KeySchema {
+                fields: vec![key_field(&lsi.sort_key, KeyRole::Sort)],
+            },
+            projection: projection(&lsi.projection),
+        });
+    }
+
+    CreateCollectionSpec {
+        name: spec.table_name.clone(),
+        key: KeySchema { fields },
+        indexes,
+    }
+}
+
+fn key_field(spec: &KeySpec, role: KeyRole) -> KeyField {
+    KeyField {
+        name: spec.name.clone(),
+        role,
+        ty: scalar_type(spec.attr_type),
+    }
+}
+
+fn scalar_type(ty: AttributeType) -> ScalarType {
+    match ty {
+        AttributeType::String => ScalarType::String,
+        AttributeType::Number => ScalarType::Number,
+        AttributeType::Binary => ScalarType::Binary,
+    }
+}
+
+fn projection(projection: &IndexProjection) -> Projection {
+    match projection {
+        IndexProjection::All => Projection::All,
+        IndexProjection::KeysOnly => Projection::KeysOnly,
+        IndexProjection::Include(attrs) => Projection::Include(attrs.clone()),
+    }
 }
 
 fn build_spec(state: &CreateTableState) -> Result<CreateTableSpec, String> {
