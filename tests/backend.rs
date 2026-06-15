@@ -274,3 +274,295 @@ async fn read_only_backend_rejects_writes() {
         .unwrap();
     assert_eq!(scan.count, 0);
 }
+
+/// Query with a text filter, returning every page.
+async fn query_all(backend: &DynamoBackend, name: &str, plan: &QueryPlan) -> Vec<Item> {
+    let mut out = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = backend
+            .query(
+                name,
+                plan,
+                Page {
+                    cursor,
+                    limit: Some(2),
+                },
+            )
+            .await
+            .unwrap();
+        out.extend(page.items);
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn pagination_sort_key_conditions_and_filters() {
+    let env = new_dynamodb_env().await.unwrap();
+    let backend = new_backend(&env.endpoint_url, false).await;
+    create_with_retry(&backend, &demo_spec()).await;
+    wait_until_listed(&backend, "demo").await;
+
+    // One partition, four sort keys, with an `amount` attribute for filtering.
+    let rows = [
+        ("ORDER#1", 50),
+        ("ORDER#2", 150),
+        ("ORDER#3", 250),
+        ("INVOICE#1", 999),
+    ];
+    for (sk, amount) in rows {
+        backend
+            .put_item(
+                "demo",
+                item(vec![
+                    ("PK", Value::Str("u".to_string())),
+                    ("SK", Value::Str(sk.to_string())),
+                    ("amount", Value::Num(Number::from(amount))),
+                ]),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Pagination: limit 2, follow the cursor, see all four rows once.
+    let all = query_all(
+        &backend,
+        "demo",
+        &QueryPlan::new(Some("PK = \"u\"".to_string()), None),
+    )
+    .await;
+    assert_eq!(all.len(), 4);
+
+    // begins_with on the sort key → the three ORDER# rows, via a Query.
+    let orders = backend
+        .query(
+            "demo",
+            &QueryPlan::new(
+                Some("PK = \"u\" AND begins_with(SK, \"ORDER#\")".to_string()),
+                None,
+            ),
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(orders.count, 3);
+    assert!(matches!(orders.plan_kind, PlanKind::IndexedQuery { .. }));
+
+    // BETWEEN on the sort key.
+    let between = backend
+        .query(
+            "demo",
+            &QueryPlan::new(
+                Some("PK = \"u\" AND SK BETWEEN \"ORDER#1\" AND \"ORDER#2\"".to_string()),
+                None,
+            ),
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(between.count, 2);
+
+    // Key condition + non-key filter expression.
+    let filtered = backend
+        .query(
+            "demo",
+            &QueryPlan::new(Some("PK = \"u\" AND amount > 100".to_string()), None),
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(filtered.count, 3); // 150, 250, 999
+
+    // A standalone scan filter (no key condition).
+    let scanned = backend
+        .query(
+            "demo",
+            &QueryPlan::new(Some("amount > 200".to_string()), None),
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(scanned.count, 2); // 250, 999
+    assert_eq!(scanned.plan_kind, PlanKind::Scan);
+}
+
+fn lsi_spec() -> CreateCollectionSpec {
+    CreateCollectionSpec {
+        name: "lsi_demo".to_string(),
+        key: KeySchema {
+            fields: vec![
+                KeyField {
+                    name: "PK".to_string(),
+                    role: KeyRole::Partition,
+                    ty: ScalarType::String,
+                },
+                KeyField {
+                    name: "SK".to_string(),
+                    role: KeyRole::Sort,
+                    ty: ScalarType::String,
+                },
+            ],
+        },
+        indexes: vec![
+            IndexSchema {
+                name: "LSI1".to_string(),
+                kind: IndexKind::LocalSecondary,
+                key: KeySchema {
+                    fields: vec![KeyField {
+                        name: "LSK".to_string(),
+                        role: KeyRole::Sort,
+                        ty: ScalarType::String,
+                    }],
+                },
+                projection: Projection::All,
+            },
+            IndexSchema {
+                name: "NIDX".to_string(),
+                kind: IndexKind::GlobalSecondary,
+                key: KeySchema {
+                    fields: vec![KeyField {
+                        name: "score".to_string(),
+                        role: KeyRole::Partition,
+                        ty: ScalarType::Number,
+                    }],
+                },
+                projection: Projection::All,
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn lsi_query_and_numeric_key_lookup() {
+    let env = new_dynamodb_env().await.unwrap();
+    let backend = new_backend(&env.endpoint_url, false).await;
+    create_with_retry(&backend, &lsi_spec()).await;
+    wait_until_listed(&backend, "lsi_demo").await;
+
+    // A 54-bit-plus score that an f64 would round; it must survive exactly.
+    let big_score = "9007199254740993";
+    backend
+        .put_item(
+            "lsi_demo",
+            item(vec![
+                ("PK", Value::Str("u".to_string())),
+                ("SK", Value::Str("a".to_string())),
+                ("LSK", Value::Str("L1".to_string())),
+                ("score", Value::Num(Number::new(big_score))),
+            ]),
+        )
+        .await
+        .unwrap();
+
+    // Query the LSI by hint.
+    let lsi = backend
+        .query(
+            "lsi_demo",
+            &QueryPlan::new(
+                Some("PK = \"u\"".to_string()),
+                Some(IndexHint::Named("LSI1".to_string())),
+            ),
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lsi.count, 1);
+    assert_eq!(
+        lsi.plan_kind,
+        PlanKind::IndexedQuery {
+            index: Some("LSI1".to_string())
+        }
+    );
+
+    // Numeric key_equals lookup against the GSI (the index-picker path),
+    // preserving the exact integer.
+    let by_score = backend
+        .query(
+            "lsi_demo",
+            &QueryPlan::key_lookup(
+                "score".to_string(),
+                Value::Num(Number::new(big_score)),
+                IndexHint::Named("NIDX".to_string()),
+            ),
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_score.count, 1);
+    assert_eq!(
+        by_score.items[0].get("score"),
+        Some(&Value::Num(Number::new(big_score)))
+    );
+}
+
+#[tokio::test]
+async fn update_binary_number_roundtrip_and_drop() {
+    let env = new_dynamodb_env().await.unwrap();
+    let backend = new_backend(&env.endpoint_url, false).await;
+    create_with_retry(&backend, &demo_spec()).await;
+    wait_until_listed(&backend, "demo").await;
+
+    let key = || {
+        vec![
+            ("PK", Value::Str("u".to_string())),
+            ("SK", Value::Str("a".to_string())),
+        ]
+    };
+
+    // Binary + a 38-digit number must round-trip exactly through put -> query.
+    let big_number = "12345678901234567890123456789012345678";
+    let mut first = key();
+    first.push(("blob", Value::Bytes(vec![0, 1, 2, 255])));
+    first.push(("big", Value::Num(Number::new(big_number))));
+    first.push(("v", Value::Str("one".to_string())));
+    backend.put_item("demo", item(first)).await.unwrap();
+
+    let fetched = backend
+        .query(
+            "demo",
+            &QueryPlan::new(Some("PK = \"u\"".to_string()), None),
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fetched.items[0].get("blob"),
+        Some(&Value::Bytes(vec![0, 1, 2, 255]))
+    );
+    assert_eq!(
+        fetched.items[0].get("big"),
+        Some(&Value::Num(Number::new(big_number)))
+    );
+
+    // put_item overwrites the existing key.
+    let mut updated = key();
+    updated.push(("v", Value::Str("two".to_string())));
+    backend.put_item("demo", item(updated)).await.unwrap();
+    let after = backend
+        .query(
+            "demo",
+            &QueryPlan::new(Some("PK = \"u\"".to_string()), None),
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(after.count, 1);
+    assert_eq!(
+        after.items[0].get("v"),
+        Some(&Value::Str("two".to_string()))
+    );
+
+    // drop_collection removes the table.
+    backend.drop_collection("demo").await.unwrap();
+    assert!(
+        !backend
+            .list_collections()
+            .await
+            .unwrap()
+            .contains(&"demo".to_string())
+    );
+}

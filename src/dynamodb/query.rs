@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use aws_sdk_dynamodb::types::AttributeValue;
 
 use super::table_analyzer::{KeyCondition, KeyConditionType, QueryType, TableInfo};
-use crate::expr::DynamoExpression;
+use crate::expr::{DynamoExpression, FunctionName, Operand};
 
 pub struct QueryBuilder {
     query_type: QueryType,
@@ -251,13 +251,23 @@ impl QueryBuilder {
         }
     }
 
+    /// The sub-expression that is *not* part of the key condition, to be applied
+    /// as a `FilterExpression`. The query routing only succeeds for an AND-chain
+    /// of leaf conditions (see `table_analyzer::extract_conditions_recursive`),
+    /// so we drop the leaves that target a key attribute and AND the rest.
     fn extract_non_key_conditions(&self, expr: &DynamoExpression) -> Option<DynamoExpression> {
-        // This is a simplified implementation
-        // In a complete implementation, you would recursively walk the expression tree
-        // and extract only the parts that are NOT used in the key condition
-        // For now, we'll return None to indicate no additional filter is needed
-        // when we have exact key matches
+        let key_attrs = self.key_attribute_names();
+        let mut leaves = Vec::new();
+        collect_and_leaves(expr, &mut leaves);
+        let filters: Vec<DynamoExpression> = leaves
+            .into_iter()
+            .filter(|leaf| !leaf_targets_key(leaf, &key_attrs))
+            .cloned()
+            .collect();
+        combine_and(filters)
+    }
 
+    fn key_attribute_names(&self) -> Vec<String> {
         match &self.query_type {
             QueryType::TableQuery {
                 hash_key_condition,
@@ -273,39 +283,58 @@ impl QueryBuilder {
                 range_key_condition,
                 ..
             } => {
-                // If we have both hash and range key conditions that are exact matches,
-                // and the expression is a simple AND of those conditions, no filter needed
-                if range_key_condition.is_some() {
-                    if let Some(remaining) = self.extract_remaining_conditions(
-                        expr,
-                        hash_key_condition,
-                        range_key_condition.as_ref(),
-                    ) {
-                        return Some(remaining);
-                    }
-                } else if let Some(remaining) =
-                    self.extract_remaining_conditions(expr, hash_key_condition, None)
-                {
-                    return Some(remaining);
+                let mut names = vec![hash_key_condition.attribute_name.clone()];
+                if let Some(range) = range_key_condition {
+                    names.push(range.attribute_name.clone());
                 }
+                names
             }
-            QueryType::TableScan => {
-                return Some(expr.clone());
-            }
+            QueryType::TableScan => Vec::new(),
         }
-
-        None
     }
+}
 
-    fn extract_remaining_conditions(
-        &self,
-        _expr: &DynamoExpression,
-        _hash_condition: &KeyCondition,
-        _range_condition: Option<&KeyCondition>,
-    ) -> Option<DynamoExpression> {
-        // Simplified: assume all conditions are used for the key condition
-        // A full implementation would parse the expression tree and extract
-        // only the conditions that are NOT part of the key conditions
-        None
+/// Flatten an AND/parenthesised tree into its leaf conditions.
+fn collect_and_leaves<'a>(expr: &'a DynamoExpression, out: &mut Vec<&'a DynamoExpression>) {
+    match expr {
+        DynamoExpression::And(left, right) => {
+            collect_and_leaves(left, out);
+            collect_and_leaves(right, out);
+        }
+        DynamoExpression::Parentheses(inner) => collect_and_leaves(inner, out),
+        other => out.push(other),
     }
+}
+
+/// Whether a leaf condition targets one of the key attributes (and so was
+/// consumed by the key condition rather than the filter).
+fn leaf_targets_key(expr: &DynamoExpression, key_attrs: &[String]) -> bool {
+    let attr = match expr {
+        DynamoExpression::Comparison {
+            left: Operand::Path(attr),
+            ..
+        }
+        | DynamoExpression::Between {
+            operand: Operand::Path(attr),
+            ..
+        } => Some(attr),
+        DynamoExpression::Function {
+            name: FunctionName::BeginsWith,
+            args,
+        } => match args.first() {
+            Some(Operand::Path(attr)) => Some(attr),
+            _ => None,
+        },
+        _ => None,
+    };
+    attr.is_some_and(|attr| key_attrs.iter().any(|k| k == attr))
+}
+
+/// AND a list of conditions into a single expression (None when empty).
+fn combine_and(exprs: Vec<DynamoExpression>) -> Option<DynamoExpression> {
+    let mut iter = exprs.into_iter();
+    let first = iter.next()?;
+    Some(iter.fold(first, |acc, expr| {
+        DynamoExpression::And(Box::new(acc), Box::new(expr))
+    }))
 }

@@ -260,36 +260,32 @@ impl TableInfo {
 #[derive(Debug, Clone)]
 struct ConditionInfo {
     attribute_name: String,
-    comparator: Comparator,
-    operand: Operand,
+    /// The resolved key condition (already includes both BETWEEN bounds and
+    /// begins_with), so downstream just wraps it.
+    condition: KeyConditionType,
 }
 
 impl ConditionInfo {
     fn to_key_condition(&self) -> Option<KeyCondition> {
-        let condition = match &self.comparator {
-            Comparator::Equal => {
-                KeyConditionType::Equal(operand_to_attribute_value(&self.operand)?)
-            }
-            Comparator::Less => {
-                KeyConditionType::LessThan(operand_to_attribute_value(&self.operand)?)
-            }
-            Comparator::LessOrEqual => {
-                KeyConditionType::LessThanOrEqual(operand_to_attribute_value(&self.operand)?)
-            }
-            Comparator::Greater => {
-                KeyConditionType::GreaterThan(operand_to_attribute_value(&self.operand)?)
-            }
-            Comparator::GreaterOrEqual => {
-                KeyConditionType::GreaterThanOrEqual(operand_to_attribute_value(&self.operand)?)
-            }
-            Comparator::NotEqual => return None, // Not supported for key conditions
-        };
-
         Some(KeyCondition {
             attribute_name: self.attribute_name.clone(),
-            condition,
+            condition: self.condition.clone(),
         })
     }
+}
+
+/// Map a comparison operator + operand to a key condition type (None for the
+/// not-equal operator or a non-value operand, which can't key a query).
+fn comparison_key_condition(operator: &Comparator, operand: &Operand) -> Option<KeyConditionType> {
+    let value = operand_to_attribute_value(operand)?;
+    Some(match operator {
+        Comparator::Equal => KeyConditionType::Equal(value),
+        Comparator::Less => KeyConditionType::LessThan(value),
+        Comparator::LessOrEqual => KeyConditionType::LessThanOrEqual(value),
+        Comparator::Greater => KeyConditionType::GreaterThan(value),
+        Comparator::GreaterOrEqual => KeyConditionType::GreaterThanOrEqual(value),
+        Comparator::NotEqual => return None,
+    })
 }
 
 fn extract_primary_key(table_desc: &TableDescription) -> PrimaryKey {
@@ -370,27 +366,36 @@ fn extract_conditions_recursive(
             operator,
             right,
         } => {
-            if let Operand::Path(attr_name) = left {
-                let condition = ConditionInfo {
-                    attribute_name: attr_name.clone(),
-                    comparator: operator.clone(),
-                    operand: right.clone(),
-                };
-                conditions.insert(attr_name.clone(), condition);
+            if let Operand::Path(attr_name) = left
+                && let Some(condition) = comparison_key_condition(operator, right)
+            {
+                conditions.insert(
+                    attr_name.clone(),
+                    ConditionInfo {
+                        attribute_name: attr_name.clone(),
+                        condition,
+                    },
+                );
             }
         }
         DynamoExpression::Between {
             operand,
             lower,
-            upper: _,
+            upper,
         } => {
-            if let Operand::Path(attr_name) = operand {
-                let condition = ConditionInfo {
-                    attribute_name: attr_name.clone(),
-                    comparator: Comparator::GreaterOrEqual, // BETWEEN is >= lower AND <= upper
-                    operand: lower.clone(),
-                };
-                conditions.insert(attr_name.clone(), condition);
+            if let Operand::Path(attr_name) = operand
+                && let (Some(lower), Some(upper)) = (
+                    operand_to_attribute_value(lower),
+                    operand_to_attribute_value(upper),
+                )
+            {
+                conditions.insert(
+                    attr_name.clone(),
+                    ConditionInfo {
+                        attribute_name: attr_name.clone(),
+                        condition: KeyConditionType::Between(lower, upper),
+                    },
+                );
             }
         }
         DynamoExpression::And(left, right) => {
@@ -398,17 +403,17 @@ fn extract_conditions_recursive(
             extract_conditions_recursive(right, conditions)?;
         }
         DynamoExpression::Function { name, args } => {
-            // Handle begins_with function for range key conditions
+            // begins_with(path, prefix) is a valid sort-key key condition.
             if matches!(name, crate::expr::FunctionName::BeginsWith)
                 && args.len() == 2
                 && let (Operand::Path(attr_name), prefix_operand) = (&args[0], &args[1])
+                && let Some(prefix) = operand_to_attribute_value(prefix_operand)
             {
                 conditions.insert(
                     attr_name.clone(),
                     ConditionInfo {
                         attribute_name: attr_name.clone(),
-                        comparator: Comparator::GreaterOrEqual, // We'll handle begins_with specially
-                        operand: prefix_operand.clone(),
+                        condition: KeyConditionType::BeginsWith(prefix),
                     },
                 );
             }
