@@ -81,9 +81,15 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<String>,
 
-    /// Storage backend to connect to
-    #[arg(long, value_enum, default_value_t = dynamate::core::connect::BackendKind::Dynamodb)]
-    backend: dynamate::core::connect::BackendKind,
+    /// Connection target. A `mongodb://` / `mongodb+srv://` URI selects MongoDB;
+    /// an `http(s)://` URL is treated as a DynamoDB endpoint. The backend is
+    /// inferred from the scheme unless `--backend` is given.
+    #[arg(value_name = "TARGET")]
+    target: Option<String>,
+
+    /// Storage backend to connect to (inferred from TARGET when omitted)
+    #[arg(long, value_enum)]
+    backend: Option<dynamate::core::connect::BackendKind>,
 
     /// Endpoint URL for the DynamoDB service
     #[arg(long)]
@@ -127,9 +133,11 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::ListTables { json }) => {
-            let db = open_backend(cli.backend, cli.endpoint_url.clone(), cli.readonly).await?;
-            let options = subcommands::list_tables::Options { json };
-            subcommands::list_tables::command(db.as_ref(), options).await?;
+            let (kind, options) =
+                resolve_connection(cli.backend, cli.target.clone(), cli.endpoint_url.clone());
+            let db = open_backend(kind, options, cli.readonly).await?;
+            let opts = subcommands::list_tables::Options { json };
+            subcommands::list_tables::command(db.as_ref(), opts).await?;
             Ok(())
         }
         Some(Commands::CreateTable(args)) => {
@@ -137,19 +145,16 @@ async fn main() -> Result<()> {
                 eprintln!("{}", dynamate::core::error::DbError::READ_ONLY_MESSAGE);
                 std::process::exit(1);
             }
-            let db = open_backend(cli.backend, cli.endpoint_url.clone(), cli.readonly).await?;
+            let (kind, options) =
+                resolve_connection(cli.backend, cli.target.clone(), cli.endpoint_url.clone());
+            let db = open_backend(kind, options, cli.readonly).await?;
             subcommands::create_table::command(db.as_ref(), args).await?;
             Ok(())
         }
         None => {
-            // The interactive UI runs only against DynamoDB today; some widgets
-            // still reach the raw SDK client via the transitional downcast.
-            if cli.backend != dynamate::core::connect::BackendKind::Dynamodb {
-                return Err(color_eyre::eyre::eyre!(
-                    "the interactive UI currently supports only the DynamoDB backend"
-                ));
-            }
-            let db = open_backend(cli.backend, cli.endpoint_url.clone(), cli.readonly).await?;
+            let (kind, options) =
+                resolve_connection(cli.backend, cli.target.clone(), cli.endpoint_url.clone());
+            let db = open_backend(kind, options, cli.readonly).await?;
             logging::initialize()?;
             App::default()
                 .run_tui(db, cli.table.as_deref(), cli.query.as_deref())
@@ -159,14 +164,43 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Resolve the backend kind and its connection options from the CLI arguments,
+/// inferring the backend from the connection target's scheme when `--backend`
+/// is not given.
+fn resolve_connection(
+    backend: Option<dynamate::core::connect::BackendKind>,
+    target: Option<String>,
+    endpoint_url: Option<String>,
+) -> (
+    dynamate::core::connect::BackendKind,
+    dynamate::core::connect::ConnOptions,
+) {
+    use dynamate::core::connect::{BackendKind, ConnOptions, detect_backend};
+
+    let kind =
+        backend.unwrap_or_else(|| detect_backend(target.as_deref(), endpoint_url.as_deref()));
+    let options = if kind == BackendKind::Mongodb {
+        ConnOptions::Mongo {
+            uri: target.or(endpoint_url).unwrap_or_default(),
+        }
+    } else {
+        // An http(s) positional target is a DynamoDB endpoint URL.
+        let endpoint_url = match target {
+            Some(t) if t.starts_with("http://") || t.starts_with("https://") => Some(t),
+            _ => endpoint_url,
+        };
+        ConnOptions::Dynamo { endpoint_url }
+    };
+    (kind, options)
+}
+
 /// Open the configured backend and verify connectivity.
 async fn open_backend(
-    backend: dynamate::core::connect::BackendKind,
-    endpoint_url: Option<String>,
+    kind: dynamate::core::connect::BackendKind,
+    options: dynamate::core::connect::ConnOptions,
     read_only: bool,
 ) -> Result<std::sync::Arc<dyn dynamate::core::datastore::Datastore>> {
-    let options = dynamate::core::connect::ConnOptions::Dynamo { endpoint_url };
-    let db = dynamate::core::connect::open(backend, &options, read_only)
+    let db = dynamate::core::connect::open(kind, &options, read_only)
         .await
         .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
     db.validate()
