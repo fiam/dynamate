@@ -33,9 +33,8 @@ use ratatui::{
 };
 
 use super::{
-    completion::{self, Suggestion, SuggestionKind, TokenSpan},
     export_popup::ExportPopup,
-    expr_format, index_picker, input, item_keys, keys_widget,
+    index_picker, input, item_keys, keys_widget,
     reference_popup::ReferencePopup,
     selection::{ItemKey, SelectionMode, SelectionSnapshot},
     tree,
@@ -56,6 +55,9 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use dynamate::core::datastore::Datastore;
+use dynamate::core::language::{
+    CompletionRequest, QueryLanguage, QueryStatus, Suggestion, SuggestionKind, TokenSpan,
+};
 use dynamate::core::query::{Cursor, IndexHint, Key, Page, PlanKind, QueryPlan, QueryResult};
 use dynamate::core::schema::{CollectionSchema, IndexKind, IndexSchema};
 use dynamate::core::value::Value;
@@ -64,10 +66,6 @@ use dynamate::dynamodb::convert::{
 };
 use dynamate::dynamodb::json;
 use dynamate::dynamodb::size::estimate_item_size_bytes;
-use dynamate::expr::{
-    Comparator, DynamoExpression, Operand, ParseError, parse_dynamo_expression,
-    parse_single_value_token,
-};
 use humansize::{BINARY, format_size};
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
@@ -408,22 +406,31 @@ impl Completion {
 impl QueryState {
     /// Recompute completion suggestions from the current input text, cursor and
     /// the attribute names seen in loaded items.
-    fn refresh_completion(&mut self) {
+    fn refresh_completion(
+        &mut self,
+        language: &dyn QueryLanguage,
+        schema: Option<&CollectionSchema>,
+    ) {
         let value = self.input.value().to_string();
         let cursor = self.input.cursor_byte();
         let attrs: Vec<String> = self.item_keys.sorted().to_vec();
         let items_ref = &self.items;
-        let dialect = dynamate::expr::builtins::default_dialect();
-        let (span, items) = completion::suggestions(&value, cursor, &attrs, dialect, |path| {
-            collect_attribute_values(items_ref, path)
+        let lookup = |path: &str| collect_attribute_values(items_ref, path);
+        let completion = language.complete(&CompletionRequest {
+            text: &value,
+            cursor,
+            attributes: &attrs,
+            value_lookup: &lookup,
+            schema,
         });
         // When the current text is already a runnable query, the user may want to
         // run it as-is, so show the sentinel row and default to it (Enter runs).
         // When it isn't runnable yet, default to the first suggestion so Enter
         // makes progress instead of erroring.
-        self.completion.has_sentinel = query_is_runnable(&value);
-        self.completion.span = span;
-        self.completion.items = items;
+        self.completion.has_sentinel =
+            matches!(language.validate(&value, schema), QueryStatus::Valid { .. });
+        self.completion.span = completion.span;
+        self.completion.items = completion.suggestions;
         self.completion.selected = 0;
         self.completion.visible = !self.completion.dismissed && !self.completion.items.is_empty();
     }
@@ -440,7 +447,12 @@ impl QueryState {
     /// (and `fallback_first` is not set), letting the caller run the query
     /// instead. When `fallback_first` is set (Tab), the sentinel completes the
     /// first item.
-    fn accept_completion(&mut self, fallback_first: bool) -> bool {
+    fn accept_completion(
+        &mut self,
+        fallback_first: bool,
+        language: &dyn QueryLanguage,
+        schema: Option<&CollectionSchema>,
+    ) -> bool {
         let idx = match self.completion.selected_item() {
             Some(idx) => idx,
             None if fallback_first => 0,
@@ -454,7 +466,7 @@ impl QueryState {
         self.input.replace_token(span.start, span.end, &text);
         // Recompute against the new text; functions insert a trailing "(" so the
         // next suggestion round naturally targets the first argument.
-        self.refresh_completion();
+        self.refresh_completion(language, schema);
         true
     }
 
@@ -1122,13 +1134,23 @@ impl QueryWidget {
                 }
                 KeyCode::Tab if dropdown_visible => {
                     // Tab always completes — on the sentinel, the first item.
-                    self.state.borrow_mut().accept_completion(true);
+                    let lang = self.db.query_language();
+                    let schema = self.schema_snapshot();
+                    self.state
+                        .borrow_mut()
+                        .accept_completion(true, lang, schema.as_ref());
                     return true;
                 }
                 KeyCode::Enter if dropdown_visible => {
                     // Accept the highlighted suggestion; if the sentinel row is
                     // selected, fall through so Enter runs the query.
-                    if self.state.borrow_mut().accept_completion(false) {
+                    let lang = self.db.query_language();
+                    let schema = self.schema_snapshot();
+                    if self
+                        .state
+                        .borrow_mut()
+                        .accept_completion(false, lang, schema.as_ref())
+                    {
                         return true;
                     }
                 }
@@ -1142,9 +1164,11 @@ impl QueryWidget {
         // Delegate to the text input, then refresh suggestions on any edit.
         let handled = self.state.borrow_mut().input.handle_event(event);
         if handled {
+            let lang = self.db.query_language();
+            let schema = self.schema_snapshot();
             let mut state = self.state.borrow_mut();
             state.reset_completion_dismissal();
-            state.refresh_completion();
+            state.refresh_completion(lang, schema.as_ref());
             return true;
         }
         false
@@ -1226,11 +1250,13 @@ impl QueryWidget {
                 }
             }
             KeyCode::Char('q') if !input_is_active && !filter_active => {
+                let lang = self.db.query_language();
+                let schema = self.schema_snapshot();
                 let mut state = self.state.borrow_mut();
                 if !state.show_tree {
                     state.input.set_active(true);
                     state.reset_completion_dismissal();
-                    state.refresh_completion();
+                    state.refresh_completion(lang, schema.as_ref());
                 }
             }
             KeyCode::Char('j') | KeyCode::Down => self.scroll_down(ctx.clone()),
@@ -1858,6 +1884,14 @@ impl QueryWidget {
             .ok_or_else(|| "Table metadata is not available yet".to_string())
     }
 
+    /// A clone of the current collection schema, if metadata has loaded.
+    fn schema_snapshot(&self) -> Option<CollectionSchema> {
+        self.table_meta
+            .borrow()
+            .as_ref()
+            .map(|meta| meta.schema.clone())
+    }
+
     fn selected_item_index(&self) -> Result<usize, String> {
         let state = self.state.borrow();
         state
@@ -2073,12 +2107,13 @@ impl QueryWidget {
     }
 
     fn open_reference_popup(&self, ctx: crate::env::WidgetCtx) {
-        ctx.set_popup(Box::new(ReferencePopup::new(self.inner.id())));
+        let sections = self.db.query_language().reference();
+        ctx.set_popup(Box::new(ReferencePopup::new(sections, self.inner.id())));
     }
 
     /// One-line feedback shown under the query box while editing: a placeholder
-    /// when empty, otherwise whether the expression is valid and whether it will
-    /// run as a Query or a Scan.
+    /// when empty, otherwise whether the query is valid and how it will run —
+    /// all delegated to the backend's query language.
     fn query_hint_line(&self, value: &str, theme: &Theme) -> Line<'static> {
         let meta = self.table_meta.borrow();
         let Some(meta) = meta.as_ref() else {
@@ -2087,78 +2122,48 @@ impl QueryWidget {
                 Style::default().fg(theme.text_muted()),
             ));
         };
+        let language = self.db.query_language();
+        let schema = Some(&meta.schema);
 
         if value.trim().is_empty() {
-            // Use the table's real partition-key name so the example doesn't
-            // imply a case-insensitive `pk`.
-            let hash_key = extract_hash_range(&meta.schema)
-                .0
-                .unwrap_or_else(|| "key".to_string());
             return Line::from(Span::styled(
-                format!(
-                    "  {hash_key} = \"USER#123\"   ·   AND / OR / NOT / BETWEEN / IN   ·   ^g for functions & full reference"
-                ),
+                format!("  {}", language.placeholder(schema)),
                 Style::default().fg(theme.text_muted()),
             ));
         }
 
-        let ok_line = |kind: PlanKind| {
+        match language.validate(value, schema) {
+            QueryStatus::Empty | QueryStatus::Incomplete => Line::from(Span::styled(
+                "  … keep typing".to_string(),
+                Style::default().fg(theme.text_muted()),
+            )),
+            QueryStatus::Invalid(message) => Line::from(vec![
+                Span::styled("  ✗ ".to_string(), Style::default().fg(theme.error())),
+                Span::styled(message, Style::default().fg(theme.text_muted())),
+            ]),
             // A Query targets a key and is cheap; a Scan reads the whole table,
             // so flag it as a warning to make the difference obvious.
-            match kind {
-                PlanKind::Scan => Line::from(vec![
-                    Span::styled("  ⚠ ".to_string(), Style::default().fg(theme.warning())),
-                    Span::styled("Scan".to_string(), Style::default().fg(theme.warning())),
-                    Span::styled(
-                        " — reads the whole table".to_string(),
-                        Style::default().fg(theme.text_muted()),
-                    ),
-                ]),
-                PlanKind::IndexedQuery { index } => {
-                    let label = match index {
-                        Some(name) => format!("Query ({name})"),
-                        None => "Query".to_string(),
-                    };
-                    Line::from(vec![
-                        Span::styled("  ✓ ".to_string(), Style::default().fg(theme.success())),
-                        Span::styled(label, Style::default().fg(theme.success())),
-                    ])
-                }
-            }
-        };
-
-        match parse_dynamo_expression(value) {
-            Ok(expr) => ok_line(
-                self.db
-                    .predict_plan_kind(&self.table_name, &QueryPlan::new(Some(expr), None)),
-            ),
-            Err(err) => {
-                // A single bare token targets the partition key (the PK shortcut).
-                if let Ok(operand) = parse_single_value_token(value)
-                    && let (Some(hash_key), _) = extract_hash_range(&meta.schema)
-                {
-                    let expr = DynamoExpression::Comparison {
-                        left: Operand::Path(hash_key),
-                        operator: Comparator::Equal,
-                        right: operand,
-                    };
-                    return ok_line(
-                        self.db
-                            .predict_plan_kind(&self.table_name, &QueryPlan::new(Some(expr), None)),
-                    );
-                }
-                if parse_error_is_incomplete(&err) {
-                    // The expression is unfinished, not wrong — don't cry wolf.
-                    Line::from(Span::styled(
-                        "  … keep typing".to_string(),
-                        Style::default().fg(theme.text_muted()),
-                    ))
-                } else {
-                    Line::from(vec![
-                        Span::styled("  ✗ ".to_string(), Style::default().fg(theme.error())),
-                        Span::styled(err.to_string(), Style::default().fg(theme.text_muted())),
-                    ])
-                }
+            QueryStatus::Valid {
+                plan_kind: PlanKind::Scan,
+            } => Line::from(vec![
+                Span::styled("  ⚠ ".to_string(), Style::default().fg(theme.warning())),
+                Span::styled("Scan".to_string(), Style::default().fg(theme.warning())),
+                Span::styled(
+                    " — reads the whole table".to_string(),
+                    Style::default().fg(theme.text_muted()),
+                ),
+            ]),
+            QueryStatus::Valid {
+                plan_kind: PlanKind::IndexedQuery { index },
+            } => {
+                let label = match index {
+                    Some(name) => format!("Query ({name})"),
+                    None => "Query".to_string(),
+                };
+                Line::from(vec![
+                    Span::styled("  ✓ ".to_string(), Style::default().fg(theme.success())),
+                    Span::styled(label, Style::default().fg(theme.success())),
+                ])
             }
         }
     }
@@ -2219,7 +2224,7 @@ impl QueryWidget {
                 )
             } else {
                 let kind_color = match sug.kind {
-                    SuggestionKind::Attribute => theme.text(),
+                    SuggestionKind::Field => theme.text(),
                     SuggestionKind::Value => theme.success(),
                     SuggestionKind::Function => theme.accent(),
                     SuggestionKind::Keyword | SuggestionKind::Operator => theme.accent_alt(),
@@ -2473,7 +2478,6 @@ impl QueryWidget {
                     scope: BatchActionScope::Results { filter },
                     start_key,
                     active_query,
-                    cached_meta: self.table_meta.borrow().clone(),
                     db: self.db.clone(),
                     table_name: self.table_name.clone(),
                     cancel: Some(cancel.clone()),
@@ -2566,7 +2570,6 @@ impl QueryWidget {
             },
             start_key,
             active_query: self.state.borrow().active_query.clone(),
-            cached_meta: None,
             db: self.db.clone(),
             table_name: self.table_name.clone(),
             cancel: Some(cancel.clone()),
@@ -2651,7 +2654,11 @@ impl QueryWidget {
                     .map(|meta| meta.schema.clone());
                 let query = {
                     let state = self.state.borrow();
-                    normalized_query(&state.active_query, schema.as_ref())
+                    normalized_query(
+                        &state.active_query,
+                        schema.as_ref(),
+                        self.db.query_language(),
+                    )
                 };
                 base.join(export_results_file_name(
                     &self.table_name,
@@ -3091,40 +3098,30 @@ impl QueryWidget {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
         let page_size = self.page_size;
-        let cached_meta = self.table_meta.borrow().clone();
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            let plan_result = create_request_from_query(
-                &query,
-                cached_meta,
-                db.clone(),
-                table_name.clone(),
-                ctx.clone(),
-            )
-            .await;
+            // The raw query text travels to the backend, which parses and
+            // compiles it in its own query language.
+            let plan = text_query_plan(&query);
             let start_key_present = start_key.is_some();
-            let result = match plan_result {
-                Ok(plan) => {
-                    tracing::trace!(
-                        table = %table_name,
-                        request_id,
-                        append,
-                        start_key_present,
-                        "execute_page_start"
-                    );
-                    db.query(
-                        &table_name,
-                        &plan,
-                        Page {
-                            cursor: start_key,
-                            limit: Some(page_size as u32),
-                        },
-                    )
-                    .await
-                    .map_err(|err| err.to_string())
-                }
-                Err(e) => Err(e),
-            };
+            tracing::trace!(
+                table = %table_name,
+                request_id,
+                append,
+                start_key_present,
+                "execute_page_start"
+            );
+            let result = db
+                .query(
+                    &table_name,
+                    &plan,
+                    Page {
+                        cursor: start_key,
+                        limit: Some(page_size as u32),
+                    },
+                )
+                .await
+                .map_err(|err| err.to_string());
             ctx.emit_self(QueryPageEvent {
                 request_id,
                 append,
@@ -3462,6 +3459,7 @@ impl QueryWidget {
             state.query_output.as_ref(),
             &state.active_query,
             schema.as_ref(),
+            self.db.query_language(),
         ) {
             footer_suffix.push_str(&format!(" · {value}"));
         }
@@ -4048,50 +4046,14 @@ fn plan_for_index_target(target: &index_picker::IndexTarget) -> QueryPlan {
     QueryPlan::key_lookup(target.hash_key.clone(), target.hash_value.clone(), hint)
 }
 
-async fn create_request_from_query(
-    query: &str,
-    cached_meta: Option<TableMeta>,
-    db: Arc<dyn Datastore>,
-    table_name: String,
-    ctx: crate::env::WidgetCtx,
-) -> Result<QueryPlan, String> {
+/// Wrap raw query text into a plan; an empty query scans. The backend parses the
+/// text in its own query language.
+fn text_query_plan(query: &str) -> QueryPlan {
     let query = query.trim();
     if query.is_empty() {
-        return Ok(QueryPlan::default());
-    }
-    let schema = if let Some(meta) = cached_meta {
-        meta.schema
+        QueryPlan::default()
     } else {
-        let meta = fetch_table_meta(db, table_name).await?;
-        let schema = meta.schema.clone();
-        ctx.emit_self(TableMetaEvent { meta });
-        schema
-    };
-    let expr = parse_query_expression(query, &schema)?;
-    Ok(QueryPlan::new(Some(expr), None))
-}
-
-fn parse_query_expression(
-    query: &str,
-    schema: &CollectionSchema,
-) -> Result<DynamoExpression, String> {
-    match parse_dynamo_expression(query) {
-        Ok(expr) => Ok(expr),
-        Err(parse_error) => {
-            let parse_error_text = parse_error.to_string();
-            let Ok(value) = parse_single_value_token(query) else {
-                return Err(parse_error_text);
-            };
-            let (hash_key, _) = extract_hash_range(schema);
-            let Some(hash_key) = hash_key else {
-                return Err(parse_error_text);
-            };
-            Ok(DynamoExpression::Comparison {
-                left: Operand::Path(hash_key),
-                operator: Comparator::Equal,
-                right: value,
-            })
-        }
+        QueryPlan::new(Some(query.to_string()), None)
     }
 }
 
@@ -4182,13 +4144,6 @@ enum BatchActionScope {
 }
 
 impl BatchActionScope {
-    fn schema(&self) -> Option<&CollectionSchema> {
-        match self {
-            Self::Results { .. } => None,
-            Self::Selection { schema, .. } => Some(schema.as_ref()),
-        }
-    }
-
     fn collect_page(
         &self,
         items: &[HashMap<String, AttributeValue>],
@@ -4221,7 +4176,6 @@ struct BatchActionStreamRequest {
     scope: BatchActionScope,
     start_key: Cursor,
     active_query: ActiveQuery,
-    cached_meta: Option<TableMeta>,
     db: Arc<dyn Datastore>,
     table_name: String,
     cancel: Option<Arc<AtomicBool>>,
@@ -4237,59 +4191,15 @@ struct DeleteSelectionJob {
     table_name: String,
 }
 
-fn plan_for_active_query(
-    active_query: &ActiveQuery,
-    schema: &CollectionSchema,
-) -> Result<QueryPlan, String> {
+fn plan_for_active_query(active_query: &ActiveQuery) -> QueryPlan {
     match active_query {
-        ActiveQuery::Text(query) => {
-            let query = query.trim();
-            if query.is_empty() {
-                Ok(QueryPlan::default())
-            } else {
-                let expr = parse_query_expression(query, schema)?;
-                Ok(QueryPlan::new(Some(expr), None))
-            }
-        }
-        ActiveQuery::Index(target) => Ok(plan_for_index_target(target)),
+        ActiveQuery::Text(query) => text_query_plan(query),
+        ActiveQuery::Index(target) => plan_for_index_target(target),
     }
 }
 
 fn batch_action_was_canceled(cancel: Option<&Arc<AtomicBool>>) -> bool {
     cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
-}
-
-async fn plan_for_batch_action(
-    active_query: &ActiveQuery,
-    schema: Option<&CollectionSchema>,
-    cached_meta: Option<TableMeta>,
-    db: &Arc<dyn Datastore>,
-    table_name: &str,
-) -> Result<QueryPlan, String> {
-    if let Some(schema) = schema {
-        return plan_for_active_query(active_query, schema);
-    }
-
-    let plan = match active_query {
-        ActiveQuery::Text(query) => {
-            let query = query.trim();
-            if query.is_empty() {
-                return Ok(QueryPlan::default());
-            }
-            let schema = match cached_meta {
-                Some(meta) => meta.schema,
-                None => {
-                    fetch_table_meta(db.clone(), table_name.to_string())
-                        .await?
-                        .schema
-                }
-            };
-            let expr = parse_query_expression(query, &schema)?;
-            QueryPlan::new(Some(expr), None)
-        }
-        ActiveQuery::Index(target) => plan_for_index_target(target),
-    };
-    Ok(plan)
 }
 
 fn batch_action_stream(
@@ -4312,7 +4222,6 @@ async fn stream_batch_action_pages(
         scope,
         start_key,
         active_query,
-        cached_meta,
         db,
         table_name,
         cancel,
@@ -4322,8 +4231,7 @@ async fn stream_batch_action_pages(
         return Err(BATCH_ACTION_CANCELED.to_string());
     }
 
-    let plan =
-        plan_for_batch_action(&active_query, scope.schema(), cached_meta, &db, &table_name).await?;
+    let plan = plan_for_active_query(&active_query);
     let mut next_key = Some(start_key);
     while let Some(cursor) = next_key {
         if batch_action_was_canceled(cancel.as_ref()) {
@@ -4418,7 +4326,6 @@ async fn delete_selection_full(request: DeleteSelectionJob) -> Result<usize, Str
             },
             start_key,
             active_query,
-            cached_meta: None,
             db: db.clone(),
             table_name: table_name.clone(),
             cancel: None,
@@ -4732,6 +4639,7 @@ fn query_footer_label(
     output: Option<&QueryResult>,
     active_query: &ActiveQuery,
     schema: Option<&CollectionSchema>,
+    language: &dyn QueryLanguage,
 ) -> Option<String> {
     let prefix = match output.map(|result| &result.plan_kind) {
         Some(PlanKind::Scan) => "scan".to_string(),
@@ -4739,7 +4647,7 @@ fn query_footer_label(
         Some(PlanKind::IndexedQuery { index: Some(name) }) => format!("query@{name}"),
         None => return None,
     };
-    match normalized_query(active_query, schema) {
+    match normalized_query(active_query, schema, language) {
         Some(text) if !text.is_empty() => Some(format!("{prefix} {text}")),
         _ => Some(prefix),
     }
@@ -4748,20 +4656,10 @@ fn query_footer_label(
 fn normalized_query(
     active_query: &ActiveQuery,
     schema: Option<&CollectionSchema>,
+    language: &dyn QueryLanguage,
 ) -> Option<String> {
     let raw = active_query.input_value()?;
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let parsed = match schema {
-        Some(schema) => parse_query_expression(trimmed, schema).ok(),
-        None => parse_dynamo_expression(trimmed).ok(),
-    };
-    match parsed {
-        Some(expr) => Some(expr_format::format_query_summary(&expr)),
-        None => Some(trimmed.to_string()),
-    }
+    language.summarize(&raw, schema)
 }
 
 /// Unique string values observed for `attr` across the loaded items, in sorted
@@ -4778,25 +4676,6 @@ fn collect_attribute_values(items: &[Item], attr: &str) -> Vec<String> {
     }
     out.sort();
     out
-}
-
-/// Whether the current text is a query that can be run as-is: a parseable
-/// expression, a single-token partition-key shortcut, or a blank (full scan).
-fn query_is_runnable(value: &str) -> bool {
-    let value = value.trim();
-    value.is_empty()
-        || parse_dynamo_expression(value).is_ok()
-        || parse_single_value_token(value).is_ok()
-}
-
-/// Whether a parse error means the expression is merely unfinished (the user is
-/// still typing) rather than genuinely malformed. Used to soften the live hint.
-fn parse_error_is_incomplete(err: &ParseError) -> bool {
-    match err {
-        ParseError::UnexpectedEndOfInput { .. } | ParseError::UnterminatedQuote { .. } => true,
-        ParseError::UnexpectedToken { token, .. } => token == "EOF",
-        _ => false,
-    }
 }
 
 fn fit_table_column_widths(
@@ -4967,52 +4846,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_query_expression_uses_primary_hash_key_shortcut() {
-        let table_desc = schema_with_hash_key("PK");
-        let parsed = parse_query_expression("customer_123", &table_desc).unwrap();
-        assert_eq!(
-            parsed,
-            DynamoExpression::Comparison {
-                left: Operand::Path("PK".to_string()),
-                operator: Comparator::Equal,
-                right: Operand::Value("customer_123".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_query_expression_shortcut_supports_quoted_scalars() {
-        let table_desc = schema_with_hash_key("PK");
-        let parsed = parse_query_expression(r#""foo bar""#, &table_desc).unwrap();
-        assert_eq!(
-            parsed,
-            DynamoExpression::Comparison {
-                left: Operand::Path("PK".to_string()),
-                operator: Comparator::Equal,
-                right: Operand::Value("foo bar".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_query_expression_shortcut_rejects_backticks() {
-        let table_desc = schema_with_hash_key("PK");
-        let err = parse_query_expression("`other field`", &table_desc).unwrap_err();
-        assert!(err.contains("Expected comparison operator"));
-    }
-
-    #[test]
     fn normalized_query_applies_pk_shortcut_with_table_metadata() {
         let table_desc = schema_with_hash_key("PK");
         let query = ActiveQuery::Text("foo".to_string());
-        let normalized = normalized_query(&query, Some(&table_desc));
+        let language = dynamate::dynamodb::language::DynamoLanguage;
+        let normalized = normalized_query(&query, Some(&table_desc), &language);
         assert_eq!(normalized.as_deref(), Some("PK=\"foo\""));
     }
 
     #[test]
     fn normalized_query_keeps_raw_single_token_without_table_metadata() {
         let query = ActiveQuery::Text("foo".to_string());
-        let normalized = normalized_query(&query, None);
+        let language = dynamate::dynamodb::language::DynamoLanguage;
+        let normalized = normalized_query(&query, None, &language);
         assert_eq!(normalized.as_deref(), Some("foo"));
     }
 

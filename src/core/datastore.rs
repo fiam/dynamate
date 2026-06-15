@@ -7,10 +7,9 @@
 
 use async_trait::async_trait;
 
-use crate::expr::builtins::Dialect;
-
 use super::capabilities::Capabilities;
 use super::error::Result;
+use super::language::QueryLanguage;
 use super::query::{
     BatchDeleteOutcome, CreateCollectionSpec, Key, Page, PlanExplanation, QueryPlan, QueryResult,
 };
@@ -22,9 +21,9 @@ pub trait Datastore: Send + Sync {
     /// Static description of what this backend supports.
     fn capabilities(&self) -> &Capabilities;
 
-    /// The query-language dialect (function set + type codes) for this backend.
-    /// Consulted by the parser and autocompletion engine.
-    fn dialect(&self) -> &Dialect;
+    /// The backend's query language — parsing, validation, autocompletion, and
+    /// reference docs. Consulted by the query widget.
+    fn query_language(&self) -> &dyn QueryLanguage;
 
     /// A short human label for the backend (e.g. "DynamoDB").
     fn label(&self) -> &str {
@@ -74,11 +73,5 @@ pub trait Datastore: Send + Sync {
     /// Predict how a query would run, when the backend can. Defaults to unknown.
     async fn explain(&self, _name: &str, _plan: &QueryPlan) -> PlanExplanation {
         PlanExplanation::Unknown
-    }
-
-    /// Synchronously predict how a query would run, for UI hints (no I/O). The
-    /// default is conservative; backends override using cached metadata.
-    fn predict_plan_kind(&self, _name: &str, _plan: &QueryPlan) -> super::query::PlanKind {
-        super::query::PlanKind::Scan
     }
 }

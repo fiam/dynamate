@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, BorderType, Paragraph, Wrap},
 };
 
-use dynamate::expr::builtins;
+use dynamate::core::language::ReferenceSection;
 
 use crate::{
     env::WidgetId,
@@ -21,13 +21,15 @@ use crate::{
 
 pub(crate) struct ReferencePopup {
     inner: WidgetInner,
+    sections: Vec<ReferenceSection>,
     scroll: Cell<u16>,
 }
 
 impl ReferencePopup {
-    pub(crate) fn new(parent: WidgetId) -> Self {
+    pub(crate) fn new(sections: Vec<ReferenceSection>, parent: WidgetId) -> Self {
         Self {
             inner: WidgetInner::new::<Self>(parent),
+            sections,
             scroll: Cell::new(0),
         }
     }
@@ -41,83 +43,18 @@ impl ReferencePopup {
                     .add_modifier(Modifier::BOLD),
             ))
         };
-        let muted =
-            |text: String| Line::from(Span::styled(text, Style::default().fg(theme.text_muted())));
 
         let mut lines: Vec<Line<'static>> = Vec::new();
-
-        lines.push(heading("Functions"));
-        for f in builtins::FUNCTIONS {
-            lines.push(Line::from(Span::styled(
-                f.signature.to_string(),
-                Style::default().fg(theme.text()),
-            )));
-            lines.push(muted(format!("    {}", f.summary)));
-            lines.push(muted(format!("    e.g. {}", f.example)));
+        for section in &self.sections {
+            lines.push(heading(&section.heading));
+            for (syntax, description) in &section.entries {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {syntax:<22}"), Style::default().fg(theme.text())),
+                    Span::styled(description.clone(), Style::default().fg(theme.text_muted())),
+                ]));
+            }
+            lines.push(Line::from(""));
         }
-        lines.push(Line::from(""));
-
-        lines.push(heading("Operators"));
-        for op in builtins::OPERATORS {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {:<8}", op.symbols),
-                    Style::default().fg(theme.text()),
-                ),
-                Span::styled(
-                    op.summary.to_string(),
-                    Style::default().fg(theme.text_muted()),
-                ),
-            ]));
-        }
-        lines.push(Line::from(""));
-
-        lines.push(heading("Keywords"));
-        for k in builtins::KEYWORDS {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {:<14}", k.word),
-                    Style::default().fg(theme.text()),
-                ),
-                Span::styled(
-                    k.summary.to_string(),
-                    Style::default().fg(theme.text_muted()),
-                ),
-            ]));
-            lines.push(muted(format!("    e.g. {}", k.example)));
-        }
-        lines.push(Line::from(""));
-
-        lines.push(heading("Value forms"));
-        for (form, desc) in builtins::VALUE_FORMS {
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {form:<20}"), Style::default().fg(theme.text())),
-                Span::styled(desc.to_string(), Style::default().fg(theme.text_muted())),
-            ]));
-        }
-        lines.push(Line::from(""));
-
-        lines.push(heading("Single-token shortcut"));
-        lines.push(muted(
-            "    A single bare value targets the table partition key:".to_string(),
-        ));
-        for (input, expands) in builtins::PK_SHORTCUT {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("    {input:<14}"),
-                    Style::default().fg(theme.text()),
-                ),
-                Span::styled(
-                    format!("→ {expands}"),
-                    Style::default().fg(theme.text_muted()),
-                ),
-            ]));
-        }
-        lines.push(Line::from(""));
-        lines.push(muted(
-            "    A blank query runs a full table scan.".to_string(),
-        ));
-
         lines
     }
 

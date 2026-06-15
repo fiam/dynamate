@@ -187,9 +187,8 @@ pub static PK_SHORTCUT: &[(&str, &str)] = &[
 pub static ATTR_TYPES: &[&str] = &["S", "N", "B", "BOOL", "M", "L", "SS", "NS", "BS", "NULL"];
 
 /// A query-language dialect: the function set, type codes and reference data a
-/// backend offers. Backends provide one via
-/// [`Datastore::dialect`](crate::core::datastore::Datastore::dialect); the
-/// parser and completion engine consult it instead of a hardcoded list.
+/// backend offers. The DynamoDB query language uses it to keep the parser and
+/// completion engine off hardcoded function lists.
 pub struct Dialect {
     pub functions: &'static [FunctionDoc],
     pub keywords: &'static [KeywordDoc],

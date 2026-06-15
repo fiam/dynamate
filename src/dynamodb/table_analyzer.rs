@@ -95,6 +95,36 @@ impl TableInfo {
         }
     }
 
+    /// Build a `TableInfo` from a neutral
+    /// [`CollectionSchema`](crate::core::schema::CollectionSchema), for routing
+    /// predictions in the query language (which has the schema, not the SDK
+    /// `TableDescription`).
+    pub fn from_collection_schema(schema: &crate::core::schema::CollectionSchema) -> Self {
+        use crate::core::schema::IndexKind;
+        let primary_key = PrimaryKey {
+            hash_key: schema.key.partition_key().unwrap_or_default().to_string(),
+            range_key: schema.key.sort_key().map(str::to_string),
+        };
+        let index = |kind_match: fn(IndexKind) -> bool| {
+            schema
+                .indexes
+                .iter()
+                .filter(|idx| kind_match(idx.kind))
+                .map(|idx| SecondaryIndex {
+                    name: idx.name.clone(),
+                    hash_key: idx.key.partition_key().unwrap_or_default().to_string(),
+                    range_key: idx.key.sort_key().map(str::to_string),
+                })
+                .collect()
+        };
+        Self {
+            table_name: schema.name.clone(),
+            primary_key,
+            global_secondary_indexes: index(|k| !matches!(k, IndexKind::LocalSecondary)),
+            local_secondary_indexes: index(|k| matches!(k, IndexKind::LocalSecondary)),
+        }
+    }
+
     /// Build a query type forced onto the primary table key, falling back to a
     /// scan if the expression has no usable key condition.
     pub fn primary_query_type(&self, expression: &DynamoExpression) -> QueryType {

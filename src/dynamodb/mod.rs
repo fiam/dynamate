@@ -1,10 +1,12 @@
 pub mod backend;
+pub mod completion;
 pub mod connect;
 pub mod convert;
 pub mod create_table;
 pub mod debug;
 pub mod executor;
 pub mod json;
+pub mod language;
 pub mod query;
 pub mod request_builder;
 pub mod scan;

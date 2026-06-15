@@ -1,6 +1,4 @@
-mod completion;
 mod export_popup;
-mod expr_format;
 mod index_picker;
 mod input;
 mod item_keys;

@@ -1,8 +1,9 @@
 //! Render a parsed query expression back into a compact, human-readable string
-//! for footers and summaries. Pure functions over the `expr` AST with no
-//! dependency on widget state.
+//! for footers and summaries. Pure functions over the `expr` AST.
 
-pub(super) fn format_query_summary(expr: &dynamate::expr::DynamoExpression) -> String {
+use super::{Comparator, DynamoExpression, FunctionName, Operand};
+
+pub fn format_query_summary(expr: &DynamoExpression) -> String {
     if !contains_or_or_not(expr) {
         let mut parts = Vec::new();
         collect_and_parts(expr, &mut parts);
@@ -15,10 +16,8 @@ pub(super) fn format_query_summary(expr: &dynamate::expr::DynamoExpression) -> S
     format_expr(expr, 0)
 }
 
-fn contains_or_or_not(expr: &dynamate::expr::DynamoExpression) -> bool {
-    use dynamate::expr::DynamoExpression::{
-        And, Between, Comparison, Function, In, Not, Or, Parentheses,
-    };
+fn contains_or_or_not(expr: &DynamoExpression) -> bool {
+    use DynamoExpression::{And, Between, Comparison, Function, In, Not, Or, Parentheses};
     match expr {
         Or(_, _) | Not(_) => true,
         And(left, right) => contains_or_or_not(left) || contains_or_or_not(right),
@@ -27,11 +26,8 @@ fn contains_or_or_not(expr: &dynamate::expr::DynamoExpression) -> bool {
     }
 }
 
-fn collect_and_parts<'a>(
-    expr: &'a dynamate::expr::DynamoExpression,
-    parts: &mut Vec<&'a dynamate::expr::DynamoExpression>,
-) {
-    use dynamate::expr::DynamoExpression::{And, Parentheses};
+fn collect_and_parts<'a>(expr: &'a DynamoExpression, parts: &mut Vec<&'a DynamoExpression>) {
+    use DynamoExpression::{And, Parentheses};
     match expr {
         And(left, right) => {
             collect_and_parts(left, parts);
@@ -42,10 +38,8 @@ fn collect_and_parts<'a>(
     }
 }
 
-fn format_expr(expr: &dynamate::expr::DynamoExpression, parent_prec: u8) -> String {
-    use dynamate::expr::DynamoExpression::{
-        And, Between, Comparison, Function, In, Not, Or, Parentheses,
-    };
+fn format_expr(expr: &DynamoExpression, parent_prec: u8) -> String {
+    use DynamoExpression::{And, Between, Comparison, Function, In, Not, Or, Parentheses};
     let my_prec = match expr {
         Or(_, _) => 1,
         And(_, _) => 2,
@@ -117,10 +111,8 @@ fn format_expr(expr: &dynamate::expr::DynamoExpression, parent_prec: u8) -> Stri
     }
 }
 
-fn format_expr_compact(expr: &dynamate::expr::DynamoExpression) -> String {
-    use dynamate::expr::DynamoExpression::{
-        And, Between, Comparison, Function, In, Not, Or, Parentheses,
-    };
+fn format_expr_compact(expr: &DynamoExpression) -> String {
+    use DynamoExpression::{And, Between, Comparison, Function, In, Not, Or, Parentheses};
     match expr {
         Comparison {
             left,
@@ -167,8 +159,7 @@ fn format_expr_compact(expr: &dynamate::expr::DynamoExpression) -> String {
     }
 }
 
-fn format_operand(operand: &dynamate::expr::Operand) -> String {
-    use dynamate::expr::Operand;
+fn format_operand(operand: &Operand) -> String {
     match operand {
         Operand::Path(path) => format_path(path),
         Operand::Value(value) => format_string(value),
@@ -178,8 +169,8 @@ fn format_operand(operand: &dynamate::expr::Operand) -> String {
     }
 }
 
-fn format_comparator(comp: &dynamate::expr::Comparator) -> &'static str {
-    use dynamate::expr::Comparator::{Equal, Greater, GreaterOrEqual, Less, LessOrEqual, NotEqual};
+fn format_comparator(comp: &Comparator) -> &'static str {
+    use Comparator::{Equal, Greater, GreaterOrEqual, Less, LessOrEqual, NotEqual};
     match comp {
         Equal => "=",
         NotEqual => "!=",
@@ -190,7 +181,7 @@ fn format_comparator(comp: &dynamate::expr::Comparator) -> &'static str {
     }
 }
 
-fn format_function_name(name: &dynamate::expr::FunctionName) -> &'static str {
+fn format_function_name(name: &FunctionName) -> &'static str {
     name.as_str()
 }
 

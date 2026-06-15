@@ -1,16 +1,7 @@
 //! Backend-neutral query plan, pagination, and result types.
 
-use crate::expr::DynamoExpression;
-
 use super::schema::{IndexSchema, KeySchema};
 use super::value::{Item, Value};
-
-/// A filter expression handed to a backend to compile to its own dialect.
-///
-/// This is the (already backend-neutral) parsed query AST. It is aliased here so
-/// the rest of the abstraction doesn't name the DynamoDB-era `DynamoExpression`
-/// directly; the alias will become the canonical name in a later cleanup.
-pub type FilterExpr = DynamoExpression;
 
 /// Which index, if any, the user explicitly asked to run against.
 #[derive(Debug, Clone)]
@@ -24,29 +15,30 @@ pub enum IndexHint {
 /// An exact equality on a key attribute, preserving the precise value.
 ///
 /// Used for index/primary lookups built programmatically from a selected item,
-/// where the key value may be a number or binary that the text-filter AST
-/// ([`FilterExpr`]) can't carry losslessly.
+/// where the key value may be a number or binary that a text filter can't carry
+/// losslessly.
 #[derive(Debug, Clone)]
 pub struct KeyEquals {
     pub attribute: String,
     pub value: Value,
 }
 
-/// A backend-neutral query: an optional text filter, an optional index hint, and
-/// an optional exact key equality.
+/// A backend-neutral query: an optional text filter (in the backend's own query
+/// language — see [`QueryLanguage`](super::language::QueryLanguage)), an optional
+/// index hint, and an optional exact key equality.
 ///
-/// The backend is responsible for compiling this to its native query language
-/// and deciding how to execute it (an indexed lookup vs. a full scan).
+/// The backend parses `filter` and compiles the whole plan to its native query,
+/// deciding how to execute it (an indexed lookup vs. a full scan).
 #[derive(Debug, Clone, Default)]
 pub struct QueryPlan {
-    pub filter: Option<FilterExpr>,
+    pub filter: Option<String>,
     pub index_hint: Option<IndexHint>,
     pub key_equals: Option<KeyEquals>,
 }
 
 impl QueryPlan {
     /// A text-filter query (no explicit index).
-    pub fn new(filter: Option<FilterExpr>, index_hint: Option<IndexHint>) -> Self {
+    pub fn new(filter: Option<String>, index_hint: Option<IndexHint>) -> Self {
         Self {
             filter,
             index_hint,

@@ -15,6 +15,7 @@ pub mod connect;
 pub mod datastore;
 pub mod error;
 pub mod json;
+pub mod language;
 pub mod query;
 pub mod schema;
 pub mod size;

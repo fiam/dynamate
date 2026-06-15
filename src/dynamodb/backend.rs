@@ -33,6 +33,7 @@ use super::create_table::{
     AttributeType, CreateTableSpec, GsiSpec, IndexProjection, KeySpec, LsiSpec, create_table,
 };
 use super::executor::{self, Kind, Output};
+use super::language::parse_query_text;
 use super::request_builder::DynamoDbRequest;
 use super::table_analyzer::{KeyCondition, KeyConditionType, QueryType, TableInfo};
 use super::{QueryBuilder, ScanBuilder, format_sdk_error, send_dynamo_request};
@@ -132,21 +133,52 @@ impl DynamoBackend {
         }
     }
 
-    fn build_request(&self, plan: &QueryPlan, table_desc: &TableDescription) -> DynamoDbRequest {
+    /// Parse a plan's text filter (with the partition-key shortcut), then build
+    /// the SDK request.
+    fn build_request(
+        &self,
+        plan: &QueryPlan,
+        table_desc: &TableDescription,
+    ) -> Result<DynamoDbRequest> {
+        let table_info = TableInfo::from_table_description(table_desc);
+        let hash_key = Some(table_info.primary_key.hash_key.as_str()).filter(|key| !key.is_empty());
+        let filter = match plan
+            .filter
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            Some(text) => Some(parse_query_text(text, hash_key).map_err(DbError::Backend)?),
+            None => None,
+        };
+        Ok(self.build_request_for(
+            filter.as_ref(),
+            plan.index_hint.as_ref(),
+            plan.key_equals.as_ref(),
+            table_desc,
+        ))
+    }
+
+    fn build_request_for(
+        &self,
+        filter: Option<&crate::expr::DynamoExpression>,
+        index_hint: Option<&IndexHint>,
+        key_equals: Option<&KeyEquals>,
+        table_desc: &TableDescription,
+    ) -> DynamoDbRequest {
         let table_info = TableInfo::from_table_description(table_desc);
 
         // An exact key lookup (index picker / primary) preserves the precise
         // value and routes straight to a Query.
-        if let Some(key_equals) = plan.key_equals.as_ref() {
-            let query_type =
-                query_type_for_key_lookup(&table_info, plan.index_hint.as_ref(), key_equals);
+        if let Some(key_equals) = key_equals {
+            let query_type = query_type_for_key_lookup(&table_info, index_hint, key_equals);
             return DynamoDbRequest::Query(Box::new(QueryBuilder::from_query_type(query_type)));
         }
 
-        let Some(filter) = plan.filter.as_ref() else {
+        let Some(filter) = filter else {
             return DynamoDbRequest::Scan(ScanBuilder::new());
         };
-        match &plan.index_hint {
+        match index_hint {
             None => DynamoDbRequest::from_expression_and_table(filter, table_desc),
             Some(IndexHint::Primary) => {
                 request_from_query_type(table_info.primary_query_type(filter), filter)
@@ -210,8 +242,9 @@ impl Datastore for DynamoBackend {
         &CAPABILITIES
     }
 
-    fn dialect(&self) -> &crate::expr::builtins::Dialect {
-        crate::expr::builtins::default_dialect()
+    fn query_language(&self) -> &dyn crate::core::language::QueryLanguage {
+        static LANGUAGE: super::language::DynamoLanguage = super::language::DynamoLanguage;
+        &LANGUAGE
     }
 
     fn is_read_only(&self) -> bool {
@@ -263,7 +296,7 @@ impl Datastore for DynamoBackend {
 
     async fn query(&self, name: &str, plan: &QueryPlan, page: Page) -> Result<QueryResult> {
         let table_desc = self.table_description(name).await?;
-        let request = self.build_request(plan, &table_desc);
+        let request = self.build_request(plan, &table_desc)?;
         let start_key = page.cursor.map(|cursor| attribute_map_from_item(&cursor.0));
         let limit = page.limit.map(|value| value as i32);
         let output = executor::execute_page(&self.client, name, &request, start_key, limit)
@@ -399,25 +432,16 @@ impl Datastore for DynamoBackend {
         let Ok(table_desc) = self.table_description(name).await else {
             return PlanExplanation::Unknown;
         };
-        PlanExplanation::Predicted(self.plan_kind_for(plan, &table_desc))
-    }
-
-    fn predict_plan_kind(&self, name: &str, plan: &QueryPlan) -> PlanKind {
-        match self.cached_description(name) {
-            Some(table_desc) => self.plan_kind_for(plan, &table_desc),
-            None => PlanKind::Scan,
-        }
-    }
-}
-
-impl DynamoBackend {
-    fn plan_kind_for(&self, plan: &QueryPlan, table_desc: &TableDescription) -> PlanKind {
-        match self.build_request(plan, table_desc) {
+        let Ok(request) = self.build_request(plan, &table_desc) else {
+            return PlanExplanation::Unknown;
+        };
+        let kind = match request {
             DynamoDbRequest::Scan(_) => PlanKind::Scan,
             DynamoDbRequest::Query(builder) => PlanKind::IndexedQuery {
                 index: builder.index_name().cloned(),
             },
-        }
+        };
+        PlanExplanation::Predicted(kind)
     }
 }
 

@@ -1,0 +1,13 @@
+{
+  "id": "70d5e067-e295-4620-b3a4-727a167e3de1",
+  "repo_root": "/Users/alberto/Source/dynamate",
+  "mode": "commit",
+  "base_ref": "bcd1f4dac3fc1d387fdcc1e1a40dfb644896855d",
+  "head_ref": "a74552e3ee3a92e75a7ba0c6dd685315d8871898",
+  "merge_base_sha": "bcd1f4dac3fc1d387fdcc1e1a40dfb644896855d",
+  "status": "awaiting_reviewer",
+  "threads": [],
+  "decision": null,
+  "created_at": "2026-03-15T20:32:18.444784Z",
+  "updated_at": "2026-03-15T20:32:18.444784Z"
+}

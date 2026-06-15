@@ -20,7 +20,6 @@ use dynamate::core::schema::{
 };
 use dynamate::core::value::{Item, Number, Value};
 use dynamate::dynamodb::DynamoBackend;
-use dynamate::expr::parse_dynamo_expression;
 
 #[allow(dead_code)]
 struct DynamoDBEnv {
@@ -169,9 +168,12 @@ async fn datastore_round_trips_through_neutral_values() {
         .unwrap();
 
     // Query the primary key.
-    let filter = parse_dynamo_expression("PK = \"user#1\"").unwrap();
     let result = backend
-        .query("demo", &QueryPlan::new(Some(filter), None), Page::default())
+        .query(
+            "demo",
+            &QueryPlan::new(Some("PK = \"user#1\"".to_string()), None),
+            Page::default(),
+        )
         .await
         .unwrap();
     assert_eq!(result.count, 1);
@@ -185,11 +187,13 @@ async fn datastore_round_trips_through_neutral_values() {
     );
 
     // Query the GSI via an explicit index hint.
-    let gsi_filter = parse_dynamo_expression("GSI1PK = \"active\"").unwrap();
     let gsi_result = backend
         .query(
             "demo",
-            &QueryPlan::new(Some(gsi_filter), Some(IndexHint::Named("GSI1".to_string()))),
+            &QueryPlan::new(
+                Some("GSI1PK = \"active\"".to_string()),
+                Some(IndexHint::Named("GSI1".to_string())),
+            ),
             Page::default(),
         )
         .await
