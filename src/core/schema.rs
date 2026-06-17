@@ -84,6 +84,60 @@ pub struct IndexSchema {
     pub projection: Projection,
 }
 
+/// A column in a tabular collection. Populated by SQL backends, where a row has
+/// a fixed shape; schemaless backends (DynamoDB, MongoDB) leave the collection's
+/// `columns` list empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnSchema {
+    pub name: String,
+    /// The backend's own type name (e.g. `integer`, `text`, `jsonb`).
+    pub data_type: String,
+    pub nullable: bool,
+}
+
+/// Autocompletion hints for the database-level (SQL) query view: the table names
+/// and each table's columns, so completion can be context-aware (offer tables
+/// after `FROM`/`JOIN`, and only the referenced tables' columns elsewhere).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchemaHints {
+    pub tables: Vec<String>,
+    /// `(table_name, column_names)` for every table.
+    pub columns: Vec<(String, Vec<String>)>,
+}
+
+impl SchemaHints {
+    /// Columns belonging to any of `tables` (case-insensitive). When `tables` is
+    /// empty (or matches nothing), returns every column across all tables.
+    pub fn columns_for(&self, tables: &[String]) -> Vec<String> {
+        let mut out = Vec::new();
+        let referenced: Vec<String> = tables.iter().map(|t| t.to_ascii_lowercase()).collect();
+        let mut matched_any = false;
+        for (table, cols) in &self.columns {
+            if referenced.is_empty() || referenced.contains(&table.to_ascii_lowercase()) {
+                if !referenced.is_empty() {
+                    matched_any = true;
+                }
+                for col in cols {
+                    if !out.contains(col) {
+                        out.push(col.clone());
+                    }
+                }
+            }
+        }
+        if !referenced.is_empty() && !matched_any {
+            // Referenced tables we don't know about: fall back to all columns.
+            for (_, cols) in &self.columns {
+                for col in cols {
+                    if !out.contains(col) {
+                        out.push(col.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
 /// The full neutral schema for a collection.
 ///
 /// Alongside the structural fields it carries a few optional runtime stats
@@ -94,6 +148,8 @@ pub struct CollectionSchema {
     pub name: String,
     pub key: KeySchema,
     pub indexes: Vec<IndexSchema>,
+    /// Column shape for tabular backends (SQL); empty for schemaless backends.
+    pub columns: Vec<ColumnSchema>,
     pub ttl_attribute: Option<String>,
     /// Backend status string (e.g. DynamoDB "ACTIVE"), if any.
     pub status: Option<String>,

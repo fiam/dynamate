@@ -39,14 +39,33 @@ impl FilterInput {
     }
 
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        self.render_with_title(frame, area, theme, "Filter");
+    }
+
+    /// Render the input with a custom block title (e.g. "SQL" for a query bar).
+    /// The border is highlighted only while the input is active.
+    pub(crate) fn render_with_title(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        title: &str,
+    ) {
+        let border = if self.is_active {
+            theme.accent()
+        } else {
+            theme.border()
+        };
         let block = Block::bordered()
-            .title("Filter")
+            .title(title.to_string())
             .style(Style::default().bg(theme.panel_bg_alt()).fg(theme.text()))
-            .border_style(Style::default().fg(theme.accent()));
+            .border_style(Style::default().fg(border));
         let input = Paragraph::new(self.value.as_str()).block(block);
         input.render(area, frame.buffer_mut());
 
-        frame.set_cursor_position((area.x + self.cursor as u16 + 1, area.y + 1));
+        if self.is_active {
+            frame.set_cursor_position((area.x + self.cursor as u16 + 1, area.y + 1));
+        }
     }
 
     pub(crate) fn handle_event(&mut self, event: &Event) -> bool {

@@ -59,7 +59,7 @@ use dynamate::core::language::{
     CompletionRequest, QueryLanguage, QueryStatus, Suggestion, SuggestionKind, TokenSpan,
 };
 use dynamate::core::query::{Cursor, IndexHint, Key, Page, PlanKind, QueryPlan, QueryResult};
-use dynamate::core::schema::{CollectionSchema, IndexKind, IndexSchema};
+use dynamate::core::schema::{CollectionSchema, IndexKind, IndexSchema, SchemaHints};
 use dynamate::core::value::Value;
 use dynamate::dynamodb::convert::{
     attribute_map_from_item, attribute_value_to_value, item_from_attribute_map,
@@ -82,10 +82,22 @@ pub struct QueryWidget {
     request_seq: Cell<u64>,
     export_seq: Cell<u64>,
     page_size: i32,
+    /// Database-level free-form SQL mode: no single table; runs `raw_query`,
+    /// uses the raw query language, and disables row edit/delete/index actions.
+    raw_sql: bool,
+    /// Browse-view help lines, tuned to the backend (e.g. the index-picker entry
+    /// is dropped for backends without `index_query`). Computed once.
+    help_table: Vec<help::Entry<'static>>,
+    help_filter_applied: Vec<help::Entry<'static>>,
+    help_tree: Vec<help::Entry<'static>>,
 }
 
 #[derive(Default)]
 struct QueryState {
+    /// In raw-SQL mode, completion draws on `raw_hints` (table/column names)
+    /// rather than the loaded items' keys.
+    raw: bool,
+    raw_hints: SchemaHints,
     input: input::Input,
     filter: FilterInput,
     loading_state: LoadingState,
@@ -162,6 +174,11 @@ struct TableMeta {
 
 struct TableMetaEvent {
     meta: TableMeta,
+}
+
+/// Autocomplete hints (table/column names) for the raw-SQL query view.
+struct SchemaHintsEvent {
+    hints: SchemaHints,
 }
 
 struct PutItemEvent {
@@ -413,7 +430,19 @@ impl QueryState {
     ) {
         let value = self.input.value().to_string();
         let cursor = self.input.cursor_byte();
-        let attrs: Vec<String> = self.item_keys.sorted().to_vec();
+        // In raw-SQL mode, completion is driven by the database's table/column
+        // hints (context-aware); in the per-table view, by the columns seen in
+        // loaded rows.
+        let attrs: Vec<String> = if self.raw {
+            Vec::new()
+        } else {
+            self.item_keys.sorted().to_vec()
+        };
+        let sql_hints = if self.raw {
+            Some(&self.raw_hints)
+        } else {
+            None
+        };
         let items_ref = &self.items;
         let lookup = |path: &str| collect_attribute_values(items_ref, path);
         let completion = language.complete(&CompletionRequest {
@@ -422,6 +451,7 @@ impl QueryState {
             attributes: &attrs,
             value_lookup: &lookup,
             schema,
+            sql_hints,
         });
         // When the current text is already a runnable query, the user may want to
         // run it as-is, so show the sentinel row and default to it (Enter runs).
@@ -677,6 +707,19 @@ impl crate::widgets::Widget for QueryWidget {
     }
 
     fn start(&self, ctx: crate::env::WidgetCtx) {
+        if self.raw_sql {
+            self.fetch_schema_hints(ctx.clone());
+            // If launched with a query (e.g. from the table picker's SQL bar),
+            // run it; otherwise focus the input and wait for one.
+            if let Some(ActiveQuery::Text(query)) = self.initial_query.clone()
+                && !query.trim().is_empty()
+            {
+                self.restart_query(ActiveQuery::Text(query), ctx, None);
+            } else {
+                self.state.borrow_mut().input.set_active(true);
+            }
+            return;
+        }
         if let Some(initial_query) = self.initial_query.clone() {
             self.restart_query(initial_query, ctx, None);
         } else {
@@ -742,7 +785,11 @@ impl crate::widgets::Widget for QueryWidget {
                 ])
                 .split(region);
                 state.input.render(frame, sub[0], theme);
-                let hint = self.query_hint_line(state.input.value(), theme);
+                let error = match &state.loading_state {
+                    LoadingState::Error(message) => Some(message.as_str()),
+                    _ => None,
+                };
+                let hint = self.query_hint_line(state.input.value(), error, theme);
                 frame.render_widget(Paragraph::new(hint), sub[1]);
                 if completion_visible && actual_dropdown > 0 {
                     self.render_completion(frame, sub[2], theme, &state.completion);
@@ -792,7 +839,7 @@ impl crate::widgets::Widget for QueryWidget {
     fn help(&self) -> Option<&[help::Entry<'_>]> {
         let show_tree = self.state.borrow().show_tree;
         if show_tree {
-            return Some(Self::HELP_TREE);
+            return Some(&self.help_tree);
         }
         let state = self.state.borrow();
         if state.input.is_active() {
@@ -806,9 +853,9 @@ impl crate::widgets::Widget for QueryWidget {
         } else if state.selection.is_active() {
             Some(Self::HELP_SELECTION)
         } else if state.filter_applied() {
-            Some(Self::HELP_FILTER_APPLIED)
+            Some(&self.help_filter_applied)
         } else {
-            Some(Self::HELP_TABLE)
+            Some(&self.help_table)
         }
     }
 
@@ -817,6 +864,10 @@ impl crate::widgets::Widget for QueryWidget {
         state.filter.is_active() || state.input.is_active()
     }
 
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "flat if-let dispatch over self-event payload variants"
+    )]
     fn on_self_event(&self, ctx: crate::env::WidgetCtx, event: &crate::env::AppEvent) {
         if let Some(page_event) = event.payload::<QueryPageEvent>() {
             if !self.is_request_active(page_event.request_id) {
@@ -861,7 +912,13 @@ impl crate::widgets::Widget for QueryWidget {
                         "execute_page_error"
                     );
                     self.set_loading_state(LoadingState::Error(err.clone()));
-                    self.show_error(ctx.clone(), err);
+                    if self.raw_sql {
+                        // Keep the SQL input visible with the error shown inline,
+                        // so the query can be fixed without dismissing a modal.
+                        self.state.borrow_mut().input.set_active(true);
+                    } else {
+                        self.show_error(ctx.clone(), err);
+                    }
                     let mut state = self.state.borrow_mut();
                     state.is_loading_more = false;
                     state.is_prefetching = false;
@@ -876,6 +933,15 @@ impl crate::widgets::Widget for QueryWidget {
             self.table_meta.borrow_mut().replace(meta.clone());
             let mut state = self.state.borrow_mut();
             state.item_keys.rebuild_with_schema(&meta.schema);
+            ctx.invalidate();
+            return;
+        }
+
+        if let Some(hints_event) = event.payload::<SchemaHintsEvent>() {
+            self.state
+                .borrow_mut()
+                .raw_hints
+                .clone_from(&hints_event.hints);
             ctx.invalidate();
             return;
         }
@@ -1134,7 +1200,7 @@ impl QueryWidget {
                 }
                 KeyCode::Tab if dropdown_visible => {
                     // Tab always completes — on the sentinel, the first item.
-                    let lang = self.db.query_language();
+                    let lang = self.input_language();
                     let schema = self.schema_snapshot();
                     self.state
                         .borrow_mut()
@@ -1144,7 +1210,7 @@ impl QueryWidget {
                 KeyCode::Enter if dropdown_visible => {
                     // Accept the highlighted suggestion; if the sentinel row is
                     // selected, fall through so Enter runs the query.
-                    let lang = self.db.query_language();
+                    let lang = self.input_language();
                     let schema = self.schema_snapshot();
                     if self
                         .state
@@ -1164,7 +1230,7 @@ impl QueryWidget {
         // Delegate to the text input, then refresh suggestions on any edit.
         let handled = self.state.borrow_mut().input.handle_event(event);
         if handled {
-            let lang = self.db.query_language();
+            let lang = self.input_language();
             let schema = self.schema_snapshot();
             let mut state = self.state.borrow_mut();
             state.reset_completion_dismissal();
@@ -1250,7 +1316,7 @@ impl QueryWidget {
                 }
             }
             KeyCode::Char('q') if !input_is_active && !filter_active => {
-                let lang = self.db.query_language();
+                let lang = self.input_language();
                 let schema = self.schema_snapshot();
                 let mut state = self.state.borrow_mut();
                 if !state.show_tree {
@@ -1345,7 +1411,9 @@ impl QueryWidget {
                     state.reset_tree_scroll();
                 }
             }
-            KeyCode::Char('i') if !input_is_active && !filter_active => {
+            KeyCode::Char('i')
+                if !input_is_active && !filter_active && self.db.capabilities().index_query =>
+            {
                 self.show_index_picker(ctx.clone());
             }
             KeyCode::Char('e')
@@ -1848,6 +1916,14 @@ impl QueryWidget {
         )
     }
 
+    /// A database-level free-form SQL query view (read-only result browsing).
+    pub fn new_raw_sql(db: Arc<dyn Datastore>, parent: crate::env::WidgetId) -> Self {
+        let mut widget = Self::new_with_query(db, "SQL", parent, None);
+        widget.raw_sql = true;
+        widget.state.get_mut().raw = true;
+        widget
+    }
+
     fn new_with_query(
         db: Arc<dyn Datastore>,
         table_name: &str,
@@ -1858,6 +1934,7 @@ impl QueryWidget {
             .and_then(|value| i32::try_from(value).ok())
             .filter(|value| *value > 0)
             .unwrap_or(100);
+        let index_query = db.capabilities().index_query;
         Self {
             inner: WidgetInner::new::<Self>(parent),
             db,
@@ -1869,7 +1946,32 @@ impl QueryWidget {
             request_seq: Cell::new(0),
             export_seq: Cell::new(0),
             page_size,
+            raw_sql: false,
+            help_table: browse_help(Self::HELP_TABLE, index_query),
+            help_filter_applied: browse_help(Self::HELP_FILTER_APPLIED, index_query),
+            help_tree: browse_help(Self::HELP_TREE, index_query),
         }
+    }
+
+    /// The query language for the active input — the backend's free-form SQL
+    /// language in raw mode, else its per-collection filter language.
+    fn input_language(&self) -> &dyn QueryLanguage {
+        if self.raw_sql
+            && let Some(language) = self.db.raw_query_language()
+        {
+            return language;
+        }
+        self.db.query_language()
+    }
+
+    /// Load table/column hints for raw-SQL autocompletion (raw mode only).
+    fn fetch_schema_hints(&self, ctx: crate::env::WidgetCtx) {
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            if let Ok(hints) = db.schema_hints().await {
+                ctx.emit_self(SchemaHintsEvent { hints });
+            }
+        });
     }
 
     fn set_loading_state(&self, state: LoadingState) {
@@ -2107,23 +2209,34 @@ impl QueryWidget {
     }
 
     fn open_reference_popup(&self, ctx: crate::env::WidgetCtx) {
-        let sections = self.db.query_language().reference();
+        let sections = self.input_language().reference();
         ctx.set_popup(Box::new(ReferencePopup::new(sections, self.inner.id())));
     }
 
     /// One-line feedback shown under the query box while editing: a placeholder
     /// when empty, otherwise whether the query is valid and how it will run —
     /// all delegated to the backend's query language.
-    fn query_hint_line(&self, value: &str, theme: &Theme) -> Line<'static> {
+    fn query_hint_line(&self, value: &str, error: Option<&str>, theme: &Theme) -> Line<'static> {
+        if let Some(error) = error {
+            return Line::from(Span::styled(
+                format!("  ✖ {}", error.replace('\n', " ")),
+                Style::default().fg(theme.error()),
+            ));
+        }
+        let language = self.input_language();
         let meta = self.table_meta.borrow();
-        let Some(meta) = meta.as_ref() else {
+        // The per-table view waits for table metadata; the raw SQL view has no
+        // single table, so it never has (or needs) one.
+        let schema = if self.raw_sql {
+            None
+        } else if let Some(meta) = meta.as_ref() {
+            Some(&meta.schema)
+        } else {
             return Line::from(Span::styled(
                 "  loading table metadata…".to_string(),
                 Style::default().fg(theme.text_muted()),
             ));
         };
-        let language = self.db.query_language();
-        let schema = Some(&meta.schema);
 
         if value.trim().is_empty() {
             return Line::from(Span::styled(
@@ -2259,6 +2372,9 @@ impl QueryWidget {
     }
 
     fn confirm_delete(&self, ctx: crate::env::WidgetCtx) {
+        if self.raw_sql {
+            return;
+        }
         if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
@@ -2287,6 +2403,9 @@ impl QueryWidget {
     }
 
     fn confirm_delete_selection(&self, ctx: crate::env::WidgetCtx) {
+        if self.raw_sql {
+            return;
+        }
         if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
@@ -2320,6 +2439,9 @@ impl QueryWidget {
     }
 
     fn show_index_picker(&self, ctx: crate::env::WidgetCtx) {
+        if self.raw_sql {
+            return;
+        }
         let targets = match self.index_targets() {
             Ok(targets) if targets.is_empty() => {
                 ctx.show_toast(Toast {
@@ -2654,11 +2776,7 @@ impl QueryWidget {
                     .map(|meta| meta.schema.clone());
                 let query = {
                     let state = self.state.borrow();
-                    normalized_query(
-                        &state.active_query,
-                        schema.as_ref(),
-                        self.db.query_language(),
-                    )
+                    normalized_query(&state.active_query, schema.as_ref(), self.input_language())
                 };
                 base.join(export_results_file_name(
                     &self.table_name,
@@ -3098,6 +3216,7 @@ impl QueryWidget {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
         let page_size = self.page_size;
+        let raw_sql = self.raw_sql;
         let ctx = ctx.clone();
         tokio::spawn(async move {
             // The raw query text travels to the backend, which parses and
@@ -3111,17 +3230,16 @@ impl QueryWidget {
                 start_key_present,
                 "execute_page_start"
             );
-            let result = db
-                .query(
-                    &table_name,
-                    &plan,
-                    Page {
-                        cursor: start_key,
-                        limit: Some(page_size as u32),
-                    },
-                )
-                .await
-                .map_err(|err| err.to_string());
+            let page = Page {
+                cursor: start_key,
+                limit: Some(page_size as u32),
+            };
+            let result = if raw_sql {
+                db.raw_query(&query, page).await
+            } else {
+                db.query(&table_name, &plan, page).await
+            }
+            .map_err(|err| err.to_string());
             ctx.emit_self(QueryPageEvent {
                 request_id,
                 append,
@@ -3282,6 +3400,9 @@ impl QueryWidget {
     }
 
     fn maybe_start_meta_fetch(&self, ctx: crate::env::WidgetCtx) {
+        if self.raw_sql {
+            return;
+        }
         if self.meta_started.get() {
             return;
         }
@@ -3459,7 +3580,7 @@ impl QueryWidget {
             state.query_output.as_ref(),
             &state.active_query,
             schema.as_ref(),
-            self.db.query_language(),
+            self.input_language(),
         ) {
             footer_suffix.push_str(&format!(" · {value}"));
         }
@@ -3478,9 +3599,16 @@ impl QueryWidget {
         if let Some(selection_status) = self.selection_status(state) {
             footer_suffix.push_str(&format!(" · {selection_status}"));
         }
+        // Per-table browse shows the table name; the free-form SQL view, which
+        // has no single table, shows "Results".
+        let result_label = if self.raw_sql {
+            "Results"
+        } else {
+            self.table_name.as_str()
+        };
         let (title, title_bottom, title_style) = match &state.loading_state {
             LoadingState::Idle | LoadingState::Loaded => (
-                format!("Results{}", output_info(state.query_output.as_ref())),
+                format!("{result_label}{}", output_info(state.query_output.as_ref())),
                 pad(
                     format!(
                         "{} results, showing {}-{} · {}{}",
@@ -3810,6 +3938,9 @@ impl QueryWidget {
     }
 
     fn edit_selected(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
+        if self.raw_sql {
+            return;
+        }
         if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
@@ -3906,6 +4037,9 @@ impl QueryWidget {
     }
 
     fn create_item(&self, format: EditorFormat, ctx: crate::env::WidgetCtx) {
+        if self.raw_sql {
+            return;
+        }
         if self.db.is_read_only() {
             show_readonly_toast(&ctx);
             return;
@@ -4025,6 +4159,19 @@ impl QueryWidget {
             });
         });
     }
+}
+
+/// A browse-view help line tuned to the backend: drops the index-picker entry
+/// for backends that don't support index queries (e.g. SQL).
+fn browse_help(
+    entries: &'static [help::Entry<'static>],
+    index_query: bool,
+) -> Vec<help::Entry<'static>> {
+    entries
+        .iter()
+        .filter(|entry| index_query || entry.short.as_ref() != "indexes")
+        .cloned()
+        .collect()
 }
 
 fn show_readonly_toast(ctx: &crate::env::WidgetCtx) {

@@ -11,6 +11,7 @@ pub mod create_table;
 pub mod error;
 pub(crate) mod filter_input;
 mod query;
+pub mod schema_popup;
 mod table_picker;
 pub mod theme;
 

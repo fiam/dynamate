@@ -32,9 +32,12 @@ const CAPABILITIES: Capabilities = Capabilities {
     create_collection: true,
     drop_collection: true,
     batch_delete: true,
+    purge: true,
+    index_query: true,
     ttl: false,
     scanned_count: false,
     consumed_capacity: false,
+    raw_query: false,
 };
 
 /// Documents per `$or` chunk in a batch delete (keeps the command well under
@@ -148,6 +151,7 @@ impl Datastore for MongoBackend {
                 }],
             },
             indexes,
+            columns: Vec::new(),
             ttl_attribute: None,
             status: None,
             item_count,

@@ -179,17 +179,21 @@ fn resolve_connection(
 
     let kind =
         backend.unwrap_or_else(|| detect_backend(target.as_deref(), endpoint_url.as_deref()));
-    let options = if kind == BackendKind::Mongodb {
-        ConnOptions::Mongo {
+    let options = match kind {
+        BackendKind::Mongodb => ConnOptions::Mongo {
             uri: target.or(endpoint_url).unwrap_or_default(),
+        },
+        BackendKind::Postgres | BackendKind::Mysql => ConnOptions::Sql {
+            url: target.or(endpoint_url).unwrap_or_default(),
+        },
+        _ => {
+            // An http(s) positional target is a DynamoDB endpoint URL.
+            let endpoint_url = match target {
+                Some(t) if t.starts_with("http://") || t.starts_with("https://") => Some(t),
+                _ => endpoint_url,
+            };
+            ConnOptions::Dynamo { endpoint_url }
         }
-    } else {
-        // An http(s) positional target is a DynamoDB endpoint URL.
-        let endpoint_url = match target {
-            Some(t) if t.starts_with("http://") || t.starts_with("https://") => Some(t),
-            _ => endpoint_url,
-        };
-        ConnOptions::Dynamo { endpoint_url }
     };
     (kind, options)
 }
@@ -468,7 +472,10 @@ impl App {
                         self.handle_cmd(cmd);
                         if self.should_redraw || force_redraw {
                             if force_redraw {
-                                terminal.clear()?;
+                                // Best-effort: a transient clear failure (e.g. just
+                                // after an external editor restores the terminal)
+                                // shouldn't abort the app — the draw below repaints.
+                                let _ = terminal.clear();
                             }
                             terminal.draw(|frame| self.render(frame))?;
                             self.should_redraw = false;
@@ -523,7 +530,10 @@ impl App {
                         self.handle_cmd(cmd);
                         if self.should_redraw || force_redraw {
                             if force_redraw {
-                                terminal.clear()?;
+                                // Best-effort: a transient clear failure (e.g. just
+                                // after an external editor restores the terminal)
+                                // shouldn't abort the app — the draw below repaints.
+                                let _ = terminal.clear();
                             }
                             terminal.draw(|frame| self.render(frame))?;
                             self.should_redraw = false;

@@ -209,6 +209,7 @@ mod tests {
             attributes: attrs,
             value_lookup: lookup,
             schema: None,
+            sql_hints: None,
         }
     }
 

@@ -12,7 +12,7 @@
 //! [`Datastore::query_language`]: super::datastore::Datastore::query_language
 
 use super::query::PlanKind;
-use super::schema::CollectionSchema;
+use super::schema::{CollectionSchema, SchemaHints};
 
 /// Byte offsets into the input string delimiting the token under the cursor
 /// (the span a chosen suggestion replaces).
@@ -75,6 +75,9 @@ pub struct CompletionRequest<'a> {
     pub value_lookup: &'a dyn Fn(&str) -> Vec<String>,
     /// The collection schema, when known.
     pub schema: Option<&'a CollectionSchema>,
+    /// Database-level table/column hints, for the free-form SQL query view.
+    /// `None` outside that view.
+    pub sql_hints: Option<&'a SchemaHints>,
 }
 
 /// A section of the in-app query reference popup.

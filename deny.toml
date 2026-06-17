@@ -4,7 +4,9 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "sqlx-mysql uses rsa for MySQL authentication; no patched rsa release is available" },
+]
 
 [bans]
 multiple-versions = "warn"

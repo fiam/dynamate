@@ -48,9 +48,12 @@ const CAPABILITIES: Capabilities = Capabilities {
     create_collection: true,
     drop_collection: true,
     batch_delete: true,
+    purge: true,
+    index_query: true,
     ttl: true,
     scanned_count: true,
     consumed_capacity: true,
+    raw_query: false,
 };
 
 /// Maximum number of delete requests per `BatchWriteItem` call.
@@ -497,6 +500,7 @@ fn collection_schema_from(
         name: desc.table_name().unwrap_or_default().to_string(),
         key,
         indexes,
+        columns: Vec::new(),
         ttl_attribute,
         status: desc
             .table_status()

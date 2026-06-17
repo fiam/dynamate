@@ -16,6 +16,8 @@ pub enum BackendKind {
     #[default]
     Dynamodb,
     Mongodb,
+    Postgres,
+    Mysql,
     Firestore,
 }
 
@@ -24,6 +26,7 @@ pub enum BackendKind {
 pub enum ConnOptions {
     Dynamo { endpoint_url: Option<String> },
     Mongo { uri: String },
+    Sql { url: String },
 }
 
 /// Choose a backend from the connection arguments by URI scheme: a
@@ -35,6 +38,12 @@ pub fn detect_backend(target: Option<&str>, endpoint_url: Option<&str>) -> Backe
         let lower = candidate.trim().to_ascii_lowercase();
         if lower.starts_with("mongodb://") || lower.starts_with("mongodb+srv://") {
             return BackendKind::Mongodb;
+        }
+        if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
+            return BackendKind::Postgres;
+        }
+        if lower.starts_with("mysql://") {
+            return BackendKind::Mysql;
         }
     }
     BackendKind::Dynamodb
@@ -57,6 +66,17 @@ pub async fn open(
         }
         (BackendKind::Mongodb, ConnOptions::Mongo { uri }) => {
             let backend = crate::mongo::connect::connect(uri, read_only)
+                .await
+                .map_err(DbError::Backend)?;
+            Ok(Arc::new(backend))
+        }
+        (kind @ (BackendKind::Postgres | BackendKind::Mysql), ConnOptions::Sql { url }) => {
+            let dialect = if matches!(kind, BackendKind::Postgres) {
+                crate::sql::SqlDialectKind::Postgres
+            } else {
+                crate::sql::SqlDialectKind::Mysql
+            };
+            let backend = crate::sql::SqlBackend::connect(url, dialect, read_only)
                 .await
                 .map_err(DbError::Backend)?;
             Ok(Arc::new(backend))
@@ -100,6 +120,22 @@ mod tests {
         assert_eq!(
             detect_backend(Some("https://127.0.0.1:8000"), None),
             BackendKind::Dynamodb
+        );
+    }
+
+    #[test]
+    fn detects_sql_engines_from_scheme() {
+        assert_eq!(
+            detect_backend(Some("postgres://u:p@host/db"), None),
+            BackendKind::Postgres
+        );
+        assert_eq!(
+            detect_backend(Some("postgresql://host/db"), None),
+            BackendKind::Postgres
+        );
+        assert_eq!(
+            detect_backend(Some("mysql://host:3306/db"), None),
+            BackendKind::Mysql
         );
     }
 }

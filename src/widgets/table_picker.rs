@@ -13,6 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 use dynamate::core::datastore::Datastore;
 use dynamate::core::query::{Key, Page, QueryPlan};
+use dynamate::core::schema::CollectionSchema;
 use dynamate::core::value::Item;
 
 use crate::{
@@ -25,6 +26,7 @@ use crate::{
         create_table::{CreateTablePopup, TableCreatedEvent},
         error::ErrorPopup,
         filter_input::FilterInput,
+        schema_popup::{SchemaNavEvent, SchemaPopup},
         theme::Theme,
     },
 };
@@ -33,6 +35,9 @@ pub struct TablePickerWidget {
     inner: WidgetInner,
     db: Arc<dyn Datastore>,
     state: RefCell<TablePickerState>,
+    /// Help lines, tuned to the backend's capabilities (computed once).
+    help_base: Vec<help::Entry<'static>>,
+    help_filter_applied: Vec<help::Entry<'static>>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,11 +65,29 @@ impl TableMeta {
 struct TableEntry {
     name: String,
     meta: TableMeta,
+    schema: CollectionSchema,
 }
 
 impl TableEntry {
-    fn new(name: String, meta: TableMeta) -> Self {
-        Self { name, meta }
+    fn new(name: String, schema: CollectionSchema) -> Self {
+        Self {
+            name,
+            meta: table_meta_from(&schema),
+            schema,
+        }
+    }
+
+    /// An entry whose schema couldn't be described.
+    fn placeholder(name: String) -> Self {
+        let schema = CollectionSchema {
+            name: name.clone(),
+            ..CollectionSchema::default()
+        };
+        Self {
+            name,
+            meta: TableMeta::placeholder(),
+            schema,
+        }
     }
 }
 
@@ -203,80 +226,6 @@ impl TablePickerState {
 }
 
 impl TablePickerWidget {
-    const HELP: &'static [help::Entry<'static>] = &[
-        help::Entry {
-            keys: Cow::Borrowed("/"),
-            short: Cow::Borrowed("filter"),
-            long: Cow::Borrowed("Filter tables"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed("⏎"),
-            short: Cow::Borrowed("select"),
-            long: Cow::Borrowed("Open table"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed("j/k/↑/↓/PgUp/PgDn"),
-            short: Cow::Borrowed("move"),
-            long: Cow::Borrowed("Move selection"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed(""),
-            short: Cow::Borrowed(""),
-            long: Cow::Borrowed(""),
-            ctrl: Some(help::Variant {
-                keys: Some(Cow::Borrowed("^n")),
-                short: Some(Cow::Borrowed("new")),
-                long: Some(Cow::Borrowed("Create table")),
-            }),
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed(""),
-            short: Cow::Borrowed(""),
-            long: Cow::Borrowed(""),
-            ctrl: Some(help::Variant {
-                keys: Some(Cow::Borrowed("^r")),
-                short: Some(Cow::Borrowed("refresh")),
-                long: Some(Cow::Borrowed("Refresh tables")),
-            }),
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed(""),
-            short: Cow::Borrowed(""),
-            long: Cow::Borrowed(""),
-            ctrl: Some(help::Variant {
-                keys: Some(Cow::Borrowed("^d")),
-                short: Some(Cow::Borrowed("delete")),
-                long: Some(Cow::Borrowed("Delete table")),
-            }),
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed(""),
-            short: Cow::Borrowed(""),
-            long: Cow::Borrowed(""),
-            ctrl: Some(help::Variant {
-                keys: Some(Cow::Borrowed("^p")),
-                short: Some(Cow::Borrowed("purge")),
-                long: Some(Cow::Borrowed("Purge table")),
-            }),
-            shift: None,
-            alt: None,
-        },
-    ];
     const HELP_FILTER_EDIT: &'static [help::Entry<'static>] = &[
         help::Entry {
             keys: Cow::Borrowed("esc"),
@@ -295,94 +244,17 @@ impl TablePickerWidget {
             alt: None,
         },
     ];
-    const HELP_FILTER_APPLIED: &'static [help::Entry<'static>] = &[
-        help::Entry {
-            keys: Cow::Borrowed("/"),
-            short: Cow::Borrowed("filter"),
-            long: Cow::Borrowed("Edit filter"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed("esc"),
-            short: Cow::Borrowed("clear filter"),
-            long: Cow::Borrowed("Clear filter"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed("⏎"),
-            short: Cow::Borrowed("select"),
-            long: Cow::Borrowed("Open table"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed("j/k/↑/↓/PgUp/PgDn"),
-            short: Cow::Borrowed("move"),
-            long: Cow::Borrowed("Move selection"),
-            ctrl: None,
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed(""),
-            short: Cow::Borrowed(""),
-            long: Cow::Borrowed(""),
-            ctrl: Some(help::Variant {
-                keys: Some(Cow::Borrowed("^n")),
-                short: Some(Cow::Borrowed("new")),
-                long: Some(Cow::Borrowed("Create table")),
-            }),
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed(""),
-            short: Cow::Borrowed(""),
-            long: Cow::Borrowed(""),
-            ctrl: Some(help::Variant {
-                keys: Some(Cow::Borrowed("^r")),
-                short: Some(Cow::Borrowed("refresh")),
-                long: Some(Cow::Borrowed("Refresh tables")),
-            }),
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed(""),
-            short: Cow::Borrowed(""),
-            long: Cow::Borrowed(""),
-            ctrl: Some(help::Variant {
-                keys: Some(Cow::Borrowed("^d")),
-                short: Some(Cow::Borrowed("delete")),
-                long: Some(Cow::Borrowed("Delete table")),
-            }),
-            shift: None,
-            alt: None,
-        },
-        help::Entry {
-            keys: Cow::Borrowed(""),
-            short: Cow::Borrowed(""),
-            long: Cow::Borrowed(""),
-            ctrl: Some(help::Variant {
-                keys: Some(Cow::Borrowed("^p")),
-                short: Some(Cow::Borrowed("purge")),
-                long: Some(Cow::Borrowed("Purge table")),
-            }),
-            shift: None,
-            alt: None,
-        },
-    ];
 
     pub fn new(db: Arc<dyn Datastore>, parent: crate::env::WidgetId) -> Self {
+        let caps = db.capabilities();
+        let help_base = build_help(caps, false);
+        let help_filter_applied = build_help(caps, true);
         Self {
             inner: WidgetInner::new::<Self>(parent),
             db,
             state: RefCell::new(TablePickerState::default()),
+            help_base,
+            help_filter_applied,
         }
     }
 
@@ -394,10 +266,10 @@ impl TablePickerWidget {
         let mut warnings = Vec::new();
         for name in table_names {
             match db.describe_collection(&name).await {
-                Ok(schema) => tables.push(TableEntry::new(name, table_meta_from(&schema))),
+                Ok(schema) => tables.push(TableEntry::new(name, schema)),
                 Err(err) => {
                     warnings.push(format!("{name}: {err}"));
-                    tables.push(TableEntry::new(name, TableMeta::placeholder()));
+                    tables.push(TableEntry::placeholder(name));
                 }
             }
         }
@@ -640,6 +512,37 @@ impl TablePickerWidget {
         let popup = Box::new(CreateTablePopup::new(self.db.clone(), self.inner.id()));
         ctx.set_popup(popup);
     }
+
+    /// Whether this backend offers a free-form database-level query (SQL).
+    fn is_sql(&self) -> bool {
+        self.db.capabilities().raw_query
+    }
+
+    /// Open the schema popup for the current selection; up/down navigates the
+    /// other tables (in the current filtered order) without leaving it.
+    fn show_schema_popup(&self, ctx: crate::env::WidgetCtx) {
+        let (schemas, index) = {
+            let state = self.state.borrow();
+            let schemas: Vec<CollectionSchema> = state
+                .filtered_indices
+                .iter()
+                .filter_map(|idx| state.tables.get(*idx))
+                .map(|entry| entry.schema.clone())
+                .collect();
+            (schemas, state.table_state.selected().unwrap_or(0))
+        };
+        if schemas.is_empty() {
+            return;
+        }
+        ctx.set_popup(Box::new(SchemaPopup::new(schemas, index, self.inner.id())));
+    }
+
+    /// Open the free-form SQL query view (a dynamic action; the view focuses its
+    /// input and autocompletes table/column names).
+    fn open_sql_query(&self, ctx: crate::env::WidgetCtx) {
+        let widget = Box::new(QueryWidget::new_raw_sql(self.db.clone(), self.inner.id()));
+        ctx.push_widget(widget);
+    }
 }
 
 fn show_readonly_toast(ctx: &crate::env::WidgetCtx) {
@@ -684,6 +587,7 @@ impl crate::widgets::Widget for TablePickerWidget {
         nav: &crate::widgets::NavContext,
     ) {
         let mut state = self.state.borrow_mut();
+        let sql = self.is_sql();
         let filter_active = state.filter.is_active();
         let list_area = if filter_active {
             let layout = Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]);
@@ -743,59 +647,87 @@ impl crate::widgets::Widget for TablePickerWidget {
                     let empty = Paragraph::new("").block(block);
                     frame.render_widget(empty, list_area);
                 } else {
-                    let header = Row::new(vec![
-                        Cell::from("Table"),
-                        Cell::from("Status"),
-                        Cell::from(Text::from("Items").alignment(Alignment::Right)),
-                        Cell::from(Text::from("Size").alignment(Alignment::Right)),
-                        Cell::from(Text::from("Indexes").alignment(Alignment::Right)),
-                    ])
-                    .style(
-                        Style::default()
-                            .fg(theme.text_muted())
-                            .add_modifier(ratatui::style::Modifier::BOLD),
-                    );
+                    let header_style = Style::default()
+                        .fg(theme.text_muted())
+                        .add_modifier(ratatui::style::Modifier::BOLD);
+                    let header = if sql {
+                        Row::new(vec![
+                            Cell::from("Table"),
+                            Cell::from(Text::from("Columns").alignment(Alignment::Right)),
+                            Cell::from("Primary key"),
+                            Cell::from(Text::from("Indexes").alignment(Alignment::Right)),
+                        ])
+                        .style(header_style)
+                    } else {
+                        Row::new(vec![
+                            Cell::from("Table"),
+                            Cell::from("Status"),
+                            Cell::from(Text::from("Items").alignment(Alignment::Right)),
+                            Cell::from(Text::from("Size").alignment(Alignment::Right)),
+                            Cell::from(Text::from("Indexes").alignment(Alignment::Right)),
+                        ])
+                        .style(header_style)
+                    };
 
                     let rows: Vec<Row> = state
                         .filtered_indices
                         .iter()
                         .filter_map(|idx| state.tables.get(*idx))
                         .map(|entry| {
-                            let status_style = status_style(&entry.meta.status, theme);
-                            let items = format_count(entry.meta.item_count);
-                            let size = format_size_bytes(entry.meta.size_bytes);
-                            let idx_label =
-                                format!("G{}/L{}", entry.meta.gsi_count, entry.meta.lsi_count);
-                            Row::new(vec![
-                                Cell::from(entry.name.clone()),
-                                Cell::from(entry.meta.status.clone()).style(status_style),
-                                Cell::from(Text::from(items).alignment(Alignment::Right)),
-                                Cell::from(Text::from(size).alignment(Alignment::Right)),
-                                Cell::from(Text::from(idx_label).alignment(Alignment::Right)),
-                            ])
+                            if sql {
+                                let columns = entry.schema.columns.len().to_string();
+                                let pk = sql_primary_key(&entry.schema);
+                                let indexes = entry.schema.indexes.len().to_string();
+                                Row::new(vec![
+                                    Cell::from(entry.name.clone()),
+                                    Cell::from(Text::from(columns).alignment(Alignment::Right)),
+                                    Cell::from(pk),
+                                    Cell::from(Text::from(indexes).alignment(Alignment::Right)),
+                                ])
+                            } else {
+                                let status_style = status_style(&entry.meta.status, theme);
+                                let items = format_count(entry.meta.item_count);
+                                let size = format_size_bytes(entry.meta.size_bytes);
+                                let idx_label =
+                                    format!("G{}/L{}", entry.meta.gsi_count, entry.meta.lsi_count);
+                                Row::new(vec![
+                                    Cell::from(entry.name.clone()),
+                                    Cell::from(entry.meta.status.clone()).style(status_style),
+                                    Cell::from(Text::from(items).alignment(Alignment::Right)),
+                                    Cell::from(Text::from(size).alignment(Alignment::Right)),
+                                    Cell::from(Text::from(idx_label).alignment(Alignment::Right)),
+                                ])
+                            }
                         })
                         .collect();
 
                     let inner = block.inner(list_area);
-                    let table = Table::new(
-                        rows,
-                        [
+                    let widths: &[Constraint] = if sql {
+                        &[
+                            Constraint::Fill(1),
+                            Constraint::Length(9),
+                            Constraint::Length(24),
+                            Constraint::Length(9),
+                        ]
+                    } else {
+                        &[
                             Constraint::Fill(1),
                             Constraint::Length(10),
                             Constraint::Length(9),
                             Constraint::Length(10),
                             Constraint::Length(8),
-                        ],
-                    )
-                    .block(block)
-                    .header(header)
-                    .highlight_spacing(HighlightSpacing::Always)
-                    .highlight_symbol(">> ")
-                    .row_highlight_style(
-                        Style::default()
-                            .bg(theme.selection_bg())
-                            .fg(theme.selection_fg()),
-                    );
+                        ]
+                    };
+                    let table = Table::new(rows, widths.iter().copied())
+                        .block(block)
+                        .header(header)
+                        .highlight_spacing(HighlightSpacing::Always)
+                        .highlight_symbol("❯ ")
+                        .row_highlight_style(
+                            Style::default()
+                                .bg(theme.selection_bg())
+                                .fg(theme.selection_fg()),
+                        );
 
                     let visible_rows = inner.height.saturating_sub(1) as usize;
                     state.last_render_capacity = visible_rows;
@@ -967,6 +899,14 @@ impl crate::widgets::Widget for TablePickerWidget {
                     state.filter.set_active(true);
                     return true;
                 }
+                KeyCode::Char('q') if !filter_active && self.is_sql() => {
+                    self.open_sql_query(ctx);
+                    return true;
+                }
+                KeyCode::Tab if !filter_active => {
+                    self.show_schema_popup(ctx);
+                    return true;
+                }
                 KeyCode::Enter if !filter_active => {
                     return self.handle_selection(ctx);
                 }
@@ -1004,7 +944,10 @@ impl crate::widgets::Widget for TablePickerWidget {
                     }
                     return true;
                 }
-                KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('p')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.db.capabilities().purge =>
+                {
                     if self.db.is_read_only() {
                         show_readonly_toast(&ctx);
                     } else {
@@ -1012,7 +955,10 @@ impl crate::widgets::Widget for TablePickerWidget {
                     }
                     return true;
                 }
-                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('n')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && self.db.capabilities().create_collection =>
+                {
                     self.show_create_table(ctx);
                     return true;
                 }
@@ -1026,25 +972,96 @@ impl crate::widgets::Widget for TablePickerWidget {
         if let Some(created) = event.payload::<TableCreatedEvent>() {
             tracing::debug!(table = %created.table_name, "table_created");
             self.reload_tables(ctx);
+            return;
+        }
+        // Keep the list selection in sync as the schema popup pages through tables.
+        if let Some(nav) = event.payload::<SchemaNavEvent>() {
+            let mut state = self.state.borrow_mut();
+            if let Some(pos) = state
+                .filtered_indices
+                .iter()
+                .position(|idx| state.tables.get(*idx).is_some_and(|e| e.name == nav.table))
+            {
+                state.table_state.select(Some(pos));
+                state.clamp_offset();
+                drop(state);
+                ctx.invalidate();
+            }
         }
     }
 
     fn help(&self) -> Option<&[help::Entry<'_>]> {
         let state = self.state.borrow();
-        let filter_active = state.filter.is_active();
-        let filter_applied = !state.filter.value.is_empty();
-        if filter_active {
+        if state.filter.is_active() {
             Some(Self::HELP_FILTER_EDIT)
-        } else if filter_applied {
-            Some(Self::HELP_FILTER_APPLIED)
+        } else if !state.filter.value.is_empty() {
+            Some(&self.help_filter_applied)
         } else {
-            Some(Self::HELP)
+            Some(&self.help_base)
         }
     }
 
     fn suppress_global_help(&self) -> bool {
         self.state.borrow().filter.is_active()
     }
+}
+
+/// A plain (no-modifier) help entry.
+fn help_entry(keys: &'static str, short: &'static str, long: &'static str) -> help::Entry<'static> {
+    help::Entry {
+        keys: Cow::Borrowed(keys),
+        short: Cow::Borrowed(short),
+        long: Cow::Borrowed(long),
+        ctrl: None,
+        shift: None,
+        alt: None,
+    }
+}
+
+/// A Ctrl-modified help entry.
+fn help_ctrl(keys: &'static str, short: &'static str, long: &'static str) -> help::Entry<'static> {
+    help::Entry {
+        keys: Cow::Borrowed(""),
+        short: Cow::Borrowed(""),
+        long: Cow::Borrowed(""),
+        ctrl: Some(help::Variant {
+            keys: Some(Cow::Borrowed(keys)),
+            short: Some(Cow::Borrowed(short)),
+            long: Some(Cow::Borrowed(long)),
+        }),
+        shift: None,
+        alt: None,
+    }
+}
+
+/// The picker's help line, tuned to the backend's capabilities. `applied` is the
+/// variant shown when a filter is already in effect.
+fn build_help(
+    caps: &dynamate::core::capabilities::Capabilities,
+    applied: bool,
+) -> Vec<help::Entry<'static>> {
+    let mut entries = Vec::new();
+    if applied {
+        entries.push(help_entry("/", "filter", "Edit filter"));
+        entries.push(help_entry("esc", "clear filter", "Clear filter"));
+    } else {
+        entries.push(help_entry("/", "filter", "Filter tables"));
+    }
+    entries.push(help_entry("⏎", "select", "Open table"));
+    entries.push(help_entry("j/k/↑/↓/PgUp/PgDn", "move", "Move selection"));
+    entries.push(help_entry("⇥", "schema", "View schema"));
+    if caps.raw_query {
+        entries.push(help_entry("q", "query", "Run SQL query"));
+    }
+    if caps.create_collection {
+        entries.push(help_ctrl("^n", "new", "Create table"));
+    }
+    entries.push(help_ctrl("^r", "refresh", "Refresh tables"));
+    entries.push(help_ctrl("^d", "delete", "Delete table"));
+    if caps.purge {
+        entries.push(help_ctrl("^p", "purge", "Purge table"));
+    }
+    entries
 }
 
 fn table_meta_from(schema: &dynamate::core::schema::CollectionSchema) -> TableMeta {
@@ -1062,6 +1079,21 @@ fn table_meta_from(schema: &dynamate::core::schema::CollectionSchema) -> TableMe
 
 fn format_count(count: Option<i64>) -> String {
     count.map_or_else(|| "—".to_string(), |value| value.to_string())
+}
+
+/// The comma-joined primary-key column names of a SQL table (or `—` if none).
+fn sql_primary_key(schema: &CollectionSchema) -> String {
+    if schema.key.fields.is_empty() {
+        "—".to_string()
+    } else {
+        schema
+            .key
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn format_table_count(count: usize) -> String {

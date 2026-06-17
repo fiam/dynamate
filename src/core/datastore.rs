@@ -74,4 +74,25 @@ pub trait Datastore: Send + Sync {
     async fn explain(&self, _name: &str, _plan: &QueryPlan) -> PlanExplanation {
         PlanExplanation::Unknown
     }
+
+    /// Run a free-form, database-level query (e.g. a SQL `SELECT` across tables),
+    /// returning rows as neutral items. Only supported when
+    /// [`Capabilities::raw_query`](super::capabilities::Capabilities::raw_query)
+    /// is set.
+    async fn raw_query(&self, _query: &str, _page: Page) -> Result<QueryResult> {
+        Err(super::error::DbError::Unsupported(
+            "this backend has no free-form query",
+        ))
+    }
+
+    /// The query language for the free-form query view, when supported.
+    fn raw_query_language(&self) -> Option<&dyn QueryLanguage> {
+        None
+    }
+
+    /// Table and column names offered as autocompletion in the free-form query
+    /// view, grouped so completion can be context-aware.
+    async fn schema_hints(&self) -> Result<super::schema::SchemaHints> {
+        Ok(super::schema::SchemaHints::default())
+    }
 }

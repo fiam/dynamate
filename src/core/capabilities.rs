@@ -25,11 +25,22 @@ pub struct Capabilities {
     pub secondary_indexes: SecondaryIndexSupport,
     pub create_collection: bool,
     pub drop_collection: bool,
-    /// Supports bulk delete (the "purge" action).
+    /// Supports bulk delete of arbitrary keys (used to delete a multi-selection).
     pub batch_delete: bool,
+    /// Offers the "purge" action (delete every item in a collection). Backends
+    /// where a native bulk operation is the right tool (SQL `TRUNCATE`/`DELETE`)
+    /// leave this off so the action is hidden.
+    pub purge: bool,
+    /// Supports querying by selecting a named index + key value (the index
+    /// picker). Meaningful for key/document stores; SQL filters with `WHERE`
+    /// instead, so it leaves this off.
+    pub index_query: bool,
     pub ttl: bool,
     /// Reports an examined/scanned count distinct from the returned count.
     pub scanned_count: bool,
     /// Reports query cost (e.g. consumed capacity).
     pub consumed_capacity: bool,
+    /// Supports a free-form database-level query (SQL `SELECT …` across tables).
+    /// Drives the table picker's query view.
+    pub raw_query: bool,
 }
